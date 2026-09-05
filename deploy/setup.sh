@@ -153,6 +153,12 @@ if ! id -u "$APP_USER" >/dev/null 2>&1; then
 fi
 
 echo "==> Получаю код приложения..."
+# После первого запуска $APP_DIR принадлежит системному пользователю wms
+# (chown ниже), а git-команды здесь выполняются от root — начиная с
+# git 2.35.2 это considered "dubious ownership" и git отказывается
+# работать с репозиторием без явного разрешения. Разрешаем один раз;
+# повторный вызов --add идемпотентен (не дублирует запись).
+git config --global --add safe.directory "$APP_DIR"
 if [ -d "$APP_DIR/.git" ]; then
   git -C "$APP_DIR" fetch origin "$BRANCH"
   git -C "$APP_DIR" checkout "$BRANCH"
