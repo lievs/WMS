@@ -11,61 +11,109 @@
   </div>
 </div>
 
-{% for mp in marketplaces %}
-<div class="card p-3 mb-4">
-  <h4>{{ mp.label }}</h4>
-
-  {% if not mp.plan %}
-    <p class="text-muted">План еще не загружен.</p>
-  {% else %}
-    <p class="text-muted small mb-3">
-      Лист «{{ mp.plan.sheet_name }}», загружен {{ mp.plan.uploaded_at.strftime('%d.%m.%Y %H:%M') }}
-      {% if mp.plan.uploaded_by %}({{ mp.plan.uploaded_by.display_name() }}){% endif %}
-      — план {{ mp.total_planned | round(0) }}, выполнено {{ mp.total_fulfilled | round(0) }}
-      ({{ (100 * mp.total_fulfilled / mp.total_planned) | round(1) if mp.total_planned else 0 }}%)
-    </p>
-
-    <h6>По городам</h6>
-    <div class="table-responsive mb-4">
-      <table class="table table-sm">
-        <thead><tr><th>Город</th><th>План</th><th>Выполнено</th><th>Осталось</th><th>%</th></tr></thead>
-        <tbody>
-        {% for row in mp.cities %}
-          <tr>
-            <td>{{ row.warehouse.marketplace_city }}</td>
-            <td>{{ row.planned | round(0) }}</td>
-            <td>{{ row.fulfilled | round(0) }}</td>
-            <td>{{ (row.planned - row.fulfilled) | round(0) }}</td>
-            <td>{{ (100 * row.fulfilled / row.planned) | round(1) if row.planned else 0 }}%</td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
+<div class="row g-3 mb-4">
+  {% for mp in marketplaces %}
+  <div class="col-md-6">
+    <div class="card p-3 h-100">
+      <h4>{{ mp.label }}</h4>
+      {% if not mp.plan %}
+        <p class="text-muted mb-0">План еще не загружен.</p>
+      {% else %}
+        <p class="text-muted small mb-2">
+          Лист «{{ mp.plan.sheet_name }}», загружен {{ mp.plan.uploaded_at.strftime('%d.%m.%Y %H:%M') }}
+          {% if mp.plan.uploaded_by %}({{ mp.plan.uploaded_by.display_name() }}){% endif %}
+        </p>
+        <p class="mb-2">
+          План <b>{{ mp.total_planned | round(0) }}</b> —
+          выполнено <b>{{ mp.total_fulfilled | round(0) }}</b>
+          ({{ (100 * mp.total_fulfilled / mp.total_planned) | round(1) if mp.total_planned else 0 }}%)
+          {% if mp.problems_count %}
+            — <span class="badge bg-danger">{{ mp.problems_count }} без остатка на складе</span>
+          {% endif %}
+        </p>
+        <table class="table table-sm mb-0" style="max-width:420px">
+          <thead><tr><th>Город</th><th>План</th><th>Ост.</th><th>%</th></tr></thead>
+          <tbody>
+          {% for row in mp.cities %}
+            <tr>
+              <td>{{ row.warehouse.marketplace_city }}</td>
+              <td>{{ row.planned | round(0) }}</td>
+              <td>{{ (row.planned - row.fulfilled) | round(0) }}</td>
+              <td>{{ (100 * row.fulfilled / row.planned) | round(0) if row.planned else 0 }}%</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
     </div>
-
-    <h6>Проблемные позиции <span class="text-muted small">(осталось отгрузить, но нечем)</span></h6>
-    {% if not mp.problems %}
-      <p class="text-muted">Нет — все, что осталось по плану, есть на складе-отправителе.</p>
-    {% else %}
-    <div class="table-responsive">
-      <table class="table table-sm">
-        <thead><tr><th>Артикул</th><th>Размер</th><th>Штрихкод</th><th>Город</th><th>Осталось по плану</th><th>Проблема</th></tr></thead>
-        <tbody>
-        {% for line, problem in mp.problems %}
-          <tr>
-            <td>{{ line.article }}</td>
-            <td>{{ line.size }}</td>
-            <td>{{ line.barcode }}</td>
-            <td>{{ line.warehouse.marketplace_city }}</td>
-            <td>{{ line.remaining_qty() | round(0) }}</td>
-            <td><span class="badge bg-danger">{{ problem }}</span></td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% endif %}
-  {% endif %}
+  </div>
+  {% endfor %}
 </div>
+
+{% for mp in marketplaces %}
+{% if mp.plan and mp.picking_list %}
+<div class="card p-3 mb-4">
+  <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+    <h5 class="mb-0">{{ mp.label }} — что нужно отправить <span class="text-muted small">(осталось по плану, {{ mp.picking_list|length }} поз.)</span></h5>
+    <input type="text" class="form-control form-control-sm" style="max-width:260px" placeholder="Поиск по артикулу/штрихкоду..." data-picking-search="{{ mp.marketplace }}">
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover" id="picking-{{ mp.marketplace }}">
+      <thead>
+        <tr>
+          <th>Артикул</th>
+          <th>Размер</th>
+          <th>Штрихкод</th>
+          <th></th>
+          {% for city in mp.city_names %}<th class="text-end">{{ city }}</th>{% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+      {% for p in mp.picking_list %}
+        <tr{% if p.no_stock %} class="table-danger"{% endif %} data-search-text="{{ (p.article or '') ~ ' ' ~ p.barcode }}">
+          <td>{{ p.article }}</td>
+          <td>{{ p.size }}</td>
+          <td>{{ p.barcode }}</td>
+          <td class="text-nowrap">{% if p.no_stock %}<span class="badge bg-danger" title="Нет на складе-отправителе">нет на складе</span>{% endif %}</td>
+          {% for city in mp.city_names %}
+            {% set line = p.per_city.get(city) %}
+            <td class="text-end">
+              {% if not line %}
+                <span class="text-muted">—</span>
+              {% elif line.remaining_qty() <= 0 %}
+                <span class="text-muted">0</span>
+              {% else %}
+                <b>{{ line.remaining_qty() | round(0) }}</b>
+              {% endif %}
+            </td>
+          {% endfor %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% elif mp.plan %}
+<div class="card p-3 mb-4">
+  <h5>{{ mp.label }}</h5>
+  <p class="text-muted mb-0">Весь план выполнен — отправлять больше нечего.</p>
+</div>
+{% endif %}
 {% endfor %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.querySelectorAll("[data-picking-search]").forEach(function (input) {
+    var table = document.getElementById("picking-" + input.dataset.pickingSearch);
+    if (!table) return;
+    input.addEventListener("input", function () {
+      var q = input.value.trim().toLowerCase();
+      table.querySelectorAll("tbody tr").forEach(function (tr) {
+        var text = (tr.dataset.searchText || "").toLowerCase();
+        tr.hidden = q.length > 0 && text.indexOf(q) === -1;
+      });
+    });
+  });
+</script>
 {% endblock %}

@@ -200,16 +200,37 @@ def dashboard():
             row["planned"] += line.planned_qty
             row["fulfilled"] += line.fulfilled_qty
         cities = sorted(by_warehouse.values(), key=lambda r: r["warehouse"].marketplace_city)
+        city_names = [row["warehouse"].marketplace_city for row in cities]
 
-        problems = []
+        # Свод по товару сразу по всем городам — так, как сборщик привык видеть
+        # план (одна строка на артикул/размер, город — колонкой), а не по одной
+        # строке на каждую пару товар-город. Показываем только то, что еще не
+        # довезено хотя бы в один город — выполненные позиции сборщику видеть
+        # незачем, только загромождают список.
+        products = {}
         for line in lines:
-            if line.remaining_qty() <= 0:
-                continue
-            if line.nomenclature_id is None:
-                problems.append((line, "Штрихкод не найден в номенклатуре"))
-            elif stock.get(line.nomenclature_id, 0) <= 0:
-                problems.append((line, "Нет на складе-отправителе"))
-        problems.sort(key=lambda p: p[0].article or "")
+            key = line.barcode
+            product = products.setdefault(
+                key,
+                {
+                    "barcode": line.barcode,
+                    "article": line.article,
+                    "size": line.size,
+                    "nomenclature": line.nomenclature,
+                    "no_stock": line.nomenclature_id is None
+                    or stock.get(line.nomenclature_id, 0) <= 0,
+                    "per_city": {},
+                    "max_remaining": 0,
+                },
+            )
+            product["per_city"][line.warehouse.marketplace_city] = line
+            product["max_remaining"] = max(product["max_remaining"], line.remaining_qty())
+
+        picking_list = sorted(
+            (p for p in products.values() if p["max_remaining"] > 0),
+            key=lambda p: (p["article"] or "", p["size"] or ""),
+        )
+        problems_count = sum(1 for p in picking_list if p["no_stock"])
 
         total_planned = sum(line.planned_qty for line in lines)
         total_fulfilled = sum(line.fulfilled_qty for line in lines)
@@ -220,7 +241,9 @@ def dashboard():
                 "label": MARKETPLACE_LABELS[marketplace],
                 "plan": plan,
                 "cities": cities,
-                "problems": problems,
+                "city_names": city_names,
+                "picking_list": picking_list,
+                "problems_count": problems_count,
                 "total_planned": total_planned,
                 "total_fulfilled": total_fulfilled,
             }
