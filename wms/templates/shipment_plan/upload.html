@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Загрузка плана отгрузок{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('shipment_plan.dashboard') }}">&larr; План отгрузок</a></p>
+<h3 class="mb-4">Загрузка плана отгрузок</h3>
+
+<div class="card p-3" style="max-width:560px">
+  <ol class="mb-3">
+    <li>Выгрузите файл с листами «Распределение ОЗОН ФБС ...» и/или «Распределение ВБ ФБС ...» (можно оба сразу в одном файле)</li>
+    <li>Загрузите файл ниже — программа сама найдет нужные листы по названию</li>
+  </ol>
+  <p class="text-muted small">Новый план полностью заменяет предыдущий по каждому маркетплейсу — план и выполнение по нему начинаются заново на новый период (история за прошлый период не хранится).</p>
+  <form method="post" enctype="multipart/form-data">
+    <div class="mb-3">
+      <input type="file" name="file" class="form-control" accept=".xlsx" required>
+    </div>
+    <button type="submit" class="btn btn-primary">Загрузить</button>
+  </form>
+</div>
+{% endblock %}

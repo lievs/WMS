@@ -37,6 +37,7 @@
         <li class="nav-item"><a class="nav-link" href="{{ url_for('inventory.list_documents') }}">Инвентаризация</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('production.index') }}">Производство</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('reports.index') }}">Отчеты</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('shipment_plan.dashboard') }}">План отгрузок</a></li>
         {% if current_user.is_admin %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('auth.users') }}">Пользователи</a></li>
         {% endif %}

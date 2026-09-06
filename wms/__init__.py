@@ -3,7 +3,7 @@ import secrets
 
 from flask import Flask, redirect, request, url_for
 from flask_login import current_user
-from sqlalchemy import event
+from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Engine
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -13,6 +13,32 @@ from .paths import resource_dir
 
 
 _sqlite_functions_registered = False
+
+
+def _ensure_columns():
+    """db.create_all() создает только отсутствующие ТАБЛИЦЫ — если в модель
+    существующей таблицы добавили новое поле, на уже работающем сервере (где
+    таблица уже есть, но без этой колонки) оно само не появится, и первый же
+    запрос к нему упадет с "no such column". Здесь по каждой модели сверяем
+    колонки с тем, что реально есть в БД, и недостающие добавляем ALTER TABLE
+    (полноценный Alembic для проекта такого размера избыточен)."""
+    inspector = inspect(db.engine)
+    for table in db.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue
+        existing = {col["name"] for col in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in existing:
+                continue
+            col_type = column.type.compile(db.engine.dialect)
+            try:
+                with db.engine.begin() as conn:
+                    conn.execute(
+                        text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {col_type}')
+                    )
+                print(f"[schema] Добавлена колонка {table.name}.{column.name}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[schema] Не удалось добавить {table.name}.{column.name}: {exc}")
 
 
 def _register_sqlite_tuning():
@@ -102,6 +128,7 @@ def create_app(config_class=Config):
     from .blueprints.reports import bp as reports_bp
     from .blueprints.production import bp as production_bp
     from .blueprints.api import bp as api_bp
+    from .blueprints.shipment_plan import bp as shipment_plan_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(main_bp)
@@ -116,12 +143,14 @@ def create_app(config_class=Config):
     app.register_blueprint(reports_bp, url_prefix="/reports")
     app.register_blueprint(production_bp, url_prefix="/production")
     app.register_blueprint(api_bp, url_prefix="/api")
+    app.register_blueprint(shipment_plan_bp, url_prefix="/shipment-plan")
 
     with app.app_context():
         from . import models  # noqa: F401
         from .utils.categorize import bootstrap_categories
 
         db.create_all()
+        _ensure_columns()
         _bootstrap_admin()
         bootstrap_categories()
 

@@ -4,12 +4,24 @@ from flask import Blueprint, Response, flash, redirect, render_template, request
 from flask_login import current_user
 
 from ..extensions import db
-from ..models import Box, Cell, MovementDocument, MovementLine, Warehouse
+from ..models import Box, Cell, MovementDocument, MovementLine, ShipmentPlanLine, Warehouse
 from ..utils.excel_io import export_movement_to_excel, timestamp_for_filename
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 
 bp = Blueprint("movement", __name__)
+
+
+def _apply_shipment_fulfillment(box, warehouse_id):
+    """Если короб приехал на склад-город из плана отгрузок (см.
+    shipment_plan) — дописывает выполнение плана по товарам в этом коробе.
+    Для обычных складов (не из плана) не находит ни одной строки — no-op."""
+    for item in box.items:
+        plan_line = ShipmentPlanLine.query.filter_by(
+            warehouse_id=warehouse_id, nomenclature_id=item.nomenclature_id
+        ).first()
+        if plan_line:
+            plan_line.fulfilled_qty += item.qty
 
 
 @bp.route("/")
@@ -159,6 +171,7 @@ def complete(doc_id):
         box.warehouse_id = doc.to_warehouse_id
         box.cell_id = line.to_cell_id
         box.status = "stored" if line.to_cell_id else "open"
+        _apply_shipment_fulfillment(box, doc.to_warehouse_id)
 
     doc.status = "completed"
     doc.completed_at = datetime.utcnow()

@@ -363,5 +363,46 @@ def export_inventory_to_excel(documents) -> bytes:
     return buffer.getvalue()
 
 
+SHIPMENT_PLAN_HEADERS = [
+    "Маркетплейс",
+    "Город (склад)",
+    "Артикул",
+    "Размер",
+    "Штрихкод",
+    "Товар в номенклатуре",
+    "План",
+    "Выполнено",
+    "Осталось",
+]
+
+
+def export_shipment_plan_to_excel(lines) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "План отгрузок"
+    _style_header(ws, SHIPMENT_PLAN_HEADERS)
+
+    marketplace_labels = {"ozon": "ОЗОН", "wb": "ВБ"}
+
+    for line in lines:
+        ws.append(
+            [
+                marketplace_labels.get(line.plan.marketplace, line.plan.marketplace),
+                line.warehouse.marketplace_city if line.warehouse else "",
+                line.article,
+                line.size,
+                line.barcode,
+                line.nomenclature.name if line.nomenclature else "— нет в номенклатуре —",
+                line.planned_qty,
+                line.fulfilled_qty,
+                line.remaining_qty(),
+            ]
+        )
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
 def timestamp_for_filename() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")

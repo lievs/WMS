@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}План отгрузок{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h3 class="mb-0">План отгрузок</h3>
+  <div>
+    <a class="btn btn-outline-secondary" href="{{ url_for('shipment_plan.export_all') }}">📊 Выгрузить в Excel</a>
+    {% if current_user.is_admin %}
+    <a class="btn btn-primary" href="{{ url_for('shipment_plan.upload') }}">⬆ Загрузить план</a>
+    {% endif %}
+  </div>
+</div>
+
+{% for mp in marketplaces %}
+<div class="card p-3 mb-4">
+  <h4>{{ mp.label }}</h4>
+
+  {% if not mp.plan %}
+    <p class="text-muted">План еще не загружен.</p>
+  {% else %}
+    <p class="text-muted small mb-3">
+      Лист «{{ mp.plan.sheet_name }}», загружен {{ mp.plan.uploaded_at.strftime('%d.%m.%Y %H:%M') }}
+      {% if mp.plan.uploaded_by %}({{ mp.plan.uploaded_by.display_name() }}){% endif %}
+      — план {{ mp.total_planned | round(0) }}, выполнено {{ mp.total_fulfilled | round(0) }}
+      ({{ (100 * mp.total_fulfilled / mp.total_planned) | round(1) if mp.total_planned else 0 }}%)
+    </p>
+
+    <h6>По городам</h6>
+    <div class="table-responsive mb-4">
+      <table class="table table-sm">
+        <thead><tr><th>Город</th><th>План</th><th>Выполнено</th><th>Осталось</th><th>%</th></tr></thead>
+        <tbody>
+        {% for row in mp.cities %}
+          <tr>
+            <td>{{ row.warehouse.marketplace_city }}</td>
+            <td>{{ row.planned | round(0) }}</td>
+            <td>{{ row.fulfilled | round(0) }}</td>
+            <td>{{ (row.planned - row.fulfilled) | round(0) }}</td>
+            <td>{{ (100 * row.fulfilled / row.planned) | round(1) if row.planned else 0 }}%</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <h6>Проблемные позиции <span class="text-muted small">(осталось отгрузить, но нечем)</span></h6>
+    {% if not mp.problems %}
+      <p class="text-muted">Нет — все, что осталось по плану, есть на складе-отправителе.</p>
+    {% else %}
+    <div class="table-responsive">
+      <table class="table table-sm">
+        <thead><tr><th>Артикул</th><th>Размер</th><th>Штрихкод</th><th>Город</th><th>Осталось по плану</th><th>Проблема</th></tr></thead>
+        <tbody>
+        {% for line, problem in mp.problems %}
+          <tr>
+            <td>{{ line.article }}</td>
+            <td>{{ line.size }}</td>
+            <td>{{ line.barcode }}</td>
+            <td>{{ line.warehouse.marketplace_city }}</td>
+            <td>{{ line.remaining_qty() | round(0) }}</td>
+            <td><span class="badge bg-danger">{{ problem }}</span></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  {% endif %}
+</div>
+{% endfor %}
+{% endblock %}

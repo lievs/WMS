@@ -99,6 +99,13 @@ class Warehouse(db.Model):
     name = db.Column(db.String(200), nullable=False)
     address = db.Column(db.String(300))
     is_active = db.Column(db.Boolean, nullable=False, default=True)
+    # Заполнено только для складов-городов, созданных автоматически при
+    # загрузке плана отгрузок (см. ShipmentPlan) — "ozon"/"wb". У обычных
+    # физических складов оба поля пустые. marketplace_city хранит исходное
+    # название города из файла плана, чтобы при повторной загрузке находить
+    # тот же склад, а не плодить дубликаты каждые 2 недели.
+    marketplace = db.Column(db.String(20), nullable=True)
+    marketplace_city = db.Column(db.String(100), nullable=True)
 
     cells = db.relationship("Cell", backref="warehouse", lazy="dynamic")
 
@@ -473,3 +480,52 @@ class InventoryScannedBox(db.Model):
     __table_args__ = (
         db.UniqueConstraint("document_id", "box_id", name="uq_inventory_doc_box"),
     )
+
+
+class ShipmentPlan(db.Model):
+    """План отгрузок по маркетплейсу (ОЗОН/ВБ) — по одной строке на
+    маркетплейс. Каждая новая загрузка файла полностью заменяет строки
+    (ShipmentPlanLine) этого плана, сама запись плана переиспользуется."""
+
+    __tablename__ = "shipment_plans"
+
+    id = db.Column(db.Integer, primary_key=True)
+    marketplace = db.Column(db.String(20), unique=True, nullable=False)  # "ozon" | "wb"
+    sheet_name = db.Column(db.String(200))
+    uploaded_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    uploaded_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+
+    uploaded_by = db.relationship("User")
+    lines = db.relationship(
+        "ShipmentPlanLine", backref="plan", lazy="dynamic", cascade="all, delete-orphan"
+    )
+
+
+class ShipmentPlanLine(db.Model):
+    """Одна позиция плана: сколько штук штрихкода X нужно отгрузить на
+    склад-город Y. fulfilled_qty дописывается автоматически при проведении
+    перемещения на этот склад (см. movement.complete) — не берется из файла."""
+
+    __tablename__ = "shipment_plan_lines"
+
+    id = db.Column(db.Integer, primary_key=True)
+    plan_id = db.Column(db.Integer, db.ForeignKey("shipment_plans.id"), nullable=False)
+    warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=False)
+    # Пусто, если штрихкод из плана не найден в номенклатуре — строка все
+    # равно сохраняется, чтобы такие позиции было видно на дашборде.
+    nomenclature_id = db.Column(db.Integer, db.ForeignKey("nomenclature.id"), nullable=True)
+    barcode = db.Column(db.String(50), nullable=False)
+    article = db.Column(db.String(200))
+    size = db.Column(db.String(50))
+    planned_qty = db.Column(db.Float, nullable=False, default=0)
+    fulfilled_qty = db.Column(db.Float, nullable=False, default=0)
+
+    warehouse = db.relationship("Warehouse")
+    nomenclature = db.relationship("Nomenclature")
+
+    __table_args__ = (
+        db.UniqueConstraint("plan_id", "warehouse_id", "barcode", name="uq_plan_warehouse_barcode"),
+    )
+
+    def remaining_qty(self):
+        return max(self.planned_qty - self.fulfilled_qty, 0)
