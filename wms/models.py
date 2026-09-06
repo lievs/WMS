@@ -494,6 +494,10 @@ class ShipmentPlan(db.Model):
     sheet_name = db.Column(db.String(200))
     uploaded_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     uploaded_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    # Дата начала периода — разобрана из названия листа ("...от 27.08"),
+    # см. utils.shipment_plan_import.extract_period_start. Пусто, если в
+    # названии листа не нашлось даты. Период считается равным 14 дням.
+    period_start = db.Column(db.Date, nullable=True)
 
     uploaded_by = db.relationship("User")
     lines = db.relationship(

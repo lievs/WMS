@@ -31,6 +31,38 @@
             — <span class="badge bg-danger">{{ mp.problems_count }} без остатка на складе</span>
           {% endif %}
         </p>
+
+        {% if not mp.pace %}
+          <p class="text-muted small">Не удалось определить дату начала периода из названия листа («{{ mp.plan.sheet_name }}») — темп не считаем.</p>
+        {% else %}
+          {% set pace = mp.pace %}
+          <div class="alert py-2 px-3 mb-2
+            {%- if pace.status == 'done' %} alert-success
+            {%- elif pace.status == 'on_track' %} alert-success
+            {%- elif pace.status == 'behind' %} alert-danger
+            {%- elif pace.status == 'overdue' %} alert-danger
+            {%- else %} alert-secondary{% endif %}">
+            <b>Период:</b> {{ mp.plan.period_start.strftime('%d.%m') }}–{{ pace.deadline.strftime('%d.%m') }}
+            (прошло {{ pace.days_elapsed }} дн., {% if pace.days_left > 0 %}осталось {{ pace.days_left }} дн.{% else %}срок истёк {{ -pace.days_left }} дн. назад{% endif %})
+            <br>
+            {% if pace.status == 'done' %}
+              ✅ План уже выполнен полностью.
+            {% elif pace.status == 'no_data' %}
+              ⏳ Пока нет отгрузок за период — темп посчитать не из чего.
+            {% elif pace.status == 'overdue' %}
+              ⚠ Срок (14 дней) истёк, а осталось отгрузить <b>{{ pace.remaining | round(0) }}</b> шт.
+            {% elif pace.status == 'on_track' %}
+              ✅ Успеваем — при темпе <b>{{ pace.rate | round(1) }} шт/день</b> на остаток ({{ pace.remaining | round(0) }} шт) уйдёт ещё
+              <b>~{{ pace.days_needed | round(1) }} дн.</b>, а времени до срока — {{ pace.days_left }} дн.
+            {% else %}
+              ⚠ Не успеваем при текущем темпе — <b>{{ pace.rate | round(1) }} шт/день</b> даёт
+              <b>~{{ pace.days_needed | round(1) }} дн.</b> на остаток ({{ pace.remaining | round(0) }} шт),
+              а до срока осталось {{ pace.days_left }} дн. Нужно ускориться минимум до
+              <b>{{ pace.required_rate | round(1) }} шт/день</b>.
+            {% endif %}
+          </div>
+        {% endif %}
+
         <table class="table table-sm mb-0" style="max-width:420px">
           <thead><tr><th>Город</th><th>План</th><th>Ост.</th><th>%</th></tr></thead>
           <tbody>

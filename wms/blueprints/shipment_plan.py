@@ -1,3 +1,5 @@
+from datetime import date, timedelta
+
 from flask import Blueprint, Response, flash, redirect, render_template, request, url_for
 from flask_login import current_user
 from sqlalchemy import func
@@ -15,12 +17,13 @@ from ..models import (
 from ..utils.excel_io import export_shipment_plan_to_excel, timestamp_for_filename
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
-from ..utils.shipment_plan_import import parse_plan_sheet
+from ..utils.shipment_plan_import import extract_period_start, parse_plan_sheet
 
 bp = Blueprint("shipment_plan", __name__)
 
 MARKETPLACES = ("ozon", "wb")
 MARKETPLACE_LABELS = {"ozon": "ОЗОН", "wb": "ВБ"}
+PERIOD_DAYS = 14
 
 
 def _get_or_create_city_warehouse(marketplace, city_name):
@@ -47,6 +50,7 @@ def _apply_plan(marketplace, parsed):
 
     plan.sheet_name = parsed.sheet_name
     plan.uploaded_by_id = current_user.id
+    plan.period_start = extract_period_start(parsed.sheet_name)
 
     plan.lines.delete()
 
@@ -179,6 +183,48 @@ def _stock_by_nomenclature(warehouse_ids):
     return stock
 
 
+def _pace_analysis(plan, total_planned, total_fulfilled):
+    """Успеваем ли отгрузить план за 14 дней с даты из названия листа, и
+    сколько дней потребуется при сегодняшнем темпе. Темп считается как
+    среднее "выполнено / дней с начала периода" — то есть за весь период,
+    включая факт, уже отгруженный на момент выгрузки файла (см.
+    ShipmentPlanLine.fulfilled_qty), а не только то, что прошло через WMS."""
+    if not plan.period_start:
+        return None
+
+    today = date.today()
+    days_elapsed = (today - plan.period_start).days
+    deadline = plan.period_start + timedelta(days=PERIOD_DAYS)
+    days_left = (deadline - today).days
+    remaining = max(total_planned - total_fulfilled, 0)
+
+    rate = total_fulfilled / days_elapsed if days_elapsed > 0 else None
+    days_needed = remaining / rate if rate and rate > 0 else None
+    required_rate = remaining / days_left if days_left > 0 else None
+
+    if remaining <= 0:
+        status = "done"
+    elif days_left <= 0:
+        status = "overdue"
+    elif rate is None or rate <= 0:
+        status = "no_data"
+    elif days_needed <= days_left:
+        status = "on_track"
+    else:
+        status = "behind"
+
+    return {
+        "deadline": deadline,
+        "days_elapsed": days_elapsed,
+        "days_left": days_left,
+        "rate": rate,
+        "required_rate": required_rate,
+        "days_needed": days_needed,
+        "remaining": remaining,
+        "status": status,
+    }
+
+
 @bp.route("/")
 def dashboard():
     plans = {p.marketplace: p for p in ShipmentPlan.query.all()}
@@ -239,6 +285,7 @@ def dashboard():
 
         total_planned = sum(line.planned_qty for line in lines)
         total_fulfilled = sum(line.fulfilled_qty for line in lines)
+        pace = _pace_analysis(plan, total_planned, total_fulfilled)
 
         marketplaces_data.append(
             {
@@ -251,6 +298,7 @@ def dashboard():
                 "problems_count": problems_count,
                 "total_planned": total_planned,
                 "total_fulfilled": total_fulfilled,
+                "pace": pace,
             }
         )
 

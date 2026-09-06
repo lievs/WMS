@@ -8,7 +8,31 @@
 подпись не похожа на служебную ("остатки", "отгружен / в пути" и т.п.).
 """
 
+import re
+from datetime import date
+
 from openpyxl import load_workbook
+
+_PERIOD_START_RE = re.compile(r"от\s+(\d{1,2})\.(\d{1,2})")
+
+
+def extract_period_start(sheet_name, today=None):
+    """Дата начала периода плана из названия листа ("...от 27.08" -> 27
+    августа). Год не указан в файле — берем текущий, а если получившаяся
+    дата вышла в будущем больше чем на месяц (переход через Новый год,
+    например план от 28.12 гружен уже в январе) — откатываем на год назад."""
+    match = _PERIOD_START_RE.search(sheet_name or "")
+    if not match:
+        return None
+    day, month = int(match.group(1)), int(match.group(2))
+    today = today or date.today()
+    try:
+        result = date(today.year, month, day)
+    except ValueError:
+        return None
+    if (result - today).days > 31:
+        result = date(today.year - 1, month, day)
+    return result
 
 # Подписи служебных/общих колонок (не города): и суб-колонки под городом
 # (остаток/факт маркетплейса), и общие метаданные товара, которые могут
