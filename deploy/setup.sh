@@ -7,12 +7,12 @@
 # По умолчанию домен вида <IP>.sslip.io — не требует покупки своего домена,
 # sslip.io просто резолвит это имя в IP сервера:
 #
-#   curl -fsSL https://raw.githubusercontent.com/meviarjob-prog/wms/claude/wms-system-python-t1db0u/deploy/setup.sh | bash -s -- you@example.com
+#   curl -fsSL https://raw.githubusercontent.com/lievs/WMS/claude/wms-system-python-t1db0u/deploy/setup.sh | bash -s -- you@example.com
 #
 # Email необязателен (нужен только для писем от Let's Encrypt об истечении
 # сертификата, сам сертификат он не ограничивает):
 #
-#   curl -fsSL https://raw.githubusercontent.com/meviarjob-prog/wms/claude/wms-system-python-t1db0u/deploy/setup.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/lievs/WMS/claude/wms-system-python-t1db0u/deploy/setup.sh | bash
 #
 # Если есть свой домен, подключенный к Cloudflare (например, чтобы обойти
 # блокировку IP хостинг-провайдера у некоторых операторов) — задайте
@@ -35,7 +35,7 @@
 
 set -euo pipefail
 
-REPO_URL="https://github.com/meviarjob-prog/wms.git"
+REPO_URL="https://github.com/lievs/WMS.git"
 BRANCH="claude/wms-system-python-t1db0u"
 APP_DIR="/opt/wms"
 APP_USER="wms"

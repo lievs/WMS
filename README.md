@@ -260,7 +260,7 @@ $env:WMS_HTTPS="1"; python run.py
 3. Внутри сервера выполните одну команду (замените e-mail на свой — он
    нужен только для уведомлений об истечении сертификата, необязателен):
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/meviarjob-prog/wms/claude/wms-system-python-t1db0u/deploy/setup.sh | bash -s -- you@example.com
+   curl -fsSL https://raw.githubusercontent.com/lievs/WMS/claude/wms-system-python-t1db0u/deploy/setup.sh | bash -s -- you@example.com
    ```
    Скрипт сам поставит всё необходимое (nginx, Python-зависимости, systemd,
    HTTPS-сертификат) — это займёт пару минут. В конце он выведет:
@@ -291,7 +291,7 @@ $env:WMS_HTTPS="1"; python run.py
    окружения — своим доменом (можно поддомен, например `wms.вашдомен.ru`) и
    токеном с шага 1:
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/meviarjob-prog/wms/claude/wms-system-python-t1db0u/deploy/setup.sh | \
+   curl -fsSL https://raw.githubusercontent.com/lievs/WMS/claude/wms-system-python-t1db0u/deploy/setup.sh | \
      WMS_DOMAIN=wms.вашдомен.ru WMS_CF_API_TOKEN=вставьте_токен bash -s -- you@example.com
    ```
    Скрипт сам создаст (или обновит) A-запись на этот домен, указывающую на
