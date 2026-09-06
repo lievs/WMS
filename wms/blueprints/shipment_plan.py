@@ -69,6 +69,7 @@ def _apply_plan(marketplace, parsed):
         key = (row["city"], row["barcode"])
         if key in merged:
             merged[key]["qty"] += row["qty"]
+            merged[key]["fact"] += row["fact"]
         else:
             merged[key] = dict(row)
 
@@ -87,6 +88,10 @@ def _apply_plan(marketplace, parsed):
                 article=row["article"],
                 size=row["size"],
                 planned_qty=row["qty"],
+                # Факт "отгружено / в пути" из самого файла плана — уже
+                # известное на момент выгрузки выполнение, а не только то,
+                # что WMS увидит через будущие перемещения.
+                fulfilled_qty=row.get("fact", 0.0),
             )
         )
         created += 1

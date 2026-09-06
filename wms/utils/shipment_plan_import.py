@@ -62,17 +62,41 @@ def _find_label_col(ws, header_row, barcode_col, keyword):
 
 
 def _find_city_columns(ws, header_row, barcode_col):
-    """[(col, city_name), ...] — только первая колонка каждой группы города
-    (в ней лежит план по количеству), служебные колонки после нее пропускаем."""
-    cities = []
+    """[(plan_col, city_name, fact_col), ...] — plan_col это первая колонка
+    группы города (план по количеству); fact_col — колонка "отгружен / в
+    пути" из той же группы (уже фактически отгружено на момент выгрузки
+    плана), если она есть, иначе None. Остальные служебные колонки группы
+    (например "остатки" у ОЗОН) пропускаем — они не нужны."""
+    raw = []
     for c in range(barcode_col + 1, ws.max_column + 1):
         text = _norm(ws.cell(row=header_row, column=c).value)
+        raw.append((c, text))
+
+    cities = []
+    i = 0
+    while i < len(raw):
+        col, text = raw[i]
         if not text:
+            i += 1
             continue
         lower = text.lower()
         if any(marker in lower for marker in _SUBCOLUMN_MARKERS):
+            i += 1
             continue
-        cities.append((c, text))
+        # Нашли новую колонку-город — ищем "отгружен / в пути" среди
+        # следующих колонок этой же группы, пока не встретим следующий город.
+        fact_col = None
+        j = i + 1
+        while j < len(raw):
+            next_col, next_text = raw[j]
+            next_lower = next_text.lower()
+            if next_text and not any(m in next_lower for m in _SUBCOLUMN_MARKERS):
+                break  # это уже следующий город
+            if "отгруж" in next_lower or "путь" in next_lower:
+                fact_col = next_col
+            j += 1
+        cities.append((col, text, fact_col))
+        i += 1
     return cities
 
 
@@ -94,11 +118,24 @@ def _to_qty(value):
     return qty if qty > 0 else None
 
 
+def _to_fact_qty(value):
+    """В отличие от _to_qty, ноль/пусто — это законное "еще не отгружено",
+    а не повод пропустить город (в отличие от плана, где qty=0 не создает
+    строку вовсе)."""
+    if value is None or value == "":
+        return 0.0
+    try:
+        qty = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return qty if qty > 0 else 0.0
+
+
 class ParsedPlan:
     def __init__(self, sheet_name):
         self.sheet_name = sheet_name
         self.cities = []  # list[str] в порядке появления
-        self.rows = []  # list[dict]: barcode, article, size, city, qty
+        self.rows = []  # list[dict]: barcode, article, size, city, qty, fact
 
 
 def parse_plan_sheet(file_stream, marketplace):
@@ -118,7 +155,7 @@ def parse_plan_sheet(file_stream, marketplace):
     city_columns = _find_city_columns(ws, header_row, barcode_col)
 
     plan = ParsedPlan(sheet_name)
-    plan.cities = [name for _, name in city_columns]
+    plan.cities = [name for _, name, _ in city_columns]
 
     for r in range(header_row + 1, ws.max_row + 1):
         barcode = _to_barcode_str(ws.cell(row=r, column=barcode_col).value)
@@ -128,12 +165,25 @@ def parse_plan_sheet(file_stream, marketplace):
         article = _norm(ws.cell(row=r, column=article_col).value) if article_col else ""
         size = _norm(ws.cell(row=r, column=size_col).value) if size_col else ""
 
-        for col, city in city_columns:
+        for col, city, fact_col in city_columns:
             qty = _to_qty(ws.cell(row=r, column=col).value)
             if qty is None:
                 continue
+            fact = _to_fact_qty(ws.cell(row=r, column=fact_col).value) if fact_col else 0.0
+            # Уже отгружено не может быть больше плана — если в файле опечатка
+            # и факт больше плана, обрежем по плану, а не заведем "минус" в
+            # остатке (remaining_qty и так не уходит в минус, но фактическое
+            # значение лучше не тянуть некорректным при отображении).
+            fact = min(fact, qty)
             plan.rows.append(
-                {"barcode": barcode, "article": article, "size": size, "city": city, "qty": qty}
+                {
+                    "barcode": barcode,
+                    "article": article,
+                    "size": size,
+                    "city": city,
+                    "qty": qty,
+                    "fact": fact,
+                }
             )
 
     return plan
