@@ -200,9 +200,10 @@ def pack_line(doc_id, line_id):
     qty = request.form.get("qty", type=float)
 
     # Короб может быть создан прямо в этом документе или заготовлен заранее
-    # (массовое создание в «Склады → Массовое создание коробов») — в любом
-    # случае годится любой еще не размещенный в ячейке короб этого склада.
-    box = Box.query.filter_by(id=box_id, warehouse_id=doc.warehouse_id, cell_id=None).first()
+    # (массовое создание в «Склады → Массовое создание коробов») — годится
+    # любой короб этого склада, в том числе уже размещенный в ячейке (можно
+    # доукомплектовать короб товаром и после того, как его расставили).
+    box = Box.query.filter_by(id=box_id, warehouse_id=doc.warehouse_id).first()
     if not box:
         flash("Короб не найден", "danger")
         return redirect(url_for("placement.detail", doc_id=doc.id))
