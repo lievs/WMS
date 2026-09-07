@@ -7,6 +7,11 @@
     <a class="btn btn-outline-secondary" href="{{ url_for('nomenclature.download_template') }}">📄 Скачать шаблон</a>
     <a class="btn btn-outline-secondary" href="{{ url_for('nomenclature.import_nomenclature') }}">📥 Импорт из Excel</a>
     <a class="btn btn-outline-secondary" href="{{ url_for('nomenclature.export_all') }}">📤 Экспорт в Excel</a>
+    {% if current_user.is_admin %}
+    <form method="post" action="{{ url_for('nomenclature.clear_nomenclature') }}" class="d-inline" onsubmit="return confirm('Удалить всю номенклатуру, у которой нет остатков и документов? Товары, уже использованные в реальных данных, не тронет. Действие необратимо.');">
+      <button type="submit" class="btn btn-outline-danger">🗑 Очистить номенклатуру</button>
+    </form>
+    {% endif %}
   </div>
 </div>
 

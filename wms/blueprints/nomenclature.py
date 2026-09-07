@@ -1,7 +1,18 @@
 from flask import Blueprint, Response, flash, redirect, render_template, request, url_for
+from flask_login import current_user
 
 from ..extensions import db
-from ..models import Nomenclature, ProductCategory
+from ..models import (
+    BoxItem,
+    InventoryLine,
+    Nomenclature,
+    PlacementLine,
+    ProductCategory,
+    ProductionRecord,
+    ReceivingLine,
+    ShipmentPlanLine,
+    UnplacedStock,
+)
 from ..utils.categorize import classify_by_name
 from ..utils.excel_io import (
     build_nomenclature_template,
@@ -12,6 +23,48 @@ from ..utils.excel_io import (
 from ..utils.http import content_disposition
 
 bp = Blueprint("nomenclature", __name__)
+
+
+@bp.route("/clear", methods=["POST"])
+def clear_nomenclature():
+    """Удаляет из номенклатуры все позиции, которые нигде не использовались
+    (нет остатков, нет строк ни в одном документе/движении) — например,
+    чтобы стереть пробный/ошибочный импорт перед чистой загрузкой. Товары,
+    хоть раз засветившиеся в реальных данных, не трогаем — иначе документы
+    и остатки, которые на них ссылаются, осиротеют."""
+    if not current_user.is_admin:
+        flash("Очищать номенклатуру может только администратор", "danger")
+        return redirect(url_for("nomenclature.list_nomenclature"))
+
+    referenced_ids = set()
+    for column in (
+        BoxItem.nomenclature_id,
+        ReceivingLine.nomenclature_id,
+        PlacementLine.nomenclature_id,
+        InventoryLine.nomenclature_id,
+        ProductionRecord.nomenclature_id,
+        ShipmentPlanLine.nomenclature_id,
+        UnplacedStock.nomenclature_id,
+    ):
+        referenced_ids.update(row[0] for row in db.session.query(column).distinct().all())
+
+    query = Nomenclature.query
+    if referenced_ids:
+        query = query.filter(~Nomenclature.id.in_(referenced_ids))
+    candidates = query.all()
+
+    total = Nomenclature.query.count()
+    deleted = len(candidates)
+    for item in candidates:
+        db.session.delete(item)
+    db.session.commit()
+
+    flash(
+        f"Удалено товаров без истории: {deleted}. "
+        f"Оставлено (есть остатки/документы): {total - deleted}",
+        "success",
+    )
+    return redirect(url_for("nomenclature.list_nomenclature"))
 
 
 @bp.route("/")

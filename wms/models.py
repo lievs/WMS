@@ -372,6 +372,9 @@ class MovementDocument(db.Model):
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime)
+    # Заполняется выгрузкой в 1С (см. api_1c) — чтобы при повторном нажатии
+    # "Синхронизировать" в 1С не загрузить один и тот же документ дважды.
+    synced_to_1c_at = db.Column(db.DateTime, nullable=True)
     # Заполняется отдельным действием "Принято на складе" — короб может
     # приехать (complete()), но физически его еще не проверили и не приняли
     # на складе назначения. Пока это поле пусто, выполнение плана отгрузок
@@ -451,6 +454,8 @@ class InventoryDocument(db.Model):
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime)
+    # См. MovementDocument.synced_to_1c_at.
+    synced_to_1c_at = db.Column(db.DateTime, nullable=True)
 
     warehouse = db.relationship("Warehouse")
     created_by = db.relationship("User")

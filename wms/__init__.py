@@ -146,6 +146,7 @@ def create_app(config_class=Config):
     from .blueprints.production import bp as production_bp
     from .blueprints.api import bp as api_bp
     from .blueprints.shipment_plan import bp as shipment_plan_bp
+    from .blueprints.integration_1c import bp as integration_1c_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(main_bp)
@@ -161,6 +162,7 @@ def create_app(config_class=Config):
     app.register_blueprint(production_bp, url_prefix="/production")
     app.register_blueprint(api_bp, url_prefix="/api")
     app.register_blueprint(shipment_plan_bp, url_prefix="/shipment-plan")
+    app.register_blueprint(integration_1c_bp, url_prefix="/integrations/1c")
 
     with app.app_context():
         from . import models  # noqa: F401
@@ -179,9 +181,15 @@ def create_app(config_class=Config):
 
     @app.before_request
     def require_login():
+        from .blueprints.integration_1c import API_1C_PUBLIC_ENDPOINTS
+
         if request.endpoint is None:
             return None
-        if request.endpoint == "static" or request.endpoint.startswith("auth."):
+        if (
+            request.endpoint == "static"
+            or request.endpoint.startswith("auth.")
+            or request.endpoint in API_1C_PUBLIC_ENDPOINTS
+        ):
             return None
         if not current_user.is_authenticated:
             return redirect(url_for("auth.login", next=request.full_path))
