@@ -31,7 +31,15 @@
   </div>
 </div>
 
-{% if doc.status == 'draft' %}
+{% set can_edit = doc.status == 'draft' or current_user.is_admin %}
+{% if doc.status != 'draft' and current_user.is_admin %}
+<div class="alert alert-warning">
+  ⚠ Документ уже завершен. Как администратор вы можете добавлять/убирать короба и менять ячейку назначения —
+  изменения сразу же применяются к реальному расположению короба (и к выполнению плана отгрузок, если перемещение уже принято на складе).
+</div>
+{% endif %}
+
+{% if can_edit %}
 <div class="card p-3 mb-4">
   <h5>Сканировать короб</h5>
   <p class="text-muted small mb-2">Короб должен быть на складе «{{ doc.from_warehouse.name }}» — весь товар внутри него поедет вместе с ним на склад «{{ doc.to_warehouse.name }}».</p>
@@ -54,7 +62,7 @@
         <th>Короб</th>
         <th>Товары</th>
         <th>Откуда</th>
-        {% if doc.status == 'draft' %}<th>Ячейка на складе назначения</th><th></th>{% else %}<th>Ячейка назначения</th>{% endif %}
+        {% if can_edit %}<th>Ячейка на складе назначения</th><th></th>{% else %}<th>Ячейка назначения</th>{% endif %}
       </tr>
     </thead>
     <tbody>
@@ -72,7 +80,7 @@
           {% endfor %}
         </td>
         <td>{{ line.from_warehouse.name if line.from_warehouse else '—' }}{% if line.from_cell %} / {{ line.from_cell.code }}{% endif %}</td>
-        {% if doc.status == 'draft' %}
+        {% if can_edit %}
         <td style="min-width:260px">
           <form method="post" action="{{ url_for('movement.set_cell', doc_id=doc.id, line_id=line.id) }}" class="d-flex gap-2">
             <input type="text" id="cellCodeInput{{ line.id }}" name="cell_code" class="form-control form-control-sm"
@@ -82,7 +90,7 @@
           </form>
         </td>
         <td>
-          <form method="post" action="{{ url_for('movement.delete_line', doc_id=doc.id, line_id=line.id) }}">
+          <form method="post" action="{{ url_for('movement.delete_line', doc_id=doc.id, line_id=line.id) }}" {% if doc.status != 'draft' %}onsubmit="return confirm('Документ уже завершен — убрать короб из него и вернуть на прежнее место?');"{% endif %}>
             <button type="submit" class="btn btn-sm btn-outline-danger">✕</button>
           </form>
         </td>

@@ -73,11 +73,24 @@ def detail(doc_id):
     return render_template("movement/detail.html", doc=doc, lines=lines)
 
 
+def _revert_shipment_fulfillment(box, warehouse_id):
+    """Обратное действие к _apply_shipment_fulfillment — используется, когда
+    администратор убирает короб из уже принятого (received_at заполнен)
+    перемещения, чтобы не оставить задвоенное выполнение плана отгрузок."""
+    for item in box.items:
+        plan_line = ShipmentPlanLine.query.filter_by(
+            warehouse_id=warehouse_id, nomenclature_id=item.nomenclature_id
+        ).first()
+        if plan_line:
+            plan_line.fulfilled_qty = max(plan_line.fulfilled_qty - item.qty, 0)
+
+
 @bp.route("/<int:doc_id>/boxes/add", methods=["POST"])
 def add_box(doc_id):
     doc = MovementDocument.query.get_or_404(doc_id)
-    if doc.status != "draft":
-        flash("Документ уже завершен", "danger")
+    editing_after_completion = doc.status != "draft"
+    if editing_after_completion and not current_user.is_admin:
+        flash("Документ уже завершен — изменить может только администратор", "danger")
         return redirect(url_for("movement.detail", doc_id=doc.id))
 
     box_number = request.form.get("box_number", "").strip()
@@ -105,6 +118,18 @@ def add_box(doc_id):
         from_cell_id=box.cell_id,
     )
     db.session.add(line)
+
+    if editing_after_completion:
+        # Документ уже завершен (и, возможно, принят) — короб добавляется
+        # админом задним числом, поэтому сразу переносим его так же, как
+        # это сделал бы complete(), а не оставляем висеть "как будто в
+        # черновике", где его никто больше не завершит.
+        box.warehouse_id = doc.to_warehouse_id
+        box.cell_id = None
+        box.status = "open"
+        if doc.received_at is not None:
+            _apply_shipment_fulfillment(box, doc.to_warehouse_id)
+
     db.session.commit()
     flash(f"Короб {box.box_number} добавлен в список перемещения", "success")
     return redirect(url_for("movement.detail", doc_id=doc.id))
@@ -113,11 +138,24 @@ def add_box(doc_id):
 @bp.route("/<int:doc_id>/lines/<int:line_id>/delete", methods=["POST"])
 def delete_line(doc_id, line_id):
     doc = MovementDocument.query.get_or_404(doc_id)
-    if doc.status != "draft":
-        flash("Документ уже завершен", "danger")
+    editing_after_completion = doc.status != "draft"
+    if editing_after_completion and not current_user.is_admin:
+        flash("Документ уже завершен — изменить может только администратор", "danger")
         return redirect(url_for("movement.detail", doc_id=doc_id))
 
     line = MovementLine.query.filter_by(id=line_id, document_id=doc_id).first_or_404()
+
+    if editing_after_completion:
+        # Отменяем эффект complete()/receive() именно для этого короба —
+        # возвращаем его туда, где он был до перемещения, и снимаем
+        # выполнение плана отгрузок, если оно уже было засчитано.
+        box = line.box
+        if doc.received_at is not None:
+            _revert_shipment_fulfillment(box, doc.to_warehouse_id)
+        box.warehouse_id = line.from_warehouse_id
+        box.cell_id = line.from_cell_id
+        box.status = "stored" if line.from_cell_id else "open"
+
     db.session.delete(line)
     db.session.commit()
     return redirect(url_for("movement.detail", doc_id=doc_id))
@@ -126,11 +164,19 @@ def delete_line(doc_id, line_id):
 @bp.route("/<int:doc_id>/lines/<int:line_id>/set-cell", methods=["POST"])
 def set_cell(doc_id, line_id):
     doc = MovementDocument.query.get_or_404(doc_id)
+    editing_after_completion = doc.status != "draft"
+    if editing_after_completion and not current_user.is_admin:
+        flash("Документ уже завершен — изменить может только администратор", "danger")
+        return redirect(url_for("movement.detail", doc_id=doc_id))
+
     line = MovementLine.query.filter_by(id=line_id, document_id=doc_id).first_or_404()
 
     cell_code = request.form.get("cell_code", "").strip()
     if not cell_code:
         line.to_cell_id = None
+        if editing_after_completion:
+            line.box.cell_id = None
+            line.box.status = "open"
         db.session.commit()
         return redirect(url_for("movement.detail", doc_id=doc_id))
 
@@ -145,11 +191,18 @@ def set_cell(doc_id, line_id):
     already_targeted = doc.lines.filter(
         MovementLine.to_cell_id == cell.id, MovementLine.id != line.id
     ).count()
-    if cell.free_space() - already_targeted <= 0:
+    if cell.free_space(exclude_box_id=line.box_id) - already_targeted <= 0:
         flash(f"Ячейка '{cell_code}' заполнена (вмещает {CELL_CAPACITY} коробов)", "danger")
         return redirect(url_for("movement.detail", doc_id=doc_id))
 
     line.to_cell_id = cell.id
+    if editing_after_completion:
+        # Короб уже физически "приехал" — целевая ячейка меняется у самого
+        # короба сразу, а не только у строки документа (иначе complete()
+        # для этой строки больше не вызовется, и короб останется в старой
+        # ячейке несмотря на изменение).
+        line.box.cell_id = cell.id
+        line.box.status = "stored"
     db.session.commit()
     flash(f"Короб {line.box.box_number}: ячейка назначения — {cell.code}", "success")
     return redirect(url_for("movement.detail", doc_id=doc_id))
