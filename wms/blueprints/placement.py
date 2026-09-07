@@ -11,12 +11,14 @@ from flask import (
     url_for,
 )
 from flask_login import current_user
+from sqlalchemy import func
 
 from ..extensions import db
 from ..models import (
     Box,
     BoxItem,
     Cell,
+    CELL_CAPACITY,
     MovementLine,
     Nomenclature,
     PlacementDocument,
@@ -29,6 +31,71 @@ from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 
 bp = Blueprint("placement", __name__)
+
+
+def suggest_cell(warehouse_id, box):
+    """Подсказка ячейки под конкретный короб: сначала ищем ячейку, где уже
+    лежит короб с тем же товаром (пусть даже вперемешку с другим — это не
+    критично), затем — просто ячейку в том же ряду, где такой товар уже
+    есть где-нибудь, и только если совсем ничего похожего нет — любую
+    ячейку с местом (предпочитая уже частично заполненные, чтобы не плодить
+    начатые ячейки по одной коробке)."""
+    nomenclature_ids = {item.nomenclature_id for item in box.items}
+    if not nomenclature_ids:
+        return None
+
+    cells = Cell.query.filter_by(warehouse_id=warehouse_id, is_active=True).all()
+    if not cells:
+        return None
+
+    matched_cell_ids = {
+        row[0]
+        for row in (
+            db.session.query(Box.cell_id)
+            .join(BoxItem, BoxItem.box_id == Box.id)
+            .filter(
+                Box.warehouse_id == warehouse_id,
+                Box.cell_id.isnot(None),
+                Box.id != box.id,
+                BoxItem.nomenclature_id.in_(nomenclature_ids),
+            )
+            .distinct()
+            .all()
+        )
+    }
+    matched_zone_ids = {c.zone_id for c in cells if c.id in matched_cell_ids and c.zone_id}
+    box_counts = dict(
+        db.session.query(Box.cell_id, func.count(Box.id))
+        .filter(Box.warehouse_id == warehouse_id, Box.cell_id.isnot(None), Box.id != box.id)
+        .group_by(Box.cell_id)
+        .all()
+    )
+
+    best = None
+    for cell in cells:
+        if cell.id == box.cell_id:
+            continue
+        count = box_counts.get(cell.id, 0)
+        if count >= CELL_CAPACITY:
+            continue
+        direct_match = cell.id in matched_cell_ids
+        row_match = bool(cell.zone_id and cell.zone_id in matched_zone_ids)
+        score = (not direct_match, not row_match, -count, cell.code)
+        if best is None or score < best[0]:
+            best = (score, cell, direct_match, row_match, count)
+
+    if best is None:
+        return None
+    _, cell, direct_match, row_match, count = best
+    if direct_match:
+        reason = f"в ячейке уже есть такой же товар ({count} короб. в ячейке)"
+    elif row_match:
+        reason = f"такой товар уже есть в этом ряду ({cell.zone.code})"
+    elif count > 0:
+        reason = "ячейка уже частично заполнена"
+    else:
+        reason = "пустая ячейка"
+    return {"cell": cell, "reason": reason, "free": CELL_CAPACITY - count}
 
 
 @bp.route("/")
@@ -48,8 +115,13 @@ def list_documents():
         .order_by(Warehouse.code, Box.box_number)
         .all()
     )
+    cell_suggestions = {box.id: suggest_cell(box.warehouse_id, box) for box in open_boxes}
     return render_template(
-        "placement/list.html", documents=documents, stock_rows=stock_rows, open_boxes=open_boxes
+        "placement/list.html",
+        documents=documents,
+        stock_rows=stock_rows,
+        open_boxes=open_boxes,
+        cell_suggestions=cell_suggestions,
     )
 
 
@@ -96,6 +168,12 @@ def detail(doc_id):
     if active_box_id:
         active_box = Box.query.filter_by(id=active_box_id, warehouse_id=doc.warehouse_id).first()
 
+    cell_suggestions = {
+        box.id: suggest_cell(doc.warehouse_id, box)
+        for box in boxes + open_boxes
+        if box.cell_id is None
+    }
+
     return render_template(
         "placement/detail.html",
         doc=doc,
@@ -104,6 +182,7 @@ def detail(doc_id):
         open_boxes=open_boxes,
         available_stock=available_stock,
         active_box=active_box,
+        cell_suggestions=cell_suggestions,
     )
 
 
@@ -354,6 +433,9 @@ def _place_box(box, cell_code, expected_warehouse_id):
     cell = Cell.query.filter_by(warehouse_id=expected_warehouse_id, code=cell_code).first()
     if not cell:
         return f"Ячейка '{cell_code}' не найдена на этом складе"
+
+    if cell.id != box.cell_id and cell.free_space() <= 0:
+        return f"Ячейка '{cell_code}' заполнена (вмещает {CELL_CAPACITY} коробов)"
 
     box.cell_id = cell.id
     box.status = "stored"

@@ -136,6 +136,12 @@ class Zone(db.Model):
         return f"<Zone {self.code}>"
 
 
+# Сколько коробов физически помещается в одну ячейку — используется и для
+# запрета переполнения при размещении, и для подсчета свободных мест при
+# подсказке ячейки.
+CELL_CAPACITY = 20
+
+
 class Cell(db.Model):
     __tablename__ = "cells"
 
@@ -151,6 +157,12 @@ class Cell(db.Model):
     __table_args__ = (
         db.UniqueConstraint("warehouse_id", "code", name="uq_cell_warehouse_code"),
     )
+
+    def free_space(self, exclude_box_id=None):
+        count = self.boxes.count()
+        if exclude_box_id is not None and self.boxes.filter_by(id=exclude_box_id).first():
+            count -= 1
+        return CELL_CAPACITY - count
 
     def __repr__(self):
         return f"<Cell {self.code}>"

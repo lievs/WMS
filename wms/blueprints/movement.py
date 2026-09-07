@@ -4,7 +4,15 @@ from flask import Blueprint, Response, flash, redirect, render_template, request
 from flask_login import current_user
 
 from ..extensions import db
-from ..models import Box, Cell, MovementDocument, MovementLine, ShipmentPlanLine, Warehouse
+from ..models import (
+    Box,
+    Cell,
+    CELL_CAPACITY,
+    MovementDocument,
+    MovementLine,
+    ShipmentPlanLine,
+    Warehouse,
+)
 from ..utils.excel_io import export_movement_to_excel, timestamp_for_filename
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
@@ -129,6 +137,16 @@ def set_cell(doc_id, line_id):
     cell = Cell.query.filter_by(warehouse_id=doc.to_warehouse_id, code=cell_code).first()
     if not cell:
         flash(f"Ячейка '{cell_code}' не найдена на складе «{doc.to_warehouse.name}»", "danger")
+        return redirect(url_for("movement.detail", doc_id=doc_id))
+
+    # Учитываем и уже стоящие в ячейке короба, и короба из других строк
+    # этого же документа, уже нацеленные на эту ячейку — иначе на бумаге
+    # ячейку легко "переполнить" еще до завершения перемещения.
+    already_targeted = doc.lines.filter(
+        MovementLine.to_cell_id == cell.id, MovementLine.id != line.id
+    ).count()
+    if cell.free_space() - already_targeted <= 0:
+        flash(f"Ячейка '{cell_code}' заполнена (вмещает {CELL_CAPACITY} коробов)", "danger")
         return redirect(url_for("movement.detail", doc_id=doc_id))
 
     line.to_cell_id = cell.id

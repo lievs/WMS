@@ -195,6 +195,8 @@ def create_app(config_class=Config):
     def inject_globals():
         from datetime import datetime
 
-        return {"current_year": datetime.now().year}
+        from .models import CELL_CAPACITY
+
+        return {"current_year": datetime.now().year, "CELL_CAPACITY": CELL_CAPACITY}
 
     return app

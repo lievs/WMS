@@ -71,7 +71,7 @@
       <tr>
         <td><a href="{{ url_for('warehouses.cell_detail', cell_id=cell.id) }}">{{ cell.code }}</a></td>
         <td>{{ cell.zone.code if cell.zone else '' }}</td>
-        <td><a href="{{ url_for('warehouses.cell_detail', cell_id=cell.id) }}">{{ cell.boxes.count() }}</a></td>
+        <td><a href="{{ url_for('warehouses.cell_detail', cell_id=cell.id) }}">{{ cell.boxes.count() }}/{{ CELL_CAPACITY }}</a></td>
         <td>{% if cell.is_active %}<span class="badge bg-success">Активна</span>{% else %}<span class="badge bg-secondary">Отключена</span>{% endif %}</td>
         <td class="text-nowrap">
           <a class="btn btn-sm btn-outline-primary" target="_blank" href="{{ url_for('labels.cell_label', cell_id=cell.id) }}">🖨 Этикетка</a>
