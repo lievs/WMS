@@ -82,41 +82,49 @@
   {% endfor %}
 </div>
 
-{% for mp in marketplaces %}
-{% if mp.plan and mp.picking_list %}
+{% if picking_list %}
 <div class="card p-3 mb-4">
   <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
-    <h5 class="mb-0">{{ mp.label }} — что нужно отправить <span class="text-muted small">(осталось по плану, {{ mp.picking_list|length }} поз.)</span></h5>
-    <input type="text" class="form-control form-control-sm" style="max-width:260px" placeholder="Поиск по артикулу/штрихкоду..." data-picking-search="{{ mp.marketplace }}">
+    <h5 class="mb-0">Что нужно отправить <span class="text-muted small">(осталось по плану, {{ picking_list|length }} поз., ОЗОН и ВБ вместе)</span></h5>
+    <input type="text" class="form-control form-control-sm" style="max-width:260px" placeholder="Поиск по артикулу/штрихкоду..." data-picking-search="picking">
   </div>
   <div class="table-responsive">
-    <table class="table table-sm table-hover" id="picking-{{ mp.marketplace }}">
+    <table class="table table-sm table-hover" id="picking-picking">
       <thead>
         <tr>
-          <th>Артикул</th>
-          <th>Размер</th>
-          <th>Штрихкод</th>
-          <th></th>
-          {% for city in mp.city_names %}<th class="text-end">{{ city }}</th>{% endfor %}
+          <th rowspan="2" class="align-bottom">Артикул</th>
+          <th rowspan="2" class="align-bottom">Размер</th>
+          <th rowspan="2" class="align-bottom">Штрихкод</th>
+          <th rowspan="2" class="align-bottom"></th>
+          {% if ozon_cities %}<th colspan="{{ ozon_cities|length }}" class="text-center">ОЗОН</th>{% endif %}
+          {% if wb_cities %}<th colspan="{{ wb_cities|length }}" class="text-center">ВБ</th>{% endif %}
+        </tr>
+        <tr>
+          {% for city in ozon_cities %}<th class="text-end">{{ city }}</th>{% endfor %}
+          {% for city in wb_cities %}<th class="text-end">{{ city }}</th>{% endfor %}
         </tr>
       </thead>
       <tbody>
-      {% for p in mp.picking_list %}
+      {% for p in picking_list %}
         <tr{% if p.no_stock %} class="table-danger"{% endif %} data-search-text="{{ (p.article or '') ~ ' ' ~ p.barcode }}">
           <td>{{ p.article }}</td>
           <td>{{ p.size }}</td>
           <td>{{ p.barcode }}</td>
           <td class="text-nowrap">{% if p.no_stock %}<span class="badge bg-danger" title="Нет на складе-отправителе">нет на складе</span>{% endif %}</td>
-          {% for city in mp.city_names %}
-            {% set line = p.per_city.get(city) %}
+          {% for city in ozon_cities %}
+            {% set line = p.ozon.get(city) %}
             <td class="text-end">
-              {% if not line %}
-                <span class="text-muted">—</span>
-              {% elif line.remaining_qty() <= 0 %}
-                <span class="text-muted">0</span>
-              {% else %}
-                <b>{{ line.remaining_qty() | round(0) }}</b>
-              {% endif %}
+              {% if not line %}<span class="text-muted">—</span>
+              {% elif line.remaining_qty() <= 0 %}<span class="text-muted">0</span>
+              {% else %}<b>{{ line.remaining_qty() | round(0) }}</b>{% endif %}
+            </td>
+          {% endfor %}
+          {% for city in wb_cities %}
+            {% set line = p.wb.get(city) %}
+            <td class="text-end">
+              {% if not line %}<span class="text-muted">—</span>
+              {% elif line.remaining_qty() <= 0 %}<span class="text-muted">0</span>
+              {% else %}<b>{{ line.remaining_qty() | round(0) }}</b>{% endif %}
             </td>
           {% endfor %}
         </tr>
@@ -125,13 +133,11 @@
     </table>
   </div>
 </div>
-{% elif mp.plan %}
+{% elif marketplaces|selectattr('plan')|list %}
 <div class="card p-3 mb-4">
-  <h5>{{ mp.label }}</h5>
   <p class="text-muted mb-0">Весь план выполнен — отправлять больше нечего.</p>
 </div>
 {% endif %}
-{% endfor %}
 {% endblock %}
 
 {% block scripts %}

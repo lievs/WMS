@@ -232,6 +232,7 @@ def dashboard():
     stock = _stock_by_nomenclature(sender_ids)
 
     marketplaces_data = []
+    lines_by_marketplace = {}
     for marketplace in MARKETPLACES:
         plan = plans.get(marketplace)
         if not plan:
@@ -241,6 +242,7 @@ def dashboard():
             continue
 
         lines = plan.lines.all()
+        lines_by_marketplace[marketplace] = lines
 
         by_warehouse = {}
         for line in lines:
@@ -251,37 +253,17 @@ def dashboard():
             row["planned"] += line.planned_qty
             row["fulfilled"] += line.fulfilled_qty
         cities = sorted(by_warehouse.values(), key=lambda r: r["warehouse"].marketplace_city)
-        city_names = [row["warehouse"].marketplace_city for row in cities]
 
-        # Свод по товару сразу по всем городам — так, как сборщик привык видеть
-        # план (одна строка на артикул/размер, город — колонкой), а не по одной
-        # строке на каждую пару товар-город. Показываем только то, что еще не
-        # довезено хотя бы в один город — выполненные позиции сборщику видеть
-        # незачем, только загромождают список.
-        products = {}
-        for line in lines:
-            key = line.barcode
-            product = products.setdefault(
-                key,
-                {
-                    "barcode": line.barcode,
-                    "article": line.article,
-                    "size": line.size,
-                    "nomenclature": line.nomenclature,
-                    "no_stock": line.nomenclature_id is None
-                    or stock.get(line.nomenclature_id, 0) <= 0,
-                    "per_city": {},
-                    "max_remaining": 0,
-                },
-            )
-            product["per_city"][line.warehouse.marketplace_city] = line
-            product["max_remaining"] = max(product["max_remaining"], line.remaining_qty())
-
-        picking_list = sorted(
-            (p for p in products.values() if p["max_remaining"] > 0),
-            key=lambda p: (p["article"] or "", p["size"] or ""),
-        )
-        problems_count = sum(1 for p in picking_list if p["no_stock"])
+        # Штрихкоды с невыполненным остатком, для которых нечем отгружать —
+        # только для значка-счетчика на карточке; сам список товаров теперь
+        # общий для обоих маркетплейсов (см. picking_list ниже), поэтому
+        # здесь достаточно посчитать количество, не строя весь список.
+        problem_barcodes = {
+            line.barcode
+            for line in lines
+            if line.remaining_qty() > 0
+            and (line.nomenclature_id is None or stock.get(line.nomenclature_id, 0) <= 0)
+        }
 
         total_planned = sum(line.planned_qty for line in lines)
         total_fulfilled = sum(line.fulfilled_qty for line in lines)
@@ -293,16 +275,56 @@ def dashboard():
                 "label": MARKETPLACE_LABELS[marketplace],
                 "plan": plan,
                 "cities": cities,
-                "city_names": city_names,
-                "picking_list": picking_list,
-                "problems_count": problems_count,
+                "problems_count": len(problem_barcodes),
                 "total_planned": total_planned,
                 "total_fulfilled": total_fulfilled,
                 "pace": pace,
             }
         )
 
-    return render_template("shipment_plan/dashboard.html", marketplaces=marketplaces_data)
+    # Общий список товаров сразу по обоим маркетплейсам — артикул, размер,
+    # штрихкод и наличие на складе-отправителе почти всегда одни и те же
+    # для ОЗОН и ВБ (один и тот же товар торгуется на обеих площадках), а
+    # раньше это все дублировалось в двух почти одинаковых таблицах. Теперь
+    # одна строка на штрихкод, а города каждого маркетплейса — отдельными
+    # блоками колонок (ОЗОН / ВБ) в той же строке.
+    products = {}
+    for marketplace, lines in lines_by_marketplace.items():
+        for line in lines:
+            product = products.setdefault(
+                line.barcode,
+                {
+                    "barcode": line.barcode,
+                    "article": line.article,
+                    "size": line.size,
+                    "no_stock": line.nomenclature_id is None
+                    or stock.get(line.nomenclature_id, 0) <= 0,
+                    "ozon": {},
+                    "wb": {},
+                    "max_remaining": 0,
+                },
+            )
+            product[marketplace][line.warehouse.marketplace_city] = line
+            product["max_remaining"] = max(product["max_remaining"], line.remaining_qty())
+
+    picking_list = sorted(
+        (p for p in products.values() if p["max_remaining"] > 0),
+        key=lambda p: (p["article"] or "", p["size"] or ""),
+    )
+
+    def _city_names(marketplace):
+        for m in marketplaces_data:
+            if m["marketplace"] == marketplace and m.get("cities"):
+                return [row["warehouse"].marketplace_city for row in m["cities"]]
+        return []
+
+    return render_template(
+        "shipment_plan/dashboard.html",
+        marketplaces=marketplaces_data,
+        picking_list=picking_list,
+        ozon_cities=_city_names("ozon"),
+        wb_cities=_city_names("wb"),
+    )
 
 
 @bp.route("/export.xlsx")
