@@ -16,16 +16,20 @@
       <h5>Добавить товар вручную</h5>
       <form method="post" action="{{ url_for('nomenclature.create_nomenclature') }}">
         <div class="mb-2">
-          <label class="form-label">Артикул</label>
-          <input type="text" name="sku" class="form-control" required>
-        </div>
-        <div class="mb-2">
           <label class="form-label">Штрихкод</label>
-          <input type="text" name="barcode" class="form-control" placeholder="если пусто — берется артикул">
+          <input type="text" name="barcode" class="form-control" required>
         </div>
         <div class="mb-2">
           <label class="form-label">Наименование</label>
           <input type="text" name="name" class="form-control" required>
+        </div>
+        <div class="mb-2">
+          <label class="form-label">Размер</label>
+          <input type="text" name="size" class="form-control">
+        </div>
+        <div class="mb-2">
+          <label class="form-label">Артикул <span class="text-muted">(необязательно)</span></label>
+          <input type="text" name="sku" class="form-control" placeholder="если пусто — берется штрихкод">
         </div>
         <div class="mb-2">
           <label class="form-label">Ед. изм.</label>
@@ -51,13 +55,14 @@
         <button type="submit" class="btn btn-outline-primary">Найти</button>
       </form>
       <table class="table table-sm">
-        <thead><tr><th>Артикул</th><th>Штрихкод</th><th>Наименование</th><th>Ед.</th><th>Вид</th><th>Норма, мин</th><th></th></tr></thead>
+        <thead><tr><th>Штрихкод</th><th>Наименование</th><th>Размер</th><th>Артикул</th><th>Ед.</th><th>Вид</th><th>Норма, мин</th><th></th></tr></thead>
         <tbody>
         {% for item in items %}
           <tr>
-            <td>{{ item.sku }}</td>
             <td>{{ item.barcode }}</td>
             <td>{{ item.name }}</td>
+            <td>{{ item.size or '' }}</td>
+            <td>{{ item.sku }}</td>
             <td>{{ item.unit }}</td>
             <td style="min-width:160px">
               <form method="post" action="{{ url_for('nomenclature.update_category', item_id=item.id) }}" class="d-flex gap-1">
@@ -83,7 +88,7 @@
             <td><a target="_blank" href="{{ url_for('labels.item_label', item_id=item.id) }}">🖨 Этикетка</a></td>
           </tr>
         {% else %}
-          <tr><td colspan="7" class="text-muted">Ничего не найдено</td></tr>
+          <tr><td colspan="8" class="text-muted">Ничего не найдено</td></tr>
         {% endfor %}
         </tbody>
       </table>

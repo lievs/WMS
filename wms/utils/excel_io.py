@@ -8,12 +8,13 @@ from openpyxl.utils import get_column_letter
 from .categorize import classify_by_name
 
 NOMENCLATURE_HEADERS = [
-    "Артикул (SKU)",
     "Штрихкод",
     "Наименование",
+    "Размер",
     "Ед. изм.",
     "Описание",
     "Норма времени на 1 шт, мин",
+    "Артикул (необязательно)",
 ]
 
 
@@ -33,7 +34,7 @@ def build_nomenclature_template() -> bytes:
     ws.title = "Номенклатура"
     _style_header(ws, NOMENCLATURE_HEADERS)
 
-    example = ["ART-0001", "4600000000015", "Пример: Футболка белая XL", "шт", "", 12]
+    example = ["4600000000015", "Пример: Футболка белая", "XL", "шт", "", 12, ""]
     ws.append(example)
 
     buffer = io.BytesIO()
@@ -73,9 +74,9 @@ def import_nomenclature_from_excel(file_stream, db, Nomenclature) -> ImportResul
         if row is None or all(v is None or str(v).strip() == "" for v in row):
             continue
 
-        sku = str(row[0]).strip() if len(row) > 0 and row[0] is not None else ""
-        barcode = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
-        name = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
+        barcode = str(row[0]).strip() if len(row) > 0 and row[0] is not None else ""
+        name = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+        size = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
         unit = str(row[3]).strip() if len(row) > 3 and row[3] not in (None, "") else "шт"
         description = str(row[4]).strip() if len(row) > 4 and row[4] is not None else ""
         norm_minutes = None
@@ -84,26 +85,31 @@ def import_nomenclature_from_excel(file_stream, db, Nomenclature) -> ImportResul
                 norm_minutes = float(row[5])
             except (TypeError, ValueError):
                 result.errors.append(f"Строка {row_idx}: некорректная норма времени '{row[5]}'")
+        # Артикул необязателен — если не указан, берется равным штрихкоду
+        # (уникальный, всегда есть). Основной идентификатор товара для этой
+        # компании — именно штрихкод, артикул часто просто отсутствует.
+        sku = str(row[6]).strip() if len(row) > 6 and row[6] is not None else ""
 
-        if not sku or not name:
-            result.errors.append(f"Строка {row_idx}: не заполнен артикул или наименование")
+        if not barcode or not name:
+            result.errors.append(f"Строка {row_idx}: не заполнен штрихкод или наименование")
             continue
 
-        if not barcode:
-            barcode = sku
+        if not sku:
+            sku = barcode
 
-        existing = Nomenclature.query.filter_by(sku=sku).first()
+        existing = Nomenclature.query.filter_by(barcode=barcode).first()
 
-        barcode_owner = Nomenclature.query.filter_by(barcode=barcode).first()
-        if barcode_owner is not None and (existing is None or barcode_owner.id != existing.id):
+        sku_owner = Nomenclature.query.filter_by(sku=sku).first()
+        if sku_owner is not None and (existing is None or sku_owner.id != existing.id):
             result.errors.append(
-                f"Строка {row_idx}: штрихкод '{barcode}' уже используется другим товаром"
+                f"Строка {row_idx}: артикул '{sku}' уже используется другим товаром"
             )
             continue
 
         if existing:
-            existing.barcode = barcode
+            existing.sku = sku
             existing.name = name
+            existing.size = size or None
             existing.unit = unit or "шт"
             existing.description = description
             if norm_minutes is not None:
@@ -120,6 +126,7 @@ def import_nomenclature_from_excel(file_stream, db, Nomenclature) -> ImportResul
                 sku=sku,
                 barcode=barcode,
                 name=name,
+                size=size or None,
                 unit=unit or "шт",
                 description=description,
                 norm_minutes=norm_minutes,
@@ -138,7 +145,15 @@ def export_nomenclature_to_excel(items) -> bytes:
     _style_header(ws, NOMENCLATURE_HEADERS)
     for item in items:
         ws.append(
-            [item.sku, item.barcode, item.name, item.unit, item.description or "", item.norm_minutes or ""]
+            [
+                item.barcode,
+                item.name,
+                item.size or "",
+                item.unit,
+                item.description or "",
+                item.norm_minutes or "",
+                item.sku,
+            ]
         )
     buffer = io.BytesIO()
     wb.save(buffer)

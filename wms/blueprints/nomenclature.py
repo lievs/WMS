@@ -34,26 +34,27 @@ def list_nomenclature():
 
 @bp.route("/create", methods=["POST"])
 def create_nomenclature():
-    sku = request.form.get("sku", "").strip()
     barcode = request.form.get("barcode", "").strip()
     name = request.form.get("name", "").strip()
+    size = request.form.get("size", "").strip()
+    sku = request.form.get("sku", "").strip()
     unit = request.form.get("unit", "шт").strip() or "шт"
     description = request.form.get("description", "").strip()
     norm_minutes = request.form.get("norm_minutes", type=float)
 
-    if not sku or not name:
-        flash("Укажите артикул и наименование", "danger")
+    if not barcode or not name:
+        flash("Укажите штрихкод и наименование", "danger")
         return redirect(url_for("nomenclature.list_nomenclature"))
 
-    if not barcode:
-        barcode = sku
-
-    if Nomenclature.query.filter_by(sku=sku).first():
-        flash(f"Товар с артикулом '{sku}' уже существует", "danger")
-        return redirect(url_for("nomenclature.list_nomenclature"))
+    if not sku:
+        sku = barcode
 
     if Nomenclature.query.filter_by(barcode=barcode).first():
         flash(f"Штрихкод '{barcode}' уже используется", "danger")
+        return redirect(url_for("nomenclature.list_nomenclature"))
+
+    if Nomenclature.query.filter_by(sku=sku).first():
+        flash(f"Товар с артикулом '{sku}' уже существует", "danger")
         return redirect(url_for("nomenclature.list_nomenclature"))
 
     category = classify_by_name(name)
@@ -62,6 +63,7 @@ def create_nomenclature():
         sku=sku,
         barcode=barcode,
         name=name,
+        size=size or None,
         unit=unit,
         description=description,
         norm_minutes=norm_minutes,

@@ -163,6 +163,7 @@ class Nomenclature(db.Model):
     sku = db.Column(db.String(50), unique=True, nullable=False)
     barcode = db.Column(db.String(50), unique=True, nullable=False)
     name = db.Column(db.String(300), nullable=False)
+    size = db.Column(db.String(20), nullable=True)
     unit = db.Column(db.String(20), nullable=False, default="шт")
     description = db.Column(db.String(500))
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
