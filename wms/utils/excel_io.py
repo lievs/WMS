@@ -57,7 +57,12 @@ def import_nomenclature_from_excel(file_stream, db, Nomenclature) -> ImportResul
     result = ImportResult()
 
     try:
-        wb = load_workbook(file_stream, data_only=True)
+        # file_stream от Flask (request.files[...].stream) на некоторых
+        # версиях Python — SpooledTemporaryFile без метода seekable(),
+        # который требует openpyxl (через zipfile). Перекладываем в
+        # BytesIO, который всегда полноценно seekable, вне зависимости от
+        # версии Python и от того, ушла ли загрузка на диск.
+        wb = load_workbook(io.BytesIO(file_stream.read()), data_only=True)
     except Exception as exc:  # noqa: BLE001
         result.errors.append(f"Не удалось открыть файл: {exc}")
         return result
