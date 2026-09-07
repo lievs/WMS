@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Короба{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+  <h3 class="mb-0">Короба</h3>
+  <a class="btn btn-outline-secondary" href="{{ url_for('boxes.bulk_create') }}">📦 Массовое создание коробов</a>
+</div>
+
+<p class="text-muted small">
+  Если этикеток физически не хватило на всю партию сразу — короба в системе
+  уже созданы все, но наклеены не на все. Найдите нужные короба здесь
+  (например, по диапазону номеров) и допечатайте только их — короба
+  пересоздавать не нужно, номер за ними уже закреплен.
+</p>
+
+<div class="card p-3 mb-3">
+  <form method="get" class="row g-2 align-items-end">
+    <div class="col-auto">
+      <label class="form-label mb-0 small">Склад</label>
+      <select name="warehouse_id" class="form-select form-select-sm">
+        <option value="">Все склады</option>
+        {% for wh in warehouses %}
+          <option value="{{ wh.id }}" {% if wh.id == warehouse_id %}selected{% endif %}>{{ wh.code }} — {{ wh.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-auto">
+      <label class="form-label mb-0 small">Номер короба содержит</label>
+      <input type="text" name="q" class="form-control form-control-sm" value="{{ query_text }}" placeholder="BOX-0012">
+    </div>
+    <div class="col-auto">
+      <button type="submit" class="btn btn-sm btn-outline-primary">Найти</button>
+    </div>
+  </form>
+</div>
+
+{% if boxes %}
+<form method="get" action="{{ url_for('labels.boxes_label_batch_pdf') }}" target="_blank">
+  <div class="card p-3">
+    <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+      <div>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-check-all="1">Выбрать все</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-check-all="0">Снять выбор</button>
+        <span class="text-muted small">показано {{ boxes|length }}{% if boxes|length == 500 %} (первые 500, уточните поиск){% endif %}</span>
+      </div>
+      <button type="submit" class="btn btn-primary">🖨 Печать выбранных этикеток</button>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm table-hover">
+        <thead><tr><th></th><th>Номер короба</th><th>Склад</th><th>Статус</th><th>Создан</th><th></th></tr></thead>
+        <tbody>
+        {% for box in boxes %}
+          <tr>
+            <td><input type="checkbox" name="ids" value="{{ box.id }}" checked></td>
+            <td><a href="{{ url_for('boxes.detail', box_id=box.id) }}">{{ box.box_number }}</a></td>
+            <td>{{ box.warehouse.name if box.warehouse else '' }}</td>
+            <td>{{ 'В ячейке' if box.cell_id else 'Открыт' }}</td>
+            <td class="text-muted small">{{ box.created_at.strftime('%d.%m.%Y %H:%M') if box.created_at else '' }}</td>
+            <td><a class="btn btn-sm btn-outline-secondary" href="{{ url_for('labels.box_label', box_id=box.id) }}" target="_blank">Этикетка</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</form>
+{% else %}
+<p class="text-muted">Короба не найдены.</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.querySelectorAll("[data-check-all]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var checked = btn.dataset.checkAll === "1";
+      document.querySelectorAll('input[name="ids"]').forEach(function (cb) { cb.checked = checked; });
+    });
+  });
+</script>
+{% endblock %}

@@ -7,6 +7,36 @@ from ..utils.numbering import next_number
 bp = Blueprint("boxes", __name__)
 
 
+@bp.route("/")
+def list_boxes():
+    """Общий список коробов — нужен в первую очередь чтобы допечатать
+    этикетки позже: если при массовой печати партии физически не хватило
+    этикеток (закончилась лента/пачка стикеров), короба в системе уже
+    созданы все разом, а часть из них останется без наклейки. Здесь можно
+    в любой момент найти нужные короба (по складу/номеру) и распечатать
+    только оставшиеся, не создавая короба заново."""
+    warehouses = Warehouse.query.order_by(Warehouse.code).all()
+
+    warehouse_id = request.args.get("warehouse_id", type=int)
+    query_text = request.args.get("q", "").strip()
+
+    query = Box.query
+    if warehouse_id:
+        query = query.filter_by(warehouse_id=warehouse_id)
+    if query_text:
+        query = query.filter(Box.box_number.ilike(f"%{query_text}%"))
+
+    boxes = query.order_by(Box.box_number.desc()).limit(500).all()
+
+    return render_template(
+        "boxes/list.html",
+        boxes=boxes,
+        warehouses=warehouses,
+        warehouse_id=warehouse_id,
+        query_text=query_text,
+    )
+
+
 @bp.route("/<int:box_id>")
 def detail(box_id):
     box = Box.query.get_or_404(box_id)

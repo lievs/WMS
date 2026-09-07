@@ -3,7 +3,10 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
   <h3 class="mb-0">Склады</h3>
-  <a class="btn btn-outline-secondary" href="{{ url_for('boxes.bulk_create') }}">📦 Массовое создание коробов</a>
+  <div>
+    <a class="btn btn-outline-secondary" href="{{ url_for('boxes.list_boxes') }}">📋 Список коробов</a>
+    <a class="btn btn-outline-secondary" href="{{ url_for('boxes.bulk_create') }}">📦 Массовое создание коробов</a>
+  </div>
 </div>
 
 <div class="row g-4">

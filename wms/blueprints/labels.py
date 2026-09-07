@@ -61,9 +61,12 @@ def box_label_pdf(box_id):
 def boxes_label_batch_pdf():
     """Печать этикеток сразу нескольких коробов одним PDF (например, для
     только что созданной массовой партии) — ?ids=1,2,3."""
-    ids_param = request.args.get("ids", "")
+    # Поддерживаем и "?ids=1,2,3" (одна ссылка "Печать всех"), и повторяющиеся
+    # "?ids=1&ids=2&ids=3" (форма с чекбоксами — печать выбранной части
+    # партии, если этикеток физически не хватает на все короба сразу).
+    ids_params = request.args.getlist("ids")
     try:
-        ids = [int(v) for v in ids_param.split(",") if v.strip()]
+        ids = [int(v) for part in ids_params for v in part.split(",") if v.strip()]
     except ValueError:
         abort(400, "Некорректный список коробов")
     if not ids:
