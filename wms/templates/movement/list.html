@@ -11,7 +11,7 @@
 
 <div class="card p-3">
   <table class="table">
-    <thead><tr><th>Номер</th><th>Дата</th><th>Откуда</th><th>Куда</th><th>Коробов</th><th>Автор</th><th>Статус</th><th></th></tr></thead>
+    <thead><tr><th>Номер</th><th>Дата</th><th>Откуда</th><th>Куда</th><th>Коробов</th><th>Автор</th><th>Статус</th><th>Приемка</th><th></th></tr></thead>
     <tbody>
     {% for d in documents %}
       <tr>
@@ -22,13 +22,24 @@
         <td>{{ d.lines.count() }}</td>
         <td>{{ d.created_by.display_name() if d.created_by else '' }}</td>
         <td><span class="badge badge-status-{{ d.status }}">{{ 'Черновик' if d.status == 'draft' else 'Завершен' }}</span></td>
+        <td class="text-nowrap">
+          {% if d.status != 'completed' %}
+            <span class="text-muted">—</span>
+          {% elif d.received_at %}
+            <span class="badge bg-success" title="{{ d.received_at.strftime('%d.%m.%Y %H:%M') }}">Принято {{ d.received_at.strftime('%d.%m') }}</span>
+          {% else %}
+            <form method="post" action="{{ url_for('movement.receive', doc_id=d.id) }}">
+              <button type="submit" class="btn btn-sm btn-warning" title="Товар считается «в пути», пока не нажата эта кнопка">📥 Принято на складе</button>
+            </form>
+          {% endif %}
+        </td>
         <td>
           <a href="{{ url_for('movement.detail', doc_id=d.id) }}">Открыть</a>
           · <a href="{{ url_for('movement.export_document', doc_id=d.id) }}">Excel</a>
         </td>
       </tr>
     {% else %}
-      <tr><td colspan="8" class="text-muted">Перемещений еще нет</td></tr>
+      <tr><td colspan="9" class="text-muted">Перемещений еще нет</td></tr>
     {% endfor %}
     </tbody>
   </table>

@@ -7,42 +7,54 @@
 <div class="row g-4 mb-4">
   <div class="col-md-5">
     <div class="card p-3">
-      <h5>Добавить зону</h5>
-      <p class="text-muted small">Зона объединяет несколько ячеек (стеллаж/участок) — для крупной A4-этикетки на вход в зону.</p>
+      <h5>Добавить ряд</h5>
+      <p class="text-muted small">
+        Ячейки в ряду получают код автоматически: ряд «A» → ячейки
+        A0001, A0002, ... Код короба уже совпадает с этикеткой — при
+        размещении ячейку можно сразу сканировать.
+      </p>
       <form method="post" action="{{ url_for('warehouses.create_zone', warehouse_id=warehouse.id) }}">
         <div class="mb-2">
-          <label class="form-label">Код зоны</label>
+          <label class="form-label">Название ряда</label>
           <input type="text" name="code" class="form-control" required placeholder="A">
         </div>
         <div class="mb-2">
-          <label class="form-label">Название</label>
-          <input type="text" name="name" class="form-control" placeholder="Стеллаж A">
+          <label class="form-label">Описание (необязательно)</label>
+          <input type="text" name="name" class="form-control" placeholder="Стеллаж у входа">
         </div>
-        <button type="submit" class="btn btn-primary">Создать зону</button>
+        <div class="mb-2">
+          <label class="form-label">Сразу создать ячеек</label>
+          <input type="number" name="cell_count" class="form-control" min="0" value="20">
+        </div>
+        <button type="submit" class="btn btn-primary">Создать ряд</button>
       </form>
     </div>
   </div>
   <div class="col-md-7">
     <div class="card p-3">
-      <h5>Зоны склада</h5>
+      <h5>Ряды склада</h5>
       <table class="table table-sm">
-        <thead><tr><th>Код</th><th>Название</th><th>Ячеек</th><th>Статус</th><th></th></tr></thead>
+        <thead><tr><th>Ряд</th><th>Описание</th><th>Ячеек</th><th>Статус</th><th></th></tr></thead>
         <tbody>
         {% for zone in zones %}
           <tr>
-            <td>{{ zone.code }}</td>
+            <td><b>{{ zone.code }}</b></td>
             <td>{{ zone.name or '' }}</td>
             <td>{{ zone.cells.count() }}</td>
-            <td>{% if zone.is_active %}<span class="badge bg-success">Активна</span>{% else %}<span class="badge bg-secondary">Отключена</span>{% endif %}</td>
+            <td>{% if zone.is_active %}<span class="badge bg-success">Активен</span>{% else %}<span class="badge bg-secondary">Отключен</span>{% endif %}</td>
             <td class="text-nowrap">
-              <a class="btn btn-sm btn-outline-primary" target="_blank" href="{{ url_for('labels.zone_label', zone_id=zone.id) }}">🖨 A4-этикетка</a>
+              <a class="btn btn-sm btn-outline-primary" target="_blank" href="{{ url_for('labels.zone_label', zone_id=zone.id) }}">🖨 A4-этикетка ряда</a>
+              <form method="post" action="{{ url_for('warehouses.add_cells', zone_id=zone.id) }}" class="d-inline-flex gap-1 align-items-center">
+                <input type="number" name="count" class="form-control form-control-sm" min="1" value="10" style="width:70px">
+                <button type="submit" class="btn btn-sm btn-outline-secondary">+ ячеек</button>
+              </form>
               <form method="post" action="{{ url_for('warehouses.toggle_zone', zone_id=zone.id) }}" class="d-inline">
                 <button type="submit" class="btn btn-sm btn-outline-secondary">{{ 'Отключить' if zone.is_active else 'Включить' }}</button>
               </form>
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="5" class="text-muted">Зоны еще не созданы</td></tr>
+          <tr><td colspan="5" class="text-muted">Ряды еще не созданы</td></tr>
         {% endfor %}
         </tbody>
       </table>
@@ -50,58 +62,28 @@
   </div>
 </div>
 
-<div class="row g-4">
-  <div class="col-md-5">
-    <div class="card p-3">
-      <h5>Добавить ячейку</h5>
-      <form method="post" action="{{ url_for('warehouses.create_cell', warehouse_id=warehouse.id) }}">
-        <div class="mb-2">
-          <label class="form-label">Код ячейки</label>
-          <input type="text" name="code" class="form-control" required placeholder="A-01-01">
-        </div>
-        <div class="mb-2">
-          <label class="form-label">Зона (необязательно)</label>
-          <select name="zone_id" class="form-select">
-            <option value="">Без зоны</option>
-            {% for zone in zones %}
-              <option value="{{ zone.id }}">{{ zone.code }}{% if zone.name %} — {{ zone.name }}{% endif %}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="mb-2">
-          <label class="form-label">Описание</label>
-          <input type="text" name="description" class="form-control">
-        </div>
-        <button type="submit" class="btn btn-primary">Создать</button>
-      </form>
-    </div>
-  </div>
-  <div class="col-md-7">
-    <div class="card p-3">
-      <h5>Список ячеек</h5>
-      <table class="table">
-        <thead><tr><th>Код</th><th>Зона</th><th>Описание</th><th>Коробов</th><th>Статус</th><th></th></tr></thead>
-        <tbody>
-        {% for cell in cells %}
-          <tr>
-            <td><a href="{{ url_for('warehouses.cell_detail', cell_id=cell.id) }}">{{ cell.code }}</a></td>
-            <td>{{ cell.zone.code if cell.zone else '' }}</td>
-            <td>{{ cell.description or '' }}</td>
-            <td><a href="{{ url_for('warehouses.cell_detail', cell_id=cell.id) }}">{{ cell.boxes.count() }}</a></td>
-            <td>{% if cell.is_active %}<span class="badge bg-success">Активна</span>{% else %}<span class="badge bg-secondary">Отключена</span>{% endif %}</td>
-            <td class="text-nowrap">
-              <a class="btn btn-sm btn-outline-primary" target="_blank" href="{{ url_for('labels.cell_label', cell_id=cell.id) }}">🖨 Этикетка</a>
-              <form method="post" action="{{ url_for('warehouses.toggle_cell', cell_id=cell.id) }}" class="d-inline">
-                <button type="submit" class="btn btn-sm btn-outline-secondary">{{ 'Отключить' if cell.is_active else 'Включить' }}</button>
-              </form>
-            </td>
-          </tr>
-        {% else %}
-          <tr><td colspan="6" class="text-muted">Ячейки еще не созданы</td></tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </div>
+<div class="card p-3">
+  <h5>Список ячеек</h5>
+  <table class="table">
+    <thead><tr><th>Код</th><th>Ряд</th><th>Коробов</th><th>Статус</th><th></th></tr></thead>
+    <tbody>
+    {% for cell in cells %}
+      <tr>
+        <td><a href="{{ url_for('warehouses.cell_detail', cell_id=cell.id) }}">{{ cell.code }}</a></td>
+        <td>{{ cell.zone.code if cell.zone else '' }}</td>
+        <td><a href="{{ url_for('warehouses.cell_detail', cell_id=cell.id) }}">{{ cell.boxes.count() }}</a></td>
+        <td>{% if cell.is_active %}<span class="badge bg-success">Активна</span>{% else %}<span class="badge bg-secondary">Отключена</span>{% endif %}</td>
+        <td class="text-nowrap">
+          <a class="btn btn-sm btn-outline-primary" target="_blank" href="{{ url_for('labels.cell_label', cell_id=cell.id) }}">🖨 Этикетка</a>
+          <form method="post" action="{{ url_for('warehouses.toggle_cell', cell_id=cell.id) }}" class="d-inline">
+            <button type="submit" class="btn btn-sm btn-outline-secondary">{{ 'Отключить' if cell.is_active else 'Включить' }}</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="text-muted">Ячейки еще не созданы — добавьте ряд слева</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
 </div>
 {% endblock %}

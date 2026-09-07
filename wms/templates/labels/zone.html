@@ -53,11 +53,11 @@
 
 <div class="zone-label-page">
   <img src="{{ barcode_img }}" alt="barcode">
-  <div class="zone-label-title">Зона {{ zone.code }}{% if zone.name %} — {{ zone.name }}{% endif %}</div>
+  <div class="zone-label-title">Ряд {{ zone.code }}{% if zone.name %} — {{ zone.name }}{% endif %}</div>
   <div class="zone-label-subtitle">{{ zone.warehouse.name if zone.warehouse else '' }}</div>
   {% if cell_codes %}
   <div class="zone-label-cells">
-    <b>Ячейки в зоне:</b> {{ cell_codes | join(', ') }}
+    <b>Ячейки в ряду:</b> {{ cell_codes | join(', ') }}
   </div>
   {% endif %}
 </div>

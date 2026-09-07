@@ -360,6 +360,12 @@ class MovementDocument(db.Model):
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime)
+    # Заполняется отдельным действием "Принято на складе" — короб может
+    # приехать (complete()), но физически его еще не проверили и не приняли
+    # на складе назначения. Пока это поле пусто, выполнение плана отгрузок
+    # по товару из этого документа не засчитывается (висит как "в пути"),
+    # чтобы отгрузки не считались успешными до фактической приемки.
+    received_at = db.Column(db.DateTime, nullable=True)
 
     from_warehouse = db.relationship("Warehouse", foreign_keys=[from_warehouse_id])
     to_warehouse = db.relationship("Warehouse", foreign_keys=[to_warehouse_id])

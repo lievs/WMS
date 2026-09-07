@@ -8,6 +8,8 @@ from ..extensions import db
 from ..models import (
     Box,
     BoxItem,
+    MovementDocument,
+    MovementLine,
     Nomenclature,
     ShipmentPlan,
     ShipmentPlanLine,
@@ -183,6 +185,22 @@ def _stock_by_nomenclature(warehouse_ids):
     return stock
 
 
+def _in_transit_by_warehouse():
+    """{warehouse_id: кол-во} товара, уже отправленного перемещением на этот
+    склад-город (документ завершен), но еще не подтвержденного кнопкой
+    "Принято на складе" — висит как "в пути", в план отгрузок пока не
+    засчитано (см. movement.receive)."""
+    rows = (
+        db.session.query(MovementDocument.to_warehouse_id, func.sum(BoxItem.qty))
+        .join(MovementLine, MovementLine.document_id == MovementDocument.id)
+        .join(BoxItem, BoxItem.box_id == MovementLine.box_id)
+        .filter(MovementDocument.status == "completed", MovementDocument.received_at.is_(None))
+        .group_by(MovementDocument.to_warehouse_id)
+        .all()
+    )
+    return {wh_id: qty or 0 for wh_id, qty in rows}
+
+
 def _pace_analysis(plan, total_planned, total_fulfilled):
     """Успеваем ли отгрузить план за 14 дней с даты из названия листа, и
     сколько дней потребуется при сегодняшнем темпе. Темп считается как
@@ -230,6 +248,7 @@ def dashboard():
     plans = {p.marketplace: p for p in ShipmentPlan.query.all()}
     sender_ids = _sender_warehouse_ids()
     stock = _stock_by_nomenclature(sender_ids)
+    in_transit_by_warehouse = _in_transit_by_warehouse()
 
     marketplaces_data = []
     lines_by_marketplace = {}
@@ -253,6 +272,8 @@ def dashboard():
             row["planned"] += line.planned_qty
             row["fulfilled"] += line.fulfilled_qty
         cities = sorted(by_warehouse.values(), key=lambda r: r["warehouse"].marketplace_city)
+        for row in cities:
+            row["in_transit"] = in_transit_by_warehouse.get(row["warehouse"].id, 0)
 
         # Штрихкоды с невыполненным остатком, для которых нечем отгружать —
         # только для значка-счетчика на карточке; сам список товаров теперь

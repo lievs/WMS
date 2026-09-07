@@ -16,11 +16,17 @@
     <form method="post" action="{{ url_for('movement.complete', doc_id=doc.id) }}" class="d-inline">
       <button type="submit" class="btn btn-success">✅ Завершить перемещение</button>
     </form>
-    {% if current_user.is_admin %}
+    {% elif not doc.received_at %}
+    <form method="post" action="{{ url_for('movement.receive', doc_id=doc.id) }}" class="d-inline">
+      <button type="submit" class="btn btn-warning" title="До этой кнопки товар считается «в пути» и не засчитывается в план отгрузок">📥 Принято на складе</button>
+    </form>
+    {% else %}
+    <span class="badge bg-success">Принято на складе {{ doc.received_at.strftime('%d.%m.%Y %H:%M') }}</span>
+    {% endif %}
+    {% if doc.status == 'draft' and current_user.is_admin %}
     <form method="post" action="{{ url_for('movement.delete_document', doc_id=doc.id) }}" class="d-inline" onsubmit="return confirm('Удалить список перемещения {{ doc.number }} целиком? Действие необратимо.');">
       <button type="submit" class="btn btn-outline-danger">🗑 Удалить документ</button>
     </form>
-    {% endif %}
     {% endif %}
   </div>
 </div>

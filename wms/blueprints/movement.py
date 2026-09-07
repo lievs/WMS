@@ -171,12 +171,37 @@ def complete(doc_id):
         box.warehouse_id = doc.to_warehouse_id
         box.cell_id = line.to_cell_id
         box.status = "stored" if line.to_cell_id else "open"
-        _apply_shipment_fulfillment(box, doc.to_warehouse_id)
+        # Выполнение плана отгрузок засчитывается не здесь, а отдельным
+        # действием "Принято на складе" (см. receive()) — короб физически
+        # мог еще ехать/лежать непроверенным на складе назначения.
 
     doc.status = "completed"
     doc.completed_at = datetime.utcnow()
     db.session.commit()
     flash(f"Перемещение {doc.number} завершено — {doc.lines.count()} короб(ов)", "success")
+    return redirect(url_for("movement.detail", doc_id=doc.id))
+
+
+@bp.route("/<int:doc_id>/receive", methods=["POST"])
+def receive(doc_id):
+    """Подтверждение фактической приемки на складе назначения — только
+    после этого выполнение зачисляется в план отгрузок (до этого товар
+    висит в статусе "в пути", см. shipment_plan.dashboard)."""
+    doc = MovementDocument.query.get_or_404(doc_id)
+    if doc.status != "completed":
+        flash("Сначала завершите перемещение", "danger")
+        return redirect(url_for("movement.detail", doc_id=doc.id))
+
+    if doc.received_at is not None:
+        flash("Перемещение уже отмечено как принятое", "danger")
+        return redirect(url_for("movement.detail", doc_id=doc.id))
+
+    for line in doc.lines:
+        _apply_shipment_fulfillment(line.box, doc.to_warehouse_id)
+
+    doc.received_at = datetime.utcnow()
+    db.session.commit()
+    flash(f"Перемещение {doc.number} принято на складе «{doc.to_warehouse.name}»", "success")
     return redirect(url_for("movement.detail", doc_id=doc.id))
 
 

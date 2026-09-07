@@ -6,7 +6,7 @@
 <h3 class="mb-1">Ячейка {{ cell.code }}</h3>
 <div class="text-muted mb-4">
   Склад: {{ cell.warehouse.name }}
-  {% if cell.zone %} · Зона: {{ cell.zone.code }}{% if cell.zone.name %} — {{ cell.zone.name }}{% endif %}{% endif %}
+  {% if cell.zone %} · Ряд: {{ cell.zone.code }}{% if cell.zone.name %} — {{ cell.zone.name }}{% endif %}{% endif %}
   {% if cell.description %} · {{ cell.description }}{% endif %}
 </div>
 

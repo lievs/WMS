@@ -29,26 +29,55 @@
 <div class="card p-3 mb-4">
   <h5>Неразмещенный остаток на складе «{{ doc.warehouse.name }}»</h5>
   {% if available_stock %}
-  <p class="text-muted small mb-2">Двойной клик по строке — взять всё доступное количество под упаковку.</p>
+  <p class="text-muted small mb-2">
+    {% if active_box %}Двойной клик по строке — добавить всё доступное количество в короб {{ active_box.box_number }}.
+    {% else %}Сначала отсканируйте или создайте короб ниже, потом двойной клик по строке добавит товар в него.{% endif %}
+  </p>
   {% endif %}
   <table class="table table-sm mb-0">
-    <thead><tr><th>Товар</th><th>Доступно</th></tr></thead>
+    <thead><tr><th>Штрихкод</th><th>Наименование</th><th>Размер</th><th>Доступно</th></tr></thead>
     <tbody id="availableStockBody">
     {% for row in available_stock %}
-      <tr class="stock-row" style="cursor:pointer" data-nomenclature-id="{{ row.nomenclature_id }}" data-available="{{ row.qty }}" title="Двойной клик — добавить под упаковку">
-        <td>{{ row.nomenclature.name }} ({{ row.nomenclature.sku }})</td><td>{{ row.qty }} {{ row.nomenclature.unit }}</td>
+      <tr class="stock-row{% if active_box %} clickable{% endif %}" data-nomenclature-id="{{ row.nomenclature_id }}" data-available="{{ row.qty }}" title="{% if active_box %}Двойной клик — добавить в короб {{ active_box.box_number }}{% endif %}">
+        <td>{{ row.nomenclature.barcode }}</td>
+        <td>{{ row.nomenclature.name }}</td>
+        <td>{{ row.nomenclature.size or '' }}</td>
+        <td>{{ row.qty }} {{ row.nomenclature.unit }}</td>
       </tr>
     {% else %}
-      <tr><td colspan="2" class="text-muted">Неразмещенного остатка на этом складе нет</td></tr>
+      <tr><td colspan="4" class="text-muted">Неразмещенного остатка на этом складе нет</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
 
+<div class="card p-3 mb-4">
+  <h5>1. Короб</h5>
+  {% if active_box %}
+    <div class="alert alert-primary d-flex justify-content-between align-items-center flex-wrap gap-2 mb-0">
+      <div>Работаем с коробом <b>{{ active_box.box_number }}</b>{% if active_box.items.count() %} — уже внутри: {{ active_box.items.count() }} поз.{% endif %}</div>
+      <a class="btn btn-sm btn-outline-primary" href="{{ url_for('placement.detail', doc_id=doc.id) }}">Сменить короб</a>
+    </div>
+  {% else %}
+    <p class="text-muted small">Отсканируйте короб (уже созданный ранее массовой печатью) или создайте новый — товар будете сканировать сразу в него.</p>
+    <div class="d-flex gap-2 flex-wrap">
+      <form method="post" action="{{ url_for('placement.select_box', doc_id=doc.id) }}" class="d-flex gap-2">
+        <input type="text" name="box_number" id="boxNumberInput" class="form-control form-control-lg" placeholder="Отсканируйте или введите номер короба" required autofocus data-submit-on-enter>
+        <button type="button" class="btn btn-outline-primary" data-camera-scan-target="#boxNumberInput" title="Сканировать камерой">📷</button>
+        <button type="submit" class="btn btn-primary">Выбрать</button>
+      </form>
+      <form method="post" action="{{ url_for('placement.create_box', doc_id=doc.id) }}">
+        <button type="submit" class="btn btn-outline-primary">📦 Создать новый короб</button>
+      </form>
+    </div>
+  {% endif %}
+</div>
+
+{% if active_box %}
 <div class="row g-4 mb-4">
   <div class="col-md-5">
     <div class="card p-3">
-      <h5>Сканировать штрихкод товара</h5>
+      <h5>2. Сканировать штрихкод товара</h5>
       <div class="d-flex gap-2">
         <input type="text" id="scanInput" class="form-control form-control-lg" placeholder="Отсканируйте штрихкод и нажмите Enter" autofocus>
         <button type="button" class="btn btn-outline-primary" data-camera-scan-target="#scanInput" title="Сканировать камерой телефона">📷</button>
@@ -58,12 +87,12 @@
   </div>
   <div class="col-md-7">
     <div class="card p-3">
-      <h5>Взять под упаковку вручную (поиск "содержит")</h5>
-      <form method="post" action="{{ url_for('placement.add_line', doc_id=doc.id) }}" class="row g-2 align-items-end">
+      <h5>...либо ввести вручную (поиск "содержит")</h5>
+      <form method="post" action="{{ url_for('placement.add_item_to_box', doc_id=doc.id, box_id=active_box.id) }}" class="row g-2 align-items-end">
         <div class="col-md-7">
           <label class="form-label">Товар</label>
           <div class="autocomplete-box" data-autocomplete-nomenclature>
-            <input type="text" class="form-control ac-input" placeholder="Артикул, наименование или штрихкод..." autocomplete="off">
+            <input type="text" class="form-control ac-input" placeholder="Штрихкод или наименование..." autocomplete="off">
             <input type="hidden" class="ac-value" name="nomenclature_id" required>
             <div class="autocomplete-list"></div>
           </div>
@@ -80,9 +109,12 @@
   </div>
 </div>
 {% endif %}
+{% endif %}
 
+{% if unpacked_lines %}
 <div class="card p-3 mb-4">
   <h5>Под упаковку (не в коробе)</h5>
+  <p class="text-muted small">Остались с прошлой версии размещения — доупакуйте их в короб или удалите.</p>
   <table class="table table-sm">
     <thead><tr><th>Товар</th><th>Кол-во</th>{% if doc.status == 'draft' %}<th>Упаковать в короб</th><th></th>{% endif %}</tr></thead>
     <tbody>
@@ -113,25 +145,17 @@
         </td>
         {% endif %}
       </tr>
-    {% else %}
-      <tr><td colspan="4" class="text-muted">Нет позиций, ожидающих упаковки</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
+{% endif %}
 
 <div class="card p-3 mb-4">
-  <div class="d-flex justify-content-between align-items-center mb-2">
-    <h5 class="mb-0">Короба этого документа</h5>
-    {% if doc.status == 'draft' %}
-    <form method="post" action="{{ url_for('placement.create_box', doc_id=doc.id) }}">
-      <button type="submit" class="btn btn-outline-primary btn-sm">📦 Создать короб</button>
-    </form>
-    {% endif %}
-  </div>
+  <h5 class="mb-2">Короба этого документа</h5>
 
   {% for box in boxes %}
-  <div class="border rounded p-3 mb-3">
+  <div class="border rounded p-3 mb-3{% if active_box and box.id == active_box.id %} border-primary{% endif %}">
     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
       <div>
         <a href="{{ url_for('boxes.detail', box_id=box.id) }}"><b>{{ box.box_number }}</b></a>
@@ -139,6 +163,9 @@
         {% if box.cell %}<span class="text-muted">— ячейка <a href="{{ url_for('warehouses.cell_detail', cell_id=box.cell.id) }}">{{ box.cell.code }}</a></span>{% endif %}
       </div>
       <div>
+        {% if doc.status == 'draft' and not (active_box and box.id == active_box.id) %}
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('placement.detail', doc_id=doc.id, box=box.id) }}">Сканировать в этот короб</a>
+        {% endif %}
         <a class="btn btn-sm btn-outline-secondary" target="_blank" href="{{ url_for('labels.box_label', box_id=box.id) }}">🖨 Этикетка короба</a>
         {% if box.items.count() > 0 %}
         <a class="btn btn-sm btn-outline-secondary" target="_blank" href="{{ url_for('labels.box_items_labels', box_id=box.id) }}">🖨 Этикетки товаров</a>
@@ -198,11 +225,12 @@
 
 {% block scripts %}
 <script>
+  {% if active_box %}
   const scanInput = document.getElementById("scanInput");
   const scanResult = document.getElementById("scanResult");
   if (scanInput) {
     initBarcodeInput(scanInput, (barcode) => {
-      fetch("{{ url_for('placement.add_line_by_barcode', doc_id=doc.id) }}", {
+      fetch("{{ url_for('placement.add_item_to_box_by_barcode', doc_id=doc.id, box_id=active_box.id) }}", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ barcode: barcode, qty: 1 }),
@@ -219,14 +247,14 @@
     });
   }
 
-  // Двойной клик по строке остатка — добавить всё доступное количество под упаковку
+  // Двойной клик по строке остатка — добавить всё доступное количество в активный короб
   const stockBody = document.getElementById("availableStockBody");
   if (stockBody) {
-    stockBody.querySelectorAll(".stock-row").forEach((row) => {
+    stockBody.querySelectorAll(".stock-row.clickable").forEach((row) => {
       row.addEventListener("dblclick", () => {
         const form = document.createElement("form");
         form.method = "POST";
-        form.action = "{{ url_for('placement.add_line', doc_id=doc.id) }}";
+        form.action = "{{ url_for('placement.add_item_to_box', doc_id=doc.id, box_id=active_box.id) }}";
 
         const idInput = document.createElement("input");
         idInput.type = "hidden";
@@ -245,5 +273,6 @@
       });
     });
   }
+  {% endif %}
 </script>
 {% endblock %}

@@ -37,6 +37,23 @@ def _ensure_columns():
                         text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {col_type}')
                     )
                 print(f"[schema] Добавлена колонка {table.name}.{column.name}")
+                if table.name == "movement_documents" and column.name == "received_at":
+                    # До этой версии перемещение засчитывалось в план отгрузок
+                    # сразу по завершении, отдельного подтверждения приемки не
+                    # было. Если считать все уже завершенные документы
+                    # "неполученными" (received_at пуст), кнопка "Принято на
+                    # складе" на них задвоила бы уже учтенное выполнение плана.
+                    # Поэтому именно в момент появления колонки (то есть один
+                    # раз, при обновлении с более старой версии) закрываем ее
+                    # задним числом для всего, что уже было завершено.
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE movement_documents SET received_at = completed_at "
+                                "WHERE status = 'completed' AND received_at IS NULL"
+                            )
+                        )
+                    print("[schema] movement_documents.received_at заполнен для уже завершенных документов")
             except Exception as exc:  # noqa: BLE001
                 print(f"[schema] Не удалось добавить {table.name}.{column.name}: {exc}")
 

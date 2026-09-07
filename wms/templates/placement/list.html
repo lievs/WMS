@@ -12,16 +12,18 @@
       <h5>Неразмещенный остаток по складам</h5>
       <p class="text-muted small">Принятый товар, который еще не упакован в короба и не расставлен по ячейкам.</p>
       <table class="table table-sm">
-        <thead><tr><th>Склад</th><th>Товар</th><th>Кол-во</th></tr></thead>
+        <thead><tr><th>Склад</th><th>Штрихкод</th><th>Наименование</th><th>Размер</th><th>Кол-во</th></tr></thead>
         <tbody>
         {% for row in stock_rows %}
           <tr>
             <td>{{ row.warehouse.name }}</td>
+            <td>{{ row.nomenclature.barcode }}</td>
             <td>{{ row.nomenclature.name }}</td>
+            <td>{{ row.nomenclature.size or '' }}</td>
             <td>{{ row.qty }} {{ row.nomenclature.unit }}</td>
           </tr>
         {% else %}
-          <tr><td colspan="3" class="text-muted">Неразмещенных остатков нет</td></tr>
+          <tr><td colspan="5" class="text-muted">Неразмещенных остатков нет</td></tr>
         {% endfor %}
         </tbody>
       </table>

@@ -13,15 +13,20 @@ SERIES = {
 }
 
 
-def next_number(key: str) -> str:
+def next_number(key: str, prefix: str = None, width: int = None) -> str:
     """Атомарно увеличивает счетчик и возвращает отформатированный номер.
 
     Инкремент выполняется одним SQL-запросом (UPSERT) прямо в базе, а не
     read-modify-write в Python — это важно при одновременной работе
     нескольких пользователей: два запроса не могут получить один и тот же
     номер, даже если оба обратились к next_number почти одновременно.
+
+    prefix/width можно передать явно — для серий, которых нет в SERIES
+    (например, отдельный счетчик ячеек на каждый ряд склада, ключ которого
+    известен только в рантайме: "row_cells:<id ряда>").
     """
-    prefix, width = SERIES[key]
+    if prefix is None or width is None:
+        prefix, width = SERIES[key]
 
     db.session.execute(
         text(

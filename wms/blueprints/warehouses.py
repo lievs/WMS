@@ -6,6 +6,28 @@ from ..utils.numbering import next_number
 
 bp = Blueprint("warehouses", __name__)
 
+# Ширина числовой части кода ячейки: код ряда "A" -> ячейки "A0001", "A0002", ...
+# Ряд остается моделью Zone в БД (менять таблицу/класс ради переименования
+# в интерфейсе избыточно) — но по смыслу и в тексте для пользователя это
+# именно "ряд", а не свободно называемая "зона".
+CELL_NUMBER_WIDTH = 4
+
+
+def _generate_cells(zone, count):
+    """Создает `count` новых ячеек в ряду с кодами вида "<код ряда><NNNN>",
+    продолжая нумерацию с того места, где она остановилась в этом ряду —
+    чтобы короб можно было сразу и однозначно сканировать в ячейку при
+    размещении, без придумывания кода вручную."""
+    created = []
+    for _ in range(count):
+        code = next_number(
+            f"row_cells:{zone.id}", prefix=zone.code, width=CELL_NUMBER_WIDTH
+        )
+        cell = Cell(warehouse_id=zone.warehouse_id, zone_id=zone.id, code=code)
+        db.session.add(cell)
+        created.append(cell)
+    return created
+
 
 @bp.route("/")
 def list_warehouses():
@@ -49,22 +71,33 @@ def cells(warehouse_id):
 
 @bp.route("/<int:warehouse_id>/zones/create", methods=["POST"])
 def create_zone(warehouse_id):
+    """Создает ряд склада и сразу же генерирует под него ячейки (если
+    указано их количество) — коды ячеек присваиваются автоматически
+    ("<ряд><NNNN>"), вручную придумывать и вводить их не нужно."""
     wh = Warehouse.query.get_or_404(warehouse_id)
     code = request.form.get("code", "").strip()
     name = request.form.get("name", "").strip()
+    cell_count = request.form.get("cell_count", type=int) or 0
 
     if not code:
-        flash("Укажите код зоны", "danger")
+        flash("Укажите название ряда", "danger")
         return redirect(url_for("warehouses.cells", warehouse_id=wh.id))
 
     if Zone.query.filter_by(warehouse_id=wh.id, code=code).first():
-        flash(f"Зона '{code}' уже существует на этом складе", "danger")
+        flash(f"Ряд '{code}' уже существует на этом складе", "danger")
         return redirect(url_for("warehouses.cells", warehouse_id=wh.id))
 
     zone = Zone(warehouse_id=wh.id, code=code, name=name)
     db.session.add(zone)
+    db.session.flush()
+
+    message = f"Ряд '{code}' создан"
+    if cell_count > 0:
+        cells = _generate_cells(zone, cell_count)
+        message += f", ячеек создано: {len(cells)} ({cells[0].code}–{cells[-1].code})"
+
     db.session.commit()
-    flash(f"Зона '{code}' создана", "success")
+    flash(message, "success")
     return redirect(url_for("warehouses.cells", warehouse_id=wh.id))
 
 
@@ -76,30 +109,21 @@ def toggle_zone(zone_id):
     return redirect(url_for("warehouses.cells", warehouse_id=zone.warehouse_id))
 
 
-@bp.route("/<int:warehouse_id>/cells/create", methods=["POST"])
-def create_cell(warehouse_id):
-    wh = Warehouse.query.get_or_404(warehouse_id)
-    code = request.form.get("code", "").strip()
-    description = request.form.get("description", "").strip()
-    zone_id = request.form.get("zone_id", type=int) or None
+@bp.route("/zones/<int:zone_id>/cells/add", methods=["POST"])
+def add_cells(zone_id):
+    """Догенерировать еще ячеек в существующем ряду — нумерация продолжается
+    с того места, на котором остановилась в этом ряду."""
+    zone = Zone.query.get_or_404(zone_id)
+    count = request.form.get("count", type=int) or 0
 
-    if not code:
-        flash("Укажите код ячейки", "danger")
-        return redirect(url_for("warehouses.cells", warehouse_id=wh.id))
+    if count <= 0:
+        flash("Укажите количество ячеек", "danger")
+        return redirect(url_for("warehouses.cells", warehouse_id=zone.warehouse_id))
 
-    if Cell.query.filter_by(warehouse_id=wh.id, code=code).first():
-        flash(f"Ячейка '{code}' уже существует на этом складе", "danger")
-        return redirect(url_for("warehouses.cells", warehouse_id=wh.id))
-
-    if zone_id and not Zone.query.filter_by(id=zone_id, warehouse_id=wh.id).first():
-        flash("Зона не найдена на этом складе", "danger")
-        return redirect(url_for("warehouses.cells", warehouse_id=wh.id))
-
-    cell = Cell(warehouse_id=wh.id, code=code, description=description, zone_id=zone_id)
-    db.session.add(cell)
+    cells = _generate_cells(zone, count)
     db.session.commit()
-    flash(f"Ячейка '{code}' создана", "success")
-    return redirect(url_for("warehouses.cells", warehouse_id=wh.id))
+    flash(f"В ряду '{zone.code}' создано ячеек: {len(cells)} ({cells[0].code}–{cells[-1].code})", "success")
+    return redirect(url_for("warehouses.cells", warehouse_id=zone.warehouse_id))
 
 
 @bp.route("/cells/<int:cell_id>/toggle", methods=["POST"])

@@ -152,7 +152,7 @@ def zone_label(zone_id):
 def zone_label_pdf(zone_id):
     zone = Zone.query.get_or_404(zone_id)
     subtitle = zone.warehouse.name if zone.warehouse else ""
-    title = f"Зона {zone.code}" + (f" — {zone.name}" if zone.name else "")
+    title = f"Ряд {zone.code}" + (f" — {zone.name}" if zone.name else "")
     cell_codes = [c.code for c in zone.cells.order_by(Cell.code).all()]
     pdf = build_zone_label_pdf(zone.code, title, subtitle, cell_codes)
     return Response(
