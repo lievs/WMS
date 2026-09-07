@@ -185,6 +185,24 @@ def _stock_by_nomenclature(warehouse_ids):
     return stock
 
 
+def _unplaced_by_nomenclature(warehouse_ids):
+    """{nomenclature_id: кол-во} товара, который принят, но еще не упакован
+    в короб (висит в UnplacedStock) — по сути, "на разбраковке": уже на
+    складе, но пока не готов к отгрузке. Отдельно от _stock_by_nomenclature,
+    которая считает вообще любой остаток (включая уже упакованный)."""
+    if not warehouse_ids:
+        return {}
+    return {
+        nomenclature_id: qty or 0
+        for nomenclature_id, qty in (
+            db.session.query(UnplacedStock.nomenclature_id, func.sum(UnplacedStock.qty))
+            .filter(UnplacedStock.warehouse_id.in_(warehouse_ids))
+            .group_by(UnplacedStock.nomenclature_id)
+            .all()
+        )
+    }
+
+
 def _in_transit_by_warehouse():
     """{warehouse_id: кол-во} товара, уже отправленного перемещением на этот
     склад-город (документ завершен), но еще не подтвержденного кнопкой
@@ -248,6 +266,7 @@ def dashboard():
     plans = {p.marketplace: p for p in ShipmentPlan.query.all()}
     sender_ids = _sender_warehouse_ids()
     stock = _stock_by_nomenclature(sender_ids)
+    unplaced_stock = _unplaced_by_nomenclature(sender_ids)
     in_transit_by_warehouse = _in_transit_by_warehouse()
 
     marketplaces_data = []
@@ -320,6 +339,12 @@ def dashboard():
                     "size": line.size,
                     "no_stock": line.nomenclature_id is None
                     or stock.get(line.nomenclature_id, 0) <= 0,
+                    # Принято, но еще не упаковано в короб ("на разбраковке") —
+                    # отдельно от no_stock: товар физически есть на складе,
+                    # просто еще не готов к отгрузке.
+                    "unplaced": unplaced_stock.get(line.nomenclature_id, 0)
+                    if line.nomenclature_id is not None
+                    else 0,
                     "ozon": {},
                     "wb": {},
                     "max_remaining": 0,
