@@ -1,7 +1,20 @@
 from flask import Blueprint, Response, flash, redirect, render_template, request, url_for
+from flask_login import current_user
 
 from ..extensions import db
-from ..models import Nomenclature, ProductCategory
+from ..models import (
+    Box,
+    BoxItem,
+    InventoryLine,
+    Nomenclature,
+    PlacementLine,
+    ProductCategory,
+    ProductionRecord,
+    ReceivingLine,
+    ShipmentPlanLine,
+    UnplacedStock,
+    Warehouse,
+)
 from ..utils.categorize import classify_by_name
 from ..utils.excel_io import (
     build_nomenclature_template,
@@ -14,46 +27,166 @@ from ..utils.http import content_disposition
 bp = Blueprint("nomenclature", __name__)
 
 
+def _require_edit():
+    """Просмотр номенклатуры и раздела доступен всем с доступом к разделу
+    (see SECTIONS) — а вот менять её (добавлять/править вид и норму/
+    импортировать) можно только с отдельным правом (см.
+    User.nomenclature_edit_allowed), которое настраивается отдельно от
+    доступа к разделу в «Настройки» → «Разделы»."""
+    if current_user.can_edit_nomenclature():
+        return True
+    flash("Редактировать номенклатуру вам не разрешено — обратитесь к администратору", "danger")
+    return False
+
+
+@bp.route("/clear", methods=["POST"])
+def clear_nomenclature():
+    """Удаляет из номенклатуры все позиции, которые нигде не использовались
+    (нет остатков, нет строк ни в одном документе/движении) — например,
+    чтобы стереть пробный/ошибочный импорт перед чистой загрузкой. Товары,
+    хоть раз засветившиеся в реальных данных, не трогаем — иначе документы
+    и остатки, которые на них ссылаются, осиротеют."""
+    if not current_user.is_admin:
+        flash("Очищать номенклатуру может только администратор", "danger")
+        return redirect(url_for("nomenclature.list_nomenclature"))
+
+    referenced_ids = set()
+    for column in (
+        BoxItem.nomenclature_id,
+        ReceivingLine.nomenclature_id,
+        PlacementLine.nomenclature_id,
+        InventoryLine.nomenclature_id,
+        ProductionRecord.nomenclature_id,
+        ShipmentPlanLine.nomenclature_id,
+        UnplacedStock.nomenclature_id,
+    ):
+        referenced_ids.update(row[0] for row in db.session.query(column).distinct().all())
+
+    query = Nomenclature.query
+    if referenced_ids:
+        query = query.filter(~Nomenclature.id.in_(referenced_ids))
+    candidates = query.all()
+
+    total = Nomenclature.query.count()
+    deleted = len(candidates)
+    for item in candidates:
+        db.session.delete(item)
+    db.session.commit()
+
+    flash(
+        f"Удалено товаров без истории: {deleted}. "
+        f"Оставлено (есть остатки/документы): {total - deleted}",
+        "success",
+    )
+    return redirect(url_for("nomenclature.list_nomenclature"))
+
+
+@bp.route("/locate")
+def locate():
+    """Поиск товара по штрихкоду: где он сейчас физически лежит — по
+    складам/ячейкам/коробам (упакован) и отдельно неразмещенный остаток
+    (принят, но еще не упакован в короб)."""
+    barcode = request.args.get("barcode", "").strip()
+    item = None
+    box_rows = []
+    unplaced_rows = []
+    not_found = False
+
+    if barcode:
+        item = Nomenclature.query.filter_by(barcode=barcode).first()
+        if item is None:
+            not_found = True
+        else:
+            box_rows = (
+                BoxItem.query.filter_by(nomenclature_id=item.id)
+                .join(Box)
+                .join(Warehouse, Box.warehouse_id == Warehouse.id)
+                .order_by(Warehouse.code, Box.box_number)
+                .all()
+            )
+            unplaced_rows = (
+                UnplacedStock.query.filter_by(nomenclature_id=item.id)
+                .filter(UnplacedStock.qty > 0)
+                .join(Warehouse)
+                .order_by(Warehouse.code)
+                .all()
+            )
+
+    return render_template(
+        "nomenclature/locate.html",
+        barcode=barcode,
+        item=item,
+        box_rows=box_rows,
+        unplaced_rows=unplaced_rows,
+        not_found=not_found,
+    )
+
+
+NOMENCLATURE_PAGE_SIZE = 100
+
+
 @bp.route("/")
 def list_nomenclature():
+    """Каталог может разрастись до тысяч позиций (реальный ассортимент
+    одежды по артикулам/размерам) — без постраничной разбивки страница
+    рендерила все строки разом, а в каждой строке еще и полный select видов
+    товара, так что HTML на выходе становился очень тяжелым и открывался
+    заметно медленно. Поэтому список постраничный; поиск (q) сбрасывает
+    страницу на первую."""
     q = request.args.get("q", "").strip()
+    page = request.args.get("page", 1, type=int)
     query = Nomenclature.query
     if q:
-        like = f"%{q}%"
-        query = query.filter(
-            db.or_(
-                Nomenclature.name.ilike(like),
-                Nomenclature.sku.ilike(like),
-                Nomenclature.barcode.ilike(like),
+        # Каждое слово запроса ищем отдельно (в любом порядке) — так
+        # "кар беж" находит "Кардиган бежевый 44-45".
+        for token in q.split():
+            like = f"%{token}%"
+            query = query.filter(
+                db.or_(
+                    Nomenclature.name.ilike(like),
+                    Nomenclature.sku.ilike(like),
+                    Nomenclature.barcode.ilike(like),
+                )
             )
-        )
-    items = query.order_by(Nomenclature.name).all()
+    pagination = query.order_by(Nomenclature.name).paginate(
+        page=page, per_page=NOMENCLATURE_PAGE_SIZE, error_out=False
+    )
     categories = ProductCategory.query.order_by(ProductCategory.name).all()
-    return render_template("nomenclature/list.html", items=items, q=q, categories=categories)
+    return render_template(
+        "nomenclature/list.html",
+        items=pagination.items,
+        pagination=pagination,
+        q=q,
+        categories=categories,
+    )
 
 
 @bp.route("/create", methods=["POST"])
 def create_nomenclature():
-    sku = request.form.get("sku", "").strip()
+    if not _require_edit():
+        return redirect(url_for("nomenclature.list_nomenclature"))
+
     barcode = request.form.get("barcode", "").strip()
     name = request.form.get("name", "").strip()
+    size = request.form.get("size", "").strip()
+    sku = request.form.get("sku", "").strip()
     unit = request.form.get("unit", "шт").strip() or "шт"
     description = request.form.get("description", "").strip()
     norm_minutes = request.form.get("norm_minutes", type=float)
 
-    if not sku or not name:
-        flash("Укажите артикул и наименование", "danger")
+    if not barcode or not name:
+        flash("Укажите штрихкод и наименование", "danger")
         return redirect(url_for("nomenclature.list_nomenclature"))
 
-    if not barcode:
-        barcode = sku
-
-    if Nomenclature.query.filter_by(sku=sku).first():
-        flash(f"Товар с артикулом '{sku}' уже существует", "danger")
-        return redirect(url_for("nomenclature.list_nomenclature"))
+    if not sku:
+        sku = barcode
 
     if Nomenclature.query.filter_by(barcode=barcode).first():
         flash(f"Штрихкод '{barcode}' уже используется", "danger")
+        return redirect(url_for("nomenclature.list_nomenclature"))
+
+    if Nomenclature.query.filter_by(sku=sku).first():
+        flash(f"Товар с артикулом '{sku}' уже существует", "danger")
         return redirect(url_for("nomenclature.list_nomenclature"))
 
     category = classify_by_name(name)
@@ -62,6 +195,7 @@ def create_nomenclature():
         sku=sku,
         barcode=barcode,
         name=name,
+        size=size or None,
         unit=unit,
         description=description,
         norm_minutes=norm_minutes,
@@ -76,6 +210,9 @@ def create_nomenclature():
 @bp.route("/<int:item_id>/norm", methods=["POST"])
 def update_norm(item_id):
     """Норма времени на 1 шт для расчета эффективности в модуле «Производство»."""
+    if not _require_edit():
+        return redirect(url_for("nomenclature.list_nomenclature"))
+
     item = Nomenclature.query.get_or_404(item_id)
     norm_minutes = request.form.get("norm_minutes", type=float)
     item.norm_minutes = norm_minutes
@@ -88,12 +225,62 @@ def update_norm(item_id):
 def update_category(item_id):
     """Вид товара определяется автоматически по названию при создании, но
     его можно поправить вручную (например, если название нетипичное)."""
+    if not _require_edit():
+        return redirect(url_for("nomenclature.list_nomenclature"))
+
     item = Nomenclature.query.get_or_404(item_id)
     category_id = request.form.get("category_id", type=int)
     item.category_id = category_id or None
     db.session.commit()
     flash(f"Вид товара для «{item.name}» обновлен", "success")
     return redirect(url_for("nomenclature.list_nomenclature", q=request.form.get("q", "")))
+
+
+@bp.route("/<int:item_id>/barcode", methods=["POST"])
+def update_barcode(item_id):
+    """Штрихкод иногда нужно поправить прямо в списке — например, если при
+    создании товара его ввели с опечаткой или он поменялся у поставщика."""
+    if not _require_edit():
+        return redirect(url_for("nomenclature.list_nomenclature"))
+
+    item = Nomenclature.query.get_or_404(item_id)
+    barcode = request.form.get("barcode", "").strip()
+    q = request.form.get("q", "")
+
+    if not barcode:
+        flash("Штрихкод не может быть пустым", "danger")
+        return redirect(url_for("nomenclature.list_nomenclature", q=q))
+
+    existing = Nomenclature.query.filter_by(barcode=barcode).first()
+    if existing and existing.id != item.id:
+        flash(f"Штрихкод '{barcode}' уже используется у товара «{existing.name}»", "danger")
+        return redirect(url_for("nomenclature.list_nomenclature", q=q))
+
+    item.barcode = barcode
+    db.session.commit()
+    flash(f"Штрихкод для «{item.name}» обновлен", "success")
+    return redirect(url_for("nomenclature.list_nomenclature", q=q))
+
+
+@bp.route("/<int:item_id>/name", methods=["POST"])
+def update_name(item_id):
+    """Наименование иногда нужно поправить прямо в списке — например,
+    после ручного импорта с неточным названием."""
+    if not _require_edit():
+        return redirect(url_for("nomenclature.list_nomenclature"))
+
+    item = Nomenclature.query.get_or_404(item_id)
+    name = request.form.get("name", "").strip()
+    q = request.form.get("q", "")
+
+    if not name:
+        flash("Наименование не может быть пустым", "danger")
+        return redirect(url_for("nomenclature.list_nomenclature", q=q))
+
+    item.name = name
+    db.session.commit()
+    flash(f"Наименование обновлено на «{name}»", "success")
+    return redirect(url_for("nomenclature.list_nomenclature", q=q))
 
 
 @bp.route("/template.xlsx")
@@ -122,6 +309,9 @@ def export_all():
 def import_nomenclature():
     if request.method == "GET":
         return render_template("nomenclature/import.html")
+
+    if not _require_edit():
+        return redirect(url_for("nomenclature.list_nomenclature"))
 
     file = request.files.get("file")
     if not file or file.filename == "":

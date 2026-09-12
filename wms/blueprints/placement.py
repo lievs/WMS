@@ -11,16 +11,19 @@ from flask import (
     url_for,
 )
 from flask_login import current_user
+from sqlalchemy import func
 
 from ..extensions import db
 from ..models import (
     Box,
     BoxItem,
     Cell,
+    CELL_CAPACITY,
     MovementLine,
     Nomenclature,
     PlacementDocument,
     PlacementLine,
+    SupplierReturn,
     UnplacedStock,
     Warehouse,
 )
@@ -29,6 +32,71 @@ from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 
 bp = Blueprint("placement", __name__)
+
+
+def suggest_cell(warehouse_id, box):
+    """Подсказка ячейки под конкретный короб: сначала ищем ячейку, где уже
+    лежит короб с тем же товаром (пусть даже вперемешку с другим — это не
+    критично), затем — просто ячейку в том же ряду, где такой товар уже
+    есть где-нибудь, и только если совсем ничего похожего нет — любую
+    ячейку с местом (предпочитая уже частично заполненные, чтобы не плодить
+    начатые ячейки по одной коробке)."""
+    nomenclature_ids = {item.nomenclature_id for item in box.items}
+    if not nomenclature_ids:
+        return None
+
+    cells = Cell.query.filter_by(warehouse_id=warehouse_id, is_active=True).all()
+    if not cells:
+        return None
+
+    matched_cell_ids = {
+        row[0]
+        for row in (
+            db.session.query(Box.cell_id)
+            .join(BoxItem, BoxItem.box_id == Box.id)
+            .filter(
+                Box.warehouse_id == warehouse_id,
+                Box.cell_id.isnot(None),
+                Box.id != box.id,
+                BoxItem.nomenclature_id.in_(nomenclature_ids),
+            )
+            .distinct()
+            .all()
+        )
+    }
+    matched_zone_ids = {c.zone_id for c in cells if c.id in matched_cell_ids and c.zone_id}
+    box_counts = dict(
+        db.session.query(Box.cell_id, func.count(Box.id))
+        .filter(Box.warehouse_id == warehouse_id, Box.cell_id.isnot(None), Box.id != box.id)
+        .group_by(Box.cell_id)
+        .all()
+    )
+
+    best = None
+    for cell in cells:
+        if cell.id == box.cell_id:
+            continue
+        count = box_counts.get(cell.id, 0)
+        if count >= CELL_CAPACITY:
+            continue
+        direct_match = cell.id in matched_cell_ids
+        row_match = bool(cell.zone_id and cell.zone_id in matched_zone_ids)
+        score = (not direct_match, not row_match, -count, cell.code)
+        if best is None or score < best[0]:
+            best = (score, cell, direct_match, row_match, count)
+
+    if best is None:
+        return None
+    _, cell, direct_match, row_match, count = best
+    if direct_match:
+        reason = f"в ячейке уже есть такой же товар ({count} короб. в ячейке)"
+    elif row_match:
+        reason = f"такой товар уже есть в этом ряду ({cell.zone.code})"
+    elif count > 0:
+        reason = "ячейка уже частично заполнена"
+    else:
+        reason = "пустая ячейка"
+    return {"cell": cell, "reason": reason, "free": CELL_CAPACITY - count}
 
 
 @bp.route("/")
@@ -48,9 +116,49 @@ def list_documents():
         .order_by(Warehouse.code, Box.box_number)
         .all()
     )
+    cell_suggestions = {box.id: suggest_cell(box.warehouse_id, box) for box in open_boxes}
+    returns = SupplierReturn.query.order_by(SupplierReturn.created_at.desc()).limit(20).all()
     return render_template(
-        "placement/list.html", documents=documents, stock_rows=stock_rows, open_boxes=open_boxes
+        "placement/list.html",
+        documents=documents,
+        stock_rows=stock_rows,
+        open_boxes=open_boxes,
+        cell_suggestions=cell_suggestions,
+        returns=returns,
     )
+
+
+@bp.route("/write-off-stock", methods=["POST"])
+def write_off_stock():
+    """Списание брака с неразмещенного остатка через возврат поставщику.
+    Сам документ возврата оформляется в 1С отдельно — здесь только
+    списываем количество со склада и фиксируем его для сверки."""
+    warehouse_id = request.form.get("warehouse_id", type=int)
+    nomenclature_id = request.form.get("nomenclature_id", type=int)
+    qty = request.form.get("qty", type=float)
+    item = Nomenclature.query.get_or_404(nomenclature_id)
+
+    available = UnplacedStock.available(warehouse_id, nomenclature_id)
+    if not qty or qty <= 0 or qty > available:
+        flash(
+            f"Недостаточно неразмещенного остатка «{item.name}»: доступно {available} {item.unit}",
+            "danger",
+        )
+        return redirect(url_for("placement.list_documents"))
+
+    UnplacedStock.consume(warehouse_id, nomenclature_id, qty)
+
+    db.session.add(
+        SupplierReturn(
+            warehouse_id=warehouse_id,
+            nomenclature_id=nomenclature_id,
+            qty=qty,
+            created_by_id=current_user.id,
+        )
+    )
+    db.session.commit()
+    flash(f"Списано {qty} {item.unit} «{item.name}» — возврат поставщику", "success")
+    return redirect(url_for("placement.list_documents"))
 
 
 @bp.route("/new", methods=["GET", "POST"])
@@ -81,19 +189,142 @@ def detail(doc_id):
     unpacked_lines = doc.lines.filter_by(box_id=None).all()
     boxes = doc.boxes.order_by(Box.created_at.asc()).all()
     open_boxes = Box.query.filter_by(warehouse_id=doc.warehouse_id, cell_id=None).all()
+    # Пустые короба (заготовлены массовой печатью, но еще ничем не
+    # заполнены) не показываем как "неразмещенные" — размещать в ячейку
+    # там пока нечего, только замусоривают список.
+    other_open_boxes = [
+        box
+        for box in open_boxes
+        if box.placement_document_id != doc.id and box.items.count() > 0
+    ]
     available_stock = (
         UnplacedStock.query.filter_by(warehouse_id=doc.warehouse_id)
         .filter(UnplacedStock.qty > 0)
         .all()
     )
+
+    # "Активный" короб — выбирается сканированием/созданием и сохраняется в
+    # адресе страницы (?box=ID), чтобы дальше сканировать в него товар
+    # штрихкод за штрихкодом, без выбора короба из выпадающего списка на
+    # каждую позицию (короб — контекст сессии сборки, а не поле формы).
+    active_box = None
+    active_box_id = request.args.get("box", type=int)
+    if active_box_id:
+        active_box = Box.query.filter_by(id=active_box_id, warehouse_id=doc.warehouse_id).first()
+
+    cell_suggestions = {
+        box.id: suggest_cell(doc.warehouse_id, box)
+        for box in boxes + open_boxes
+        if box.cell_id is None
+    }
+
     return render_template(
         "placement/detail.html",
         doc=doc,
         unpacked_lines=unpacked_lines,
         boxes=boxes,
         open_boxes=open_boxes,
+        other_open_boxes=other_open_boxes,
         available_stock=available_stock,
+        active_box=active_box,
+        cell_suggestions=cell_suggestions,
     )
+
+
+@bp.route("/<int:doc_id>/boxes/select", methods=["POST"])
+def select_box(doc_id):
+    """Сканирование/ввод номера короба — первый шаг размещения. Годится
+    любой открытый короб этого склада (в т.ч. заготовленный заранее массовым
+    созданием), не только принадлежащий этому документу."""
+    doc = PlacementDocument.query.get_or_404(doc_id)
+    box_number = request.form.get("box_number", "").strip()
+    box = Box.find_by_scanned_code(box_number, warehouse_id=doc.warehouse_id)
+    if not box:
+        flash(f"Короб '{box_number}' не найден на складе «{doc.warehouse.name}»", "danger")
+        return redirect(url_for("placement.detail", doc_id=doc.id))
+
+    if box.placement_document_id is None:
+        box.placement_document_id = doc.id
+    box.mark_scanned(current_user)
+    db.session.commit()
+
+    return redirect(url_for("placement.detail", doc_id=doc.id, box=box.id))
+
+
+def _scan_item_into_box(doc, box, item, qty):
+    available = UnplacedStock.available(doc.warehouse_id, item.id)
+    if qty <= 0 or qty > available:
+        return None, (
+            f"Недостаточно неразмещенного остатка «{item.name}»: "
+            f"доступно {available} {item.unit}"
+        )
+
+    UnplacedStock.consume(doc.warehouse_id, item.id, qty)
+
+    box_item = BoxItem.query.filter_by(box_id=box.id, nomenclature_id=item.id).first()
+    if box_item:
+        box_item.qty += qty
+    else:
+        box_item = BoxItem(box_id=box.id, nomenclature_id=item.id, qty=qty)
+        db.session.add(box_item)
+
+    # Строка размещения сразу с проставленным коробом — для отчета/экспорта
+    # и истории, отдельный шаг "упаковать в короб" в этом потоке не нужен.
+    line = PlacementLine(document_id=doc.id, nomenclature_id=item.id, qty=qty, box_id=box.id)
+    db.session.add(line)
+    db.session.commit()
+    return line, None
+
+
+@bp.route("/<int:doc_id>/boxes/<int:box_id>/items/add-by-barcode", methods=["POST"])
+def add_item_to_box_by_barcode(doc_id, box_id):
+    doc = PlacementDocument.query.get_or_404(doc_id)
+    if doc.status != "draft":
+        return jsonify({"ok": False, "error": "Документ уже завершен"}), 400
+
+    box = Box.query.filter_by(id=box_id, warehouse_id=doc.warehouse_id).first()
+    if not box:
+        return jsonify({"ok": False, "error": "Короб не найден"}), 404
+
+    barcode = (request.json or {}).get("barcode", "").strip()
+    qty = float((request.json or {}).get("qty", 1) or 1)
+    item = Nomenclature.query.filter_by(barcode=barcode).first()
+    if not item:
+        return jsonify({"ok": False, "error": f"Товар со штрихкодом '{barcode}' не найден"}), 404
+
+    line, error = _scan_item_into_box(doc, box, item, qty)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+
+    return jsonify(
+        {"ok": True, "line": {"id": line.id, "name": item.name, "qty": line.qty}}
+    )
+
+
+@bp.route("/<int:doc_id>/boxes/<int:box_id>/items/add", methods=["POST"])
+def add_item_to_box(doc_id, box_id):
+    """Ручное добавление товара в активный короб (поиск "содержит") — то же
+    самое действие, что и сканирование штрихкода, только выбор товара через
+    автоподбор по названию/артикулу."""
+    doc = PlacementDocument.query.get_or_404(doc_id)
+    box = Box.query.filter_by(id=box_id, warehouse_id=doc.warehouse_id).first()
+    if doc.status != "draft" or not box:
+        flash("Документ уже завершен или короб не найден", "danger")
+        return redirect(url_for("placement.detail", doc_id=doc.id, box=box_id))
+
+    nomenclature_id = request.form.get("nomenclature_id", type=int)
+    qty = request.form.get("qty", type=float) or 0
+    item = Nomenclature.query.get(nomenclature_id)
+    if not item:
+        flash("Товар не найден", "danger")
+        return redirect(url_for("placement.detail", doc_id=doc.id, box=box_id))
+
+    _, error = _scan_item_into_box(doc, box, item, qty)
+    if error:
+        flash(error, "danger")
+    else:
+        flash(f"В короб {box.box_number} добавлено: {item.name} ({qty} {item.unit})", "success")
+    return redirect(url_for("placement.detail", doc_id=doc.id, box=box_id))
 
 
 def _add_line(doc, nomenclature, qty):
@@ -104,10 +335,7 @@ def _add_line(doc, nomenclature, qty):
             f"доступно {available} {nomenclature.unit}"
         )
 
-    row = UnplacedStock.query.filter_by(
-        warehouse_id=doc.warehouse_id, nomenclature_id=nomenclature.id
-    ).first()
-    row.qty -= qty
+    UnplacedStock.consume(doc.warehouse_id, nomenclature.id, qty)
 
     line = PlacementLine(document_id=doc.id, nomenclature_id=nomenclature.id, qty=qty)
     db.session.add(line)
@@ -189,7 +417,7 @@ def create_box(doc_id):
     db.session.add(box)
     db.session.commit()
     flash(f"Короб {box.box_number} создан", "success")
-    return redirect(url_for("placement.detail", doc_id=doc.id))
+    return redirect(url_for("placement.detail", doc_id=doc.id, box=box.id))
 
 
 @bp.route("/<int:doc_id>/lines/<int:line_id>/pack", methods=["POST"])
@@ -200,9 +428,10 @@ def pack_line(doc_id, line_id):
     qty = request.form.get("qty", type=float)
 
     # Короб может быть создан прямо в этом документе или заготовлен заранее
-    # (массовое создание в «Склады → Массовое создание коробов») — в любом
-    # случае годится любой еще не размещенный в ячейке короб этого склада.
-    box = Box.query.filter_by(id=box_id, warehouse_id=doc.warehouse_id, cell_id=None).first()
+    # (массовое создание в «Склады → Массовое создание коробов») — годится
+    # любой короб этого склада, в том числе уже размещенный в ячейке (можно
+    # доукомплектовать короб товаром и после того, как его расставили).
+    box = Box.query.filter_by(id=box_id, warehouse_id=doc.warehouse_id).first()
     if not box:
         flash("Короб не найден", "danger")
         return redirect(url_for("placement.detail", doc_id=doc.id))
@@ -245,8 +474,12 @@ def _place_box(box, cell_code, expected_warehouse_id):
     if not cell:
         return f"Ячейка '{cell_code}' не найдена на этом складе"
 
+    if cell.id != box.cell_id and cell.free_space() <= 0:
+        return f"Ячейка '{cell_code}' заполнена (вмещает {CELL_CAPACITY} коробов)"
+
     box.cell_id = cell.id
     box.status = "stored"
+    box.mark_scanned(current_user)
     db.session.commit()
     return None
 

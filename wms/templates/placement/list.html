@@ -1,27 +1,59 @@
 {% extends "base.html" %}
 {% block title %}Размещение{% endblock %}
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-4">
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
   <h3 class="mb-0">Размещение товара</h3>
   <a class="btn btn-primary" href="{{ url_for('placement.new_document') }}">➕ Новое размещение</a>
 </div>
 
+{% set hint_stock = "Принятый товар, который еще не упакован в короба и не расставлен по ячейкам." %}
+{% set hint_open_boxes = "Уже упакованы, но не расставлены (например, приехали перемещением). Разместите сразу здесь." %}
+{% set hint_returns = "Списано со склада здесь — сам документ возврата оформляется в 1С отдельно, количество ниже для сверки." %}
+
 <div class="row g-4 mb-4">
   <div class="col-md-6">
     <div class="card p-3">
-      <h5>Неразмещенный остаток по складам</h5>
-      <p class="text-muted small">Принятый товар, который еще не упакован в короба и не расставлен по ячейкам.</p>
-      <table class="table table-sm">
-        <thead><tr><th>Склад</th><th>Товар</th><th>Кол-во</th></tr></thead>
+      <h5 class="d-flex align-items-center gap-2">
+        Неразмещенный остаток по складам
+        <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
+                data-bs-placement="bottom" data-bs-content="{{ hint_stock }}" aria-label="Подсказка">?</button>
+      </h5>
+      <p class="text-muted small d-none d-md-block">{{ hint_stock }}</p>
+      <table class="table table-sm table-mobile-compact">
+        <thead><tr><th>Склад</th><th>Штрихкод</th><th>Наименование</th><th>Размер</th><th>Кол-во</th><th>Поступление</th><th></th></tr></thead>
         <tbody>
         {% for row in stock_rows %}
           <tr>
             <td>{{ row.warehouse.name }}</td>
+            <td>{{ row.nomenclature.barcode }}</td>
             <td>{{ row.nomenclature.name }}</td>
+            <td>{{ row.nomenclature.size or '' }}</td>
             <td>{{ row.qty }} {{ row.nomenclature.unit }}</td>
+            <td class="small text-muted">
+              {% for lot in row.active_lots() %}
+                {{ lot.qty_remaining | int if lot.qty_remaining == lot.qty_remaining | int else lot.qty_remaining }} шт
+                {%- if lot.supplier_name %} — {{ lot.supplier_name }}{% endif -%}
+                {%- if lot.order_number %} (№{{ lot.order_number }}){% endif %}{% if not loop.last %}<br>{% endif %}
+              {% else %}—{% endfor %}
+            </td>
+            <td>
+              <details>
+                <summary class="btn btn-sm btn-outline-danger">Возврат</summary>
+                <form method="post" action="{{ url_for('placement.write_off_stock') }}" class="d-flex gap-1 mt-2">
+                  <input type="hidden" name="warehouse_id" value="{{ row.warehouse_id }}">
+                  <input type="hidden" name="nomenclature_id" value="{{ row.nomenclature_id }}">
+                  <input type="number" step="any" min="0" max="{{ row.qty }}" name="qty" value="{{ row.qty }}"
+                         class="form-control form-control-sm" style="max-width:100px" required>
+                  <button type="submit" class="btn btn-sm btn-danger"
+                          onclick="return confirm('Списать со склада как брак/возврат поставщику? Сам возврат в 1С проводится отдельно.');">
+                    Подтвердить
+                  </button>
+                </form>
+              </details>
+            </td>
           </tr>
         {% else %}
-          <tr><td colspan="3" class="text-muted">Неразмещенных остатков нет</td></tr>
+          <tr><td colspan="7" class="text-muted">Неразмещенных остатков нет</td></tr>
         {% endfor %}
         </tbody>
       </table>
@@ -30,25 +62,31 @@
 
   <div class="col-md-6">
     <div class="card p-3">
-      <h5>Короба без ячейки</h5>
-      <p class="text-muted small">Уже упакованы, но не расставлены (например, приехали перемещением). Разместите сразу здесь.</p>
-      <table class="table table-sm">
-        <thead><tr><th>Короб</th><th>Склад</th><th>Разместить</th></tr></thead>
+      <h5 class="d-flex align-items-center gap-2">
+        Короба без ячейки
+        <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
+                data-bs-placement="bottom" data-bs-content="{{ hint_open_boxes }}" aria-label="Подсказка">?</button>
+      </h5>
+      <p class="text-muted small d-none d-md-block">{{ hint_open_boxes }}</p>
+      <table class="table table-sm table-mobile-compact">
+        <thead><tr><th>Короб</th><th>Склад</th><th>Рекомендация</th><th>Разместить</th></tr></thead>
         <tbody>
         {% for box in open_boxes %}
+          {% set suggestion = cell_suggestions.get(box.id) %}
           <tr>
             <td>{{ box.box_number }}</td>
             <td>{{ box.warehouse.name }}</td>
+            <td class="text-muted small">{% if suggestion %}{{ suggestion.cell.code }} — {{ suggestion.reason }}{% endif %}</td>
             <td>
               <form method="post" action="{{ url_for('placement.place_box_standalone', box_id=box.id) }}" class="d-flex gap-1">
                 <input type="hidden" name="next" value="{{ url_for('placement.list_documents') }}">
-                <input type="text" name="cell_code" class="form-control form-control-sm" placeholder="Код ячейки" required style="max-width:140px">
+                <input type="text" name="cell_code" value="{{ suggestion.cell.code if suggestion else '' }}" class="form-control form-control-sm" placeholder="Код ячейки" required style="max-width:140px">
                 <button type="submit" class="btn btn-sm btn-outline-primary">OK</button>
               </form>
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="3" class="text-muted">Все короба размещены</td></tr>
+          <tr><td colspan="4" class="text-muted">Все короба размещены</td></tr>
         {% endfor %}
         </tbody>
       </table>
@@ -56,15 +94,40 @@
   </div>
 </div>
 
+<div class="card p-3 mb-4">
+  <h5 class="d-flex align-items-center gap-2">
+    Возвраты поставщику (брак)
+    <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
+            data-bs-placement="bottom" data-bs-content="{{ hint_returns }}" aria-label="Подсказка">?</button>
+  </h5>
+  <p class="text-muted small d-none d-md-block">{{ hint_returns }}</p>
+  <table class="table table-sm table-mobile-compact table-allow-wrap">
+    <thead><tr><th>Дата</th><th>Склад</th><th>Наименование</th><th>Кол-во</th><th>Кто списал</th></tr></thead>
+    <tbody>
+    {% for r in returns %}
+      <tr>
+        <td>{{ (r.created_at|msk).strftime('%d.%m.%Y %H:%M') }}</td>
+        <td>{{ r.warehouse.name }}</td>
+        <td>{{ r.nomenclature.name }} {{ r.nomenclature.size or '' }}</td>
+        <td>{{ r.qty }} {{ r.nomenclature.unit }}</td>
+        <td>{{ r.created_by.display_name() if r.created_by else '' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="text-muted">Возвратов еще не было</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
 <div class="card p-3">
   <h5>Документы размещения</h5>
-  <table class="table">
+  <table class="table d-none d-md-table">
     <thead><tr><th>Номер</th><th>Дата</th><th>Склад</th><th>Автор</th><th>Статус</th><th></th></tr></thead>
     <tbody>
     {% for d in documents %}
       <tr>
         <td>{{ d.number }}</td>
-        <td>{{ d.created_at.strftime('%d.%m.%Y %H:%M') }}</td>
+        <td>{{ (d.created_at|msk).strftime('%d.%m.%Y %H:%M') }}</td>
         <td>{{ d.warehouse.name }}</td>
         <td>{{ d.created_by.display_name() if d.created_by else '' }}</td>
         <td><span class="badge badge-status-{{ d.status }}">{{ 'Черновик' if d.status == 'draft' else 'Завершен' }}</span></td>
@@ -78,5 +141,20 @@
     {% endfor %}
     </tbody>
   </table>
+
+  <div class="list-group d-md-none">
+    {% for d in documents %}
+      <div class="list-group-item py-2 px-2">
+        <div class="d-flex justify-content-between align-items-center gap-2">
+          <a href="{{ url_for('placement.detail', doc_id=d.id) }}" class="fw-bold text-decoration-none">{{ d.number }}</a>
+          <span class="badge badge-status-{{ d.status }}">{{ 'Черновик' if d.status == 'draft' else 'Завершен' }}</span>
+        </div>
+        <div class="small text-muted">{{ d.warehouse.name }}</div>
+        <div class="small text-muted">{{ (d.created_at|msk).strftime('%d.%m.%Y') }}</div>
+      </div>
+    {% else %}
+      <div class="list-group-item text-muted">Документов еще нет</div>
+    {% endfor %}
+  </div>
 </div>
 {% endblock %}

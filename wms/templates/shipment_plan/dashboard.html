@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% block title %}План отгрузок{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
+  <h3 class="mb-0">План отгрузок</h3>
+  <div>
+    <a class="btn btn-outline-secondary d-none d-md-inline-block" href="{{ url_for('shipment_plan.export_all') }}">📊 Выгрузить в Excel</a>
+    {% if current_user.is_admin %}
+    <a class="btn btn-primary" href="{{ url_for('shipment_plan.upload') }}">⬆ Загрузить план</a>
+    {% endif %}
+  </div>
+</div>
+
+{% if summary.in_transit_by_marketplace %}
+<div class="card p-3 mb-4">
+  <h5 class="mb-2">Сводка</h5>
+  <div class="row g-3">
+    <div class="col-md-6">
+      <div class="text-muted small mb-1">В пути</div>
+      <table class="table table-sm mb-0" style="max-width:320px">
+        <tbody>
+        {% for row in summary.in_transit_by_marketplace %}
+          <tr><td>{{ row.label }}</td><td class="text-end">{{ row.qty | round(0) | int }}</td></tr>
+        {% endfor %}
+          <tr class="fw-bold"><td>Итого</td><td class="text-end">{{ summary.total_in_transit | round(0) | int }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="col-md-6 d-flex flex-column gap-2 justify-content-center">
+      <div><span class="text-muted">На складе:</span> <b>{{ summary.total_stock | round(0) | int }}</b></div>
+      <div><span class="text-muted">На производстве</span> <span class="text-muted small">(с начала периода плана)</span>: <b>{{ summary.total_production | round(0) | int }}</b></div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="row g-3 mb-4">
+  {% for mp in marketplaces %}
+  <div class="col-md-6">
+    <div class="card p-3 h-100">
+      <h4>{{ mp.label }}</h4>
+      {% if not mp.plan %}
+        <p class="text-muted mb-0">План еще не загружен.</p>
+      {% else %}
+        <p class="text-muted small mb-2">
+          Лист «{{ mp.plan.sheet_name }}», загружен {{ (mp.plan.uploaded_at|msk).strftime('%d.%m.%Y %H:%M') }}
+          {% if mp.plan.uploaded_by %}({{ mp.plan.uploaded_by.display_name() }}){% endif %}
+        </p>
+        <p class="mb-2">
+          План <b>{{ mp.total_planned | round(0) | int }}</b> —
+          выполнено <b>{{ mp.total_fulfilled_with_transit | round(0) | int }}</b>
+          ({{ (100 * mp.total_fulfilled_with_transit / mp.total_planned) | round(1) if mp.total_planned else 0 }}%)
+          <span class="text-muted small" title="Принято на складе {{ mp.total_fulfilled | round(0) | int }} + в пути {{ mp.total_in_transit | round(0) | int }}">ⓘ</span>
+          {% if mp.problems_count %}
+            — <span class="badge bg-danger">{{ mp.problems_count }} без остатка на складе</span>
+          {% endif %}
+        </p>
+
+        {% if not mp.pace %}
+          <p class="text-muted small">Не удалось определить дату начала периода из названия листа («{{ mp.plan.sheet_name }}») — темп не считаем.</p>
+        {% else %}
+          {% set pace = mp.pace %}
+          <div class="alert py-2 px-3 mb-2
+            {%- if pace.status == 'done' %} alert-success
+            {%- elif pace.status == 'on_track' %} alert-success
+            {%- elif pace.status == 'behind' %} alert-danger
+            {%- elif pace.status == 'overdue' %} alert-danger
+            {%- else %} alert-secondary{% endif %}">
+            <b>Период:</b> {{ mp.plan.period_start.strftime('%d.%m') }}–{{ pace.deadline.strftime('%d.%m') }}
+            (прошло {{ pace.days_elapsed }} дн., {% if pace.days_left > 0 %}осталось {{ pace.days_left }} дн.{% else %}срок истёк {{ -pace.days_left }} дн. назад{% endif %})
+            <br>
+            {% if pace.status == 'done' %}
+              ✅ План уже выполнен полностью.
+            {% elif pace.status == 'no_data' %}
+              ⏳ Пока нет отгрузок за период — темп посчитать не из чего.
+            {% elif pace.status == 'overdue' %}
+              ⚠ Срок (14 дней) истёк, а осталось отгрузить <b>{{ pace.remaining | round(0) | int }}</b> шт.
+            {% elif pace.status == 'on_track' %}
+              ✅ Успеваем — при темпе <b>{{ pace.rate | round(1) }} шт/день</b> на остаток ({{ pace.remaining | round(0) | int }} шт) уйдёт ещё
+              <b>~{{ pace.days_needed | round(1) }} дн.</b>, а времени до срока — {{ pace.days_left }} дн.
+            {% else %}
+              ⚠ Не успеваем при текущем темпе — <b>{{ pace.rate | round(1) }} шт/день</b> даёт
+              <b>~{{ pace.days_needed | round(1) }} дн.</b> на остаток ({{ pace.remaining | round(0) | int }} шт),
+              а до срока осталось {{ pace.days_left }} дн. Нужно ускориться минимум до
+              <b>{{ pace.required_rate | round(1) }} шт/день</b>.
+            {% endif %}
+          </div>
+        {% endif %}
+
+        <table class="table table-sm table-mobile-compact mb-0" style="max-width:480px">
+          <thead><tr><th>Город</th><th>План</th><th>Ост.</th><th title="Отправлено перемещением, но еще не подтверждено кнопкой «Принято на складе»">В пути</th><th>%</th></tr></thead>
+          <tbody>
+          {% for row in mp.cities %}
+            <tr>
+              <td>{{ row.warehouse.marketplace_city }}</td>
+              <td>{{ row.planned | round(0) | int }}</td>
+              <td>{{ (row.planned - row.fulfilled) | round(0) | int }}</td>
+              <td>{% if row.in_transit %}<span class="text-warning-emphasis">{{ row.in_transit | round(0) | int }}</span>{% else %}—{% endif %}</td>
+              <td>{{ ((100 * row.fulfilled / row.planned) | round(0) | int) if row.planned else 0 }}%</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{% if picking_list %}
+<div class="card p-3 mb-4">
+  <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+    <h5 class="mb-0">Что нужно отправить <span class="text-muted small">(осталось по плану, {{ picking_list|length }} поз., ОЗОН и ВБ вместе)</span></h5>
+    <input type="text" class="form-control form-control-sm" style="max-width:260px" placeholder="Поиск по артикулу/штрихкоду..." data-picking-search="picking">
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover" id="picking-picking" style="font-size:12px">
+      <thead>
+        <tr>
+          <th rowspan="2" class="align-bottom">Артикул</th>
+          <th rowspan="2" class="align-bottom">Размер</th>
+          <th rowspan="2" class="align-bottom">Штрихкод</th>
+          <th rowspan="2" class="align-bottom"></th>
+          <th rowspan="2" class="align-bottom text-end" title="Принято на складе-отправителе, но еще не упаковано в короб">На разбраковке</th>
+          <th rowspan="2" class="align-bottom text-end" title="Упаковано в короб на складе-отправителе — готово к отправке">Готово к отгрузке</th>
+          <th rowspan="2" class="align-bottom text-end" title="Уже отправлено перемещением по всем городам вместе, но еще не подтверждено кнопкой «Принято на складе»">В пути</th>
+          {% if ozon_cities %}<th colspan="{{ ozon_cities|length }}" class="text-center table-info">ОЗОН</th>{% endif %}
+          {% if wb_cities %}<th colspan="{{ wb_cities|length }}" class="text-center table-warning border-start border-2 border-dark">ВБ</th>{% endif %}
+        </tr>
+        <tr>
+          {% for city in ozon_cities %}<th class="text-end table-info">{{ city }}</th>{% endfor %}
+          {% for city in wb_cities %}<th class="text-end table-warning{% if loop.first %} border-start border-2 border-dark{% endif %}">{{ city }}</th>{% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="fw-bold table-secondary picking-totals-row">
+          <td colspan="4">Итого ({{ picking_list|length }} поз.)</td>
+          <td class="text-end">{{ picking_totals.unplaced | round(0) | int }}</td>
+          <td class="text-end">{{ picking_totals.ready_to_ship | round(0) | int }}</td>
+          <td class="text-end">{{ picking_totals.in_transit | round(0) | int }}</td>
+          {% for city in ozon_cities %}<td class="text-end">{{ picking_totals.ozon[city] | round(0) | int }}</td>{% endfor %}
+          {% for city in wb_cities %}<td class="text-end{% if loop.first %} border-start border-2{% endif %}">{{ picking_totals.wb[city] | round(0) | int }}</td>{% endfor %}
+        </tr>
+      {% for p in picking_list %}
+        <tr{% if p.no_stock %} class="table-danger"{% endif %} data-search-text="{{ (p.article or '') ~ ' ' ~ p.barcode }}">
+          <td>{{ p.article }}</td>
+          <td>{{ p.size or '' }}</td>
+          <td>{{ p.barcode }}</td>
+          <td class="text-nowrap">{% if p.no_stock %}<span class="badge bg-danger" title="Нет на складе-отправителе">нет на складе</span>{% endif %}</td>
+          <td class="text-end">{% if p.unplaced %}{{ p.unplaced | round(0) | int }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
+          <td class="text-end">{% if p.ready_to_ship %}<b>{{ p.ready_to_ship | round(0) | int }}</b>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+          <td class="text-end">{% if p.in_transit_total %}<span class="text-warning-emphasis">{{ p.in_transit_total | round(0) | int }}</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+          {% for city in ozon_cities %}
+            {% set line = p.ozon.get(city) %}
+            <td class="text-end">
+              {% if not line %}<span class="text-muted">—</span>
+              {% elif line.remaining_qty() <= 0 %}<span class="text-muted">0</span>
+              {% else %}<b>{{ line.remaining_qty() | round(0) | int }}</b>{% endif %}
+              {% if line and line.in_transit_qty %}<span class="text-warning-emphasis" title="Уже отправлено перемещением, но еще не подтверждено кнопкой «Принято на складе» — в потребность слева не засчитано">&nbsp;({{ line.in_transit_qty | round(0) | int }})</span>{% endif %}
+            </td>
+          {% endfor %}
+          {% for city in wb_cities %}
+            {% set line = p.wb.get(city) %}
+            <td class="text-end{% if loop.first %} border-start border-2{% endif %}">
+              {% if not line %}<span class="text-muted">—</span>
+              {% elif line.remaining_qty() <= 0 %}<span class="text-muted">0</span>
+              {% else %}<b>{{ line.remaining_qty() | round(0) | int }}</b>{% endif %}
+              {% if line and line.in_transit_qty %}<span class="text-warning-emphasis" title="Уже отправлено перемещением, но еще не подтверждено кнопкой «Принято на складе» — в потребность слева не засчитано">&nbsp;({{ line.in_transit_qty | round(0) | int }})</span>{% endif %}
+            </td>
+          {% endfor %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% elif marketplaces|selectattr('plan')|list %}
+<div class="card p-3 mb-4">
+  <p class="text-muted mb-0">Весь план выполнен — отправлять больше нечего.</p>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.querySelectorAll("[data-picking-search]").forEach(function (input) {
+    var table = document.getElementById("picking-" + input.dataset.pickingSearch);
+    if (!table) return;
+    input.addEventListener("input", function () {
+      var q = input.value.trim().toLowerCase();
+      table.querySelectorAll("tbody tr:not(.picking-totals-row)").forEach(function (tr) {
+        var text = (tr.dataset.searchText || "").toLowerCase();
+        tr.hidden = q.length > 0 && text.indexOf(q) === -1;
+      });
+    });
+  });
+</script>
+{% endblock %}

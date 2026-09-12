@@ -1,36 +1,246 @@
 {% extends "base.html" %}
 {% block title %}Перемещение{% endblock %}
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-4">
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
   <h3 class="mb-0">Перемещение товара</h3>
-  <div>
-    <a class="btn btn-outline-secondary" href="{{ url_for('movement.export_all') }}">📤 Экспорт в Excel</a>
+  <div class="d-flex gap-2">
+    <a class="btn btn-outline-secondary d-none d-md-inline-block" href="{{ url_for('movement.export_all') }}">📤 Экспорт в Excel</a>
     <a class="btn btn-primary" href="{{ url_for('movement.new_document') }}">➕ Новое перемещение</a>
   </div>
 </div>
 
-<div class="card p-3">
-  <table class="table">
-    <thead><tr><th>Номер</th><th>Дата</th><th>Откуда</th><th>Куда</th><th>Коробов</th><th>Автор</th><th>Статус</th><th></th></tr></thead>
-    <tbody>
-    {% for d in documents %}
-      <tr>
-        <td><a href="{{ url_for('movement.detail', doc_id=d.id) }}">{{ d.number }}</a></td>
-        <td>{{ d.created_at.strftime('%d.%m.%Y %H:%M') }}</td>
-        <td>{{ d.from_warehouse.name }}</td>
-        <td>{{ d.to_warehouse.name }}</td>
-        <td>{{ d.lines.count() }}</td>
-        <td>{{ d.created_by.display_name() if d.created_by else '' }}</td>
-        <td><span class="badge badge-status-{{ d.status }}">{{ 'Черновик' if d.status == 'draft' else 'Завершен' }}</span></td>
-        <td>
-          <a href="{{ url_for('movement.detail', doc_id=d.id) }}">Открыть</a>
-          · <a href="{{ url_for('movement.export_document', doc_id=d.id) }}">Excel</a>
-        </td>
-      </tr>
-    {% else %}
-      <tr><td colspan="8" class="text-muted">Перемещений еще нет</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
+{% set hint_route_box = "Сканируете короб — показываем, на какой склад-город его отправлять по текущему плану отгрузок (по остатку невыполненной потребности). Если потребности нет ни у кого — короб можно пропустить." %}
+{% set hint_find_box = "Не получается добавить короб в перемещение? Проверьте, в каком документе он уже числится." %}
+
+<div class="card p-3 mb-4">
+  <h5 class="d-flex align-items-center gap-2">
+    Куда везти короб
+    <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
+            data-bs-placement="bottom" data-bs-content="{{ hint_route_box }}" aria-label="Подсказка">?</button>
+  </h5>
+  <p class="text-muted small d-none d-md-block">{{ hint_route_box }}</p>
+  <form method="get" action="{{ url_for('movement.route_box') }}" id="routeBoxForm" class="d-flex gap-2" style="max-width:480px">
+    <input type="text" name="box_number" id="routeBoxInput" class="form-control form-control-lg" placeholder="Отсканируйте или введите номер короба" value="{{ route_box_number }}" required autofocus>
+    <button type="button" class="btn btn-outline-primary" data-camera-scan-target="#routeBoxInput" title="Сканировать камерой">📷</button>
+    <button type="submit" class="btn btn-primary">Найти</button>
+  </form>
+
+  {% if route_box_number %}
+    {% if route_not_found %}
+      <div class="alert alert-danger mt-3 mb-0">Короб «{{ route_box_number }}» не найден.</div>
+    {% elif route_box and not routing %}
+      <div class="alert alert-secondary mt-3 mb-0">
+        <b>Пропускаем.</b> Короб {{ route_box.box_number }}{% if route_box.items.count() == 0 %} пуст —{% else %} —{% endif %}
+        потребности по его содержимому нет ни на одном складе-городе по текущему плану отгрузок.
+      </div>
+    {% elif route_box %}
+      {% set total_demand = routing | sum(attribute='total_remaining') %}
+      <div class="mt-3">
+        <div class="mb-2">
+          Короб <b>{{ route_box.box_number }}</b> — общая невыполненная потребность на подходящих складах:
+          <b>{{ total_demand | round(0, 'floor') | int }} шт.</b>
+        </div>
+        <table class="table table-sm table-mobile-compact">
+          <thead><tr><th>Склад-город</th><th>Покрывает</th><th>Нужно всего</th><th></th></tr></thead>
+          <tbody>
+          {% for entry in routing %}
+            <tr{% if loop.first %} class="table-success"{% endif %}>
+              <td>{{ entry.warehouse.name }}{% if loop.first %} <span class="badge bg-success">рекомендуем</span>{% endif %}</td>
+              <td>{{ entry.matched_qty | round(0, 'floor') | int }} шт.</td>
+              <td>{{ entry.total_remaining | round(0, 'floor') | int }} шт.</td>
+              <td>
+                <form method="post" action="{{ url_for('movement.route_box_add') }}">
+                  <input type="hidden" name="box_id" value="{{ route_box.id }}">
+                  <input type="hidden" name="to_warehouse_id" value="{{ entry.warehouse.id }}">
+                  <button type="submit" class="btn btn-sm btn-outline-primary">Добавить</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+  {% endif %}
 </div>
+
+<div class="card p-3 mb-4">
+  <h5 class="d-flex align-items-center gap-2">
+    Найти короб
+    <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
+            data-bs-placement="bottom" data-bs-content="{{ hint_find_box }}" aria-label="Подсказка">?</button>
+  </h5>
+  <p class="text-muted small d-none d-md-block">{{ hint_find_box }}</p>
+  <form method="get" action="{{ url_for('movement.find_box') }}" class="d-flex gap-2" style="max-width:480px">
+    <input type="text" name="box_number" id="findBoxInput" class="form-control" placeholder="Номер короба" value="{{ find_box_number|default('') }}" required>
+    <button type="button" class="btn btn-outline-primary" data-camera-scan-target="#findBoxInput" title="Сканировать камерой">📷</button>
+    <button type="submit" class="btn btn-outline-primary">Найти</button>
+  </form>
+
+  {% if find_box_number|default('') %}
+    {% if find_box_not_found|default(false) %}
+      <div class="alert alert-danger mt-3 mb-0">Короб «{{ find_box_number }}» не найден.</div>
+    {% elif find_box_lines|default([]) %}
+      <table class="table table-sm table-mobile-compact table-allow-wrap mt-3 mb-0">
+        <thead><tr><th>Перемещение</th><th>Откуда</th><th>Куда</th><th>Статус</th><th>Приемка</th></tr></thead>
+        <tbody>
+        {% for line in find_box_lines %}
+          <tr>
+            <td><a href="{{ url_for('movement.detail', doc_id=line.document.id) }}">{{ line.document.number }}</a></td>
+            <td>{{ line.document.from_warehouse.name }}</td>
+            <td>{{ line.document.to_warehouse.name }}</td>
+            <td><span class="badge badge-status-{{ line.document.status }}">{{ 'Черновик' if line.document.status == 'draft' else 'Завершен' }}</span></td>
+            <td>
+              {% if line.document.status != 'completed' %}—
+              {% elif line.document.received_at %}Принято
+              {% else %}<span class="text-warning-emphasis">В пути</span>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="alert alert-secondary mt-3 mb-0">
+        Короб <b>{{ find_box.box_number }}</b> — сейчас на складе «{{ find_box.warehouse.name }}», ни в одном перемещении не числится.
+      </div>
+    {% endif %}
+  {% endif %}
+</div>
+
+<div class="card p-3">
+  <!-- Массовый выбор/печать и полная таблица со всеми колонками — только
+       на широком экране; на телефоне вместо этого компактный список ниже
+       без 1С/Открыть/Excel и кнопок приемки (это делается на детальной
+       странице документа — открывается по номеру). -->
+  <form method="get" action="{{ url_for('movement.export_waybills') }}" id="waybillsForm" class="d-none d-md-block">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <div class="form-check">
+        <input type="checkbox" class="form-check-input" id="selectAllDocs">
+        <label class="form-check-label" for="selectAllDocs">Выбрать все</label>
+      </div>
+      <div class="d-flex gap-2">
+        <button type="submit" formaction="{{ url_for('movement.export_shipping_labels') }}" class="btn btn-outline-secondary btn-sm" id="printLabelsBtn" disabled>🏷️ Стикеры на короба (<span id="selectedDocsCount2">0</span>)</button>
+        <button type="submit" class="btn btn-outline-secondary btn-sm" id="printWaybillsBtn" disabled>🖨️ Печать накладных по выбранным (<span id="selectedDocsCount">0</span>)</button>
+      </div>
+    </div>
+    <table class="table">
+      <thead><tr><th></th><th>Номер</th><th>Дата</th><th>Откуда</th><th>Куда</th><th>Коробов</th><th>Кол-во товара</th><th>Автор</th><th>Статус</th><th>Приемка</th><th class="text-center">1С</th><th></th></tr></thead>
+      <tbody>
+      {% for d in documents %}
+        <tr>
+          <td><input type="checkbox" class="form-check-input doc-checkbox" name="doc_ids" value="{{ d.id }}"></td>
+          <td><a href="{{ url_for('movement.detail', doc_id=d.id) }}">{{ d.number }}</a></td>
+          <td>{{ (d.created_at|msk).strftime('%d.%m.%Y %H:%M') }}</td>
+          <td>{{ d.from_warehouse.name }}</td>
+          <td>{{ d.to_warehouse.name }}</td>
+          <td>{{ d.lines.count() }}</td>
+          {% set tq = d.total_item_qty() %}
+          <td>{{ tq | int if tq == tq | int else tq | round(3) }}</td>
+          <td>{{ d.created_by.display_name() if d.created_by else '' }}</td>
+          <td><span class="badge badge-status-{{ d.status }}">{{ 'Черновик' if d.status == 'draft' else 'Завершен' }}</span></td>
+          <td class="text-nowrap">
+            {% if d.status != 'completed' %}
+              <span class="text-muted">—</span>
+            {% elif d.received_at %}
+              <span class="badge bg-success" title="{{ (d.received_at|msk).strftime('%d.%m.%Y %H:%M') }}">Принято {{ (d.received_at|msk).strftime('%d.%m') }}</span>
+              {% if d.discrepancies %}<span class="badge bg-warning text-dark">С расхождением</span>{% endif %}
+            {% else %}
+              <button type="submit" formmethod="post" formaction="{{ url_for('movement.receive', doc_id=d.id) }}" class="btn btn-sm btn-warning" title="Товар считается «в пути», пока не нажата эта кнопка">📥 Принято на складе</button>
+              <a class="btn btn-sm btn-outline-warning" href="{{ url_for('movement.receive_with_discrepancy', doc_id=d.id) }}"
+                 title="Если на месте приняли не столько, сколько отправили">⚠️ С расхождением</a>
+            {% endif %}
+          </td>
+          <td class="text-center">
+            <button type="submit" formmethod="post" formaction="{{ url_for('movement.toggle_accounting', doc_id=d.id) }}"
+                  title="{{ 'Внесено в 1С бухгалтерией ' + (d.accounting_entered_at|msk).strftime('%d.%m.%Y %H:%M') if d.accounting_entered_at else 'Отметить: бухгалтерия внесла документ в 1С' }}"
+                  class="btn btn-sm btn-link p-0" style="font-size:1.15rem; line-height:1; text-decoration:none;">{{ '✅' if d.accounting_entered_at else '☐' }}</button>
+          </td>
+          <td>
+            <a href="{{ url_for('movement.detail', doc_id=d.id) }}">Открыть</a>
+            · <a href="{{ url_for('movement.export_document', doc_id=d.id) }}">Excel</a>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="12" class="text-muted">Перемещений еще нет</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </form>
+
+  <!-- Компактный список для телефона: только то, что нужно кладовщику на
+       ходу — номер (открывается по нему же), маршрут, статус, приемка. -->
+  <div class="list-group d-md-none">
+    {% for d in documents %}
+      <a href="{{ url_for('movement.detail', doc_id=d.id) }}" class="list-group-item list-group-item-action py-2 px-2 text-decoration-none text-body">
+        <div class="d-flex justify-content-between align-items-center gap-2">
+          <span class="fw-bold">{{ d.number }}</span>
+          <span class="badge badge-status-{{ d.status }}">{{ 'Черновик' if d.status == 'draft' else 'Завершен' }}</span>
+        </div>
+        <div class="small text-muted">{{ d.from_warehouse.name }} → {{ d.to_warehouse.name }}</div>
+        <div class="small text-muted">{{ (d.created_at|msk).strftime('%d.%m.%Y') }} · {{ d.lines.count() }} короб.</div>
+        {% if d.status == 'completed' %}
+          <div class="mt-1">
+            {% if d.received_at %}
+              <span class="badge bg-success">Принято {{ (d.received_at|msk).strftime('%d.%m') }}</span>
+            {% else %}
+              <span class="text-warning-emphasis small">В пути</span>
+            {% endif %}
+          </div>
+        {% endif %}
+      </a>
+    {% else %}
+      <div class="list-group-item text-muted">Перемещений еще нет</div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Номер короба сканируется так же, как товар (Enter или пауза в наборе) —
+  // не нужно жать "Найти" каждый раз, чтобы процесс сканирования/распределения
+  // коробов шел непрерывно.
+  const routeBoxInput = document.getElementById("routeBoxInput");
+  if (routeBoxInput) {
+    initBarcodeInput(
+      routeBoxInput,
+      (value) => {
+        routeBoxInput.value = value;
+        routeBoxInput.form.submit();
+      },
+      { debounceMs: 900 }
+    );
+  }
+
+  // Печать накладных доступна только когда выбран хотя бы один документ;
+  // "Выбрать все" отмечает/снимает все флажки разом.
+  const selectAllDocs = document.getElementById("selectAllDocs");
+  const docCheckboxes = Array.from(document.querySelectorAll(".doc-checkbox"));
+  const printWaybillsBtn = document.getElementById("printWaybillsBtn");
+  const printLabelsBtn = document.getElementById("printLabelsBtn");
+  const selectedDocsCount = document.getElementById("selectedDocsCount");
+  const selectedDocsCount2 = document.getElementById("selectedDocsCount2");
+
+  function updatePrintButtonState() {
+    const checkedCount = docCheckboxes.filter((cb) => cb.checked).length;
+    [printWaybillsBtn, printLabelsBtn].forEach((btn) => {
+      btn.disabled = checkedCount === 0;
+      btn.classList.toggle("btn-outline-secondary", checkedCount === 0);
+      btn.classList.toggle("btn-primary", checkedCount > 0);
+    });
+    selectedDocsCount.textContent = checkedCount;
+    selectedDocsCount2.textContent = checkedCount;
+  }
+
+  if (selectAllDocs) {
+    selectAllDocs.addEventListener("change", () => {
+      docCheckboxes.forEach((cb) => { cb.checked = selectAllDocs.checked; });
+      updatePrintButtonState();
+    });
+  }
+  docCheckboxes.forEach((cb) => cb.addEventListener("change", () => {
+    if (!cb.checked) selectAllDocs.checked = false;
+    updatePrintButtonState();
+  }));
+</script>
 {% endblock %}

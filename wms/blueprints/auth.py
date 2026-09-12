@@ -4,7 +4,7 @@ from flask import Blueprint, flash, redirect, render_template, request, url_for
 from flask_login import current_user, login_required, login_user, logout_user
 
 from ..extensions import db
-from ..models import User
+from ..models import SECTIONS, User, Warehouse
 
 bp = Blueprint("auth", __name__)
 
@@ -48,10 +48,33 @@ def _require_admin():
 @bp.route("/users")
 @login_required
 def users():
+    """Страница «Настройки» администратора: управление пользователями и
+    доступом к разделам, плюс получатели и отправитель для стикеров
+    отправления перемещений (см. warehouses.update_recipient и
+    movement.update_shipping_label_sender) — все административные
+    настройки в одном месте, вместо разбросанных по разным разделам."""
     if not _require_admin():
         return redirect(url_for("main.index"))
+    from .movement import get_shipping_label_sender_override
+
     all_users = User.query.order_by(User.username).all()
-    return render_template("auth/users.html", users=all_users)
+    warehouses = Warehouse.query.order_by(Warehouse.code).all()
+
+    # Склад 1С настраивается отдельно на каждый склад-город маркетплейса
+    # (не по городу целиком) — одна и та же площадка одного города может
+    # возить на разные склады 1С в зависимости от маркетплейса (например,
+    # ВБ Краснодар едет на СЦ, а ОЗОН Краснодар — на фулфилмент), см.
+    # warehouses.update_fulfillment_1c_name.
+    fulfillment_warehouses = [wh for wh in warehouses if wh.marketplace is not None]
+
+    return render_template(
+        "auth/users.html",
+        users=all_users,
+        sections=SECTIONS,
+        warehouses=warehouses,
+        fulfillment_warehouses=fulfillment_warehouses,
+        shipping_label_sender=get_shipping_label_sender_override(),
+    )
 
 
 @bp.route("/users/create", methods=["POST"])
@@ -137,6 +160,32 @@ def update_role(user_id):
     user.role = role
     db.session.commit()
     flash(f"Роль для «{user.username}» обновлена", "success")
+    return redirect(url_for("auth.users"))
+
+
+@bp.route("/users/<int:user_id>/sections", methods=["POST"])
+@login_required
+def update_sections(user_id):
+    """Точечный доступ к разделам (см. User.allowed_sections) — отдельно от
+    role: и "warehouse", и "production" по факту не используют этот
+    механизм для production (там доступ и так ограничен одним разделом),
+    но поле физически применимо к любому не-админу."""
+    if not _require_admin():
+        return redirect(url_for("main.index"))
+
+    user = User.query.get_or_404(user_id)
+    mode = request.form.get("mode", "full")
+    if mode == "full":
+        user.allowed_sections = None
+    else:
+        selected = [code for code, _ in SECTIONS if request.form.get(f"section_{code}") == "on"]
+        user.allowed_sections = ",".join(selected) if selected else "none"
+    # Отдельная от режима доступа к разделам галочка — можно запретить
+    # редактирование номенклатуры и при "полном доступе ко всем разделам"
+    # (просмотр номенклатуры при этом остается).
+    user.nomenclature_edit_allowed = request.form.get("nomenclature_edit") == "on"
+    db.session.commit()
+    flash(f"Доступ к разделам для «{user.username}» обновлен", "success")
     return redirect(url_for("auth.users"))
 
 

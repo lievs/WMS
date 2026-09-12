@@ -1,58 +1,127 @@
 {% extends "base.html" %}
 {% block title %}Приемка {{ doc.number }}{% endblock %}
 {% block content %}
+{% set status_labels = {'draft': 'Черновик', 'recounting': 'На пересчете', 'sorting': 'На разбраковке', 'completed': 'Завершен'} %}
 <p><a href="{{ url_for('receiving.list_documents') }}">&larr; Приемка</a></p>
 
 <div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
   <div>
     <h3 class="mb-1">Приемка {{ doc.number }}
-      <span class="badge badge-status-{{ doc.status }}">{{ 'Черновик' if doc.status == 'draft' else 'Завершен' }}</span>
+      <span class="badge badge-status-{{ doc.status }}">{{ status_labels.get(doc.status, doc.status) }}</span>
     </h3>
-    <div class="text-muted">Склад: {{ doc.warehouse.name }} {% if doc.supplier %}· Поставщик: {{ doc.supplier }}{% endif %}{% if doc.created_by %} · Автор: {{ doc.created_by.display_name() }}{% endif %}</div>
+    <div class="text-muted d-flex align-items-center flex-wrap gap-1">
+      Склад:
+      {% if doc.status != 'completed' and not packed_boxes %}
+        <form method="post" action="{{ url_for('receiving.change_warehouse', doc_id=doc.id) }}" class="d-inline-flex gap-1 align-items-center">
+          <select name="warehouse_id" class="form-select form-select-sm d-inline-block" style="width:auto">
+            {% for wh in warehouses %}
+              <option value="{{ wh.id }}" {% if wh.id == doc.warehouse_id %}selected{% endif %}>{{ wh.name }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>
+        </form>
+      {% else %}
+        {{ doc.warehouse.name }}
+      {% endif %}
+      {% if doc.supplier %}· Поставщик: {{ doc.supplier }}{% endif %}{% if doc.order_number %} · № заявки: {{ doc.order_number }}{% endif %}{% if doc.created_by %} · Автор: {{ doc.created_by.display_name() }}{% endif %}{% if doc.invoice_file_data %} · <a href="{{ url_for('receiving.download_invoice_file', doc_id=doc.id) }}">📄 Накладная</a>{% endif %}
+    </div>
   </div>
   <div>
-    <a class="btn btn-outline-secondary" href="{{ url_for('receiving.export_document', doc_id=doc.id) }}">📤 Экспорт в Excel</a>
+    <a class="btn btn-outline-secondary d-none d-md-inline-block" href="{{ url_for('receiving.export_document', doc_id=doc.id) }}">📤 Экспорт в Excel</a>
     {% if doc.status == 'draft' %}
-    <form method="post" action="{{ url_for('receiving.complete', doc_id=doc.id) }}" class="d-inline">
-      <button type="submit" class="btn btn-success">✅ Завершить приемку</button>
-    </form>
+      {% if doc.is_from_invoice_import() %}
+      <form method="post" action="{{ url_for('receiving.send_to_recount', doc_id=doc.id) }}" class="d-inline">
+        <button type="submit" class="btn btn-success">📊 Отправить на пересчет</button>
+      </form>
+      {% else %}
+      <form method="post" action="{{ url_for('receiving.complete', doc_id=doc.id) }}" class="d-inline">
+        <button type="submit" class="btn btn-success">✅ Завершить приемку</button>
+      </form>
+      {% endif %}
     {% if current_user.is_admin %}
     <form method="post" action="{{ url_for('receiving.delete_document', doc_id=doc.id) }}" class="d-inline" onsubmit="return confirm('Удалить документ приемки {{ doc.number }} целиком? Действие необратимо.');">
       <button type="submit" class="btn btn-outline-danger">🗑 Удалить документ</button>
     </form>
     {% endif %}
+    {% elif doc.status == 'recounting' %}
+    <form method="post" action="{{ url_for('receiving.send_to_sorting', doc_id=doc.id) }}" class="d-inline">
+      <button type="submit" class="btn btn-success">🔍 Отправить на разбраковку</button>
+    </form>
+    {% elif doc.status == 'sorting' %}
+    <form method="post" action="{{ url_for('receiving.complete', doc_id=doc.id) }}" class="d-inline">
+      <button type="submit" class="btn btn-success">✅ Завершить приемку</button>
+    </form>
+    {% elif doc.status == 'completed' and current_user.is_admin and doc.is_from_invoice_import() %}
+    <form method="post" action="{{ url_for('receiving.revert_to_sorting', doc_id=doc.id) }}" class="d-inline"
+          onsubmit="return confirm('Вернуть приемку на разбраковку? Годный товар, зачисленный в неразмещенный остаток, будет списан обратно — сработает, только если ничего из него еще не разместили в короба.');">
+      <button type="submit" class="btn btn-outline-warning">↩ Вернуть на разбраковку</button>
+    </form>
     {% endif %}
   </div>
 </div>
 
-{% if doc.status == 'completed' %}
+{% if doc.status == 'recounting' %}
+<div class="alert alert-warning">
+  Приемка на пересчете — при необходимости поправьте количество по строкам ниже, затем отправьте на разбраковку.
+</div>
+{% elif doc.status == 'sorting' %}
+<div class="alert alert-warning">
+  Приемка на разбраковке — укажите кол-во брака по строкам, если оно есть (остальное зачислится в неразмещенный остаток как годное). Брак уйдет отдельным возвратом поставщику — как и недостача, если на пересчете кол-во оказалось меньше, чем заявлено в накладной.
+  {% if not doc.is_from_invoice_import() and not current_user.is_admin %}
+    <br>Эта приемка не загружена из файла накладной — выделение брака здесь доступно только администратору (номер приемки не настоящий номер накладной, 1С возврат не сопоставит).
+  {% endif %}
+</div>
+{% elif doc.status == 'completed' %}
 <div class="alert alert-success">
-  Приемка завершена — товар зачислен в неразмещенный остаток склада «{{ doc.warehouse.name }}».
+  Приемка завершена — годный товар зачислен в неразмещенный остаток склада «{{ doc.warehouse.name }}».
   <a href="{{ url_for('placement.new_document') }}">Разместить его в короба и ячейки →</a>
 </div>
 {% endif %}
 
 {% if doc.status == 'draft' %}
-<div class="row g-4 mb-4">
-  <div class="col-md-5">
-    <div class="card p-3">
-      <h5>Сканировать штрихкод товара</h5>
-      <div class="d-flex gap-2">
-        <input type="text" id="scanInput" class="form-control form-control-lg" placeholder="Отсканируйте штрихкод и нажмите Enter" autofocus>
-        <button type="button" class="btn btn-outline-primary" data-camera-scan-target="#scanInput" title="Сканировать камерой телефона">📷</button>
+<div class="card p-3 mb-4">
+  {% set hint_box = "Отсканируйте короб (уже созданный ранее массовой печатью) или создайте новый — товар будете сканировать сразу в него, минуя неразмещенный остаток. После скана короба фокус сам перейдет в поле поиска товара; после добавления товара вручную короб сбросится и можно сразу сканировать следующий — чтобы вернуться и добавить что-то еще в этот же короб, просто отсканируйте его снова." %}
+  <h5 class="d-flex align-items-center gap-2">
+    Короб <span class="text-muted small d-none d-md-inline">(по желанию — если сразу клеите короба и упаковываете товар по факту приемки)</span>
+    <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
+            data-bs-placement="bottom" data-bs-content="{{ hint_box }}" aria-label="Подсказка">?</button>
+  </h5>
+  {% if active_box %}
+    <div class="alert alert-primary d-flex justify-content-between align-items-center flex-wrap gap-2 mb-0">
+      <div>Работаем с коробом <b>{{ active_box.box_number }}</b>
+        <span id="activeBoxItemCountWrap"{% if not active_box.items.count() %} style="display:none"{% endif %}>
+          — уже внутри: <span id="activeBoxItemCount">{{ active_box.items.count() }}</span> поз.
+        </span>
       </div>
-      <div id="scanResult" class="small mt-2"></div>
+      <a class="btn btn-sm btn-outline-primary" href="{{ url_for('receiving.detail', doc_id=doc.id) }}">Работать без короба / сменить короб</a>
     </div>
-  </div>
-  <div class="col-md-7">
+  {% else %}
+    <p class="text-muted small d-none d-md-block">{{ hint_box }}</p>
+    <div class="d-flex gap-2 flex-wrap">
+      <form method="post" action="{{ url_for('receiving.select_box', doc_id=doc.id) }}" class="d-flex gap-2">
+        <input type="text" name="box_number" id="boxNumberInput" class="form-control form-control-lg" placeholder="Отсканируйте или введите номер короба" required autofocus>
+        <button type="button" class="btn btn-outline-primary" data-camera-scan-target="#boxNumberInput" title="Сканировать камерой">📷</button>
+        <button type="submit" class="btn btn-primary">Выбрать</button>
+      </form>
+      <form method="post" action="{{ url_for('receiving.create_box', doc_id=doc.id) }}">
+        <button type="submit" class="btn btn-outline-primary">📦 Создать новый короб</button>
+      </form>
+    </div>
+  {% endif %}
+</div>
+
+<div class="row g-4 mb-4">
+  <div class="col-12">
     <div class="card p-3">
-      <h5>Добавить товар вручную (поиск "содержит")</h5>
-      <form method="post" action="{{ url_for('receiving.add_line', doc_id=doc.id) }}" class="row g-2 align-items-end">
+      <h5>Добавить товар{% if active_box %} — в короб {{ active_box.box_number }}{% endif %}</h5>
+      <p class="text-muted small mb-2">Отсканируйте штрихкод или начните вводить артикул/наименование. Если по штрихкоду нашелся ровно один товар — данные подставятся сами, останется ввести количество.</p>
+      <form method="post" action="{{ url_for('receiving.add_line_to_box', doc_id=doc.id, box_id=active_box.id) if active_box else url_for('receiving.add_line', doc_id=doc.id) }}" class="row g-2 align-items-end">
         <div class="col-md-7">
           <label class="form-label">Товар</label>
-          <div class="autocomplete-box" data-autocomplete-nomenclature>
-            <input type="text" class="form-control ac-input" placeholder="Артикул, наименование или штрихкод..." autocomplete="off">
+          <div class="autocomplete-box d-flex gap-2" data-autocomplete-nomenclature>
+            <input type="text" id="receivingItemInput" class="form-control ac-input" placeholder="Штрихкод, артикул или наименование..." autocomplete="off" autofocus>
             <input type="hidden" class="ac-value" name="nomenclature_id" required>
+            <button type="button" class="btn btn-outline-primary flex-shrink-0" data-camera-scan-target="#receivingItemInput" title="Сканировать камерой телефона">📷</button>
             <div class="autocomplete-list"></div>
           </div>
         </div>
@@ -67,67 +136,204 @@
     </div>
   </div>
 </div>
+
+{% if packed_boxes %}
+<div class="card p-3 mb-4">
+  <h5>Короба, упакованные в этой приемке</h5>
+  <table class="table table-sm mb-0 d-none d-md-table">
+    <thead><tr><th>Короб</th><th></th></tr></thead>
+    <tbody>
+    {% for box in packed_boxes %}
+      <tr>
+        <td>
+          <a href="{{ url_for('boxes.detail', box_id=box.id) }}">{{ box.box_number }}</a>
+          <span class="badge badge-status-{{ box.status }}">{{ 'В ячейке' if box.status == 'stored' else 'Открыт' }}</span>
+        </td>
+        <td>
+          {% if not (active_box and box.id == active_box.id) %}
+          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('receiving.detail', doc_id=doc.id, box=box.id) }}">Сканировать в этот короб</a>
+          {% endif %}
+          <a class="btn btn-sm btn-outline-secondary" target="_blank" href="{{ url_for('labels.box_label', box_id=box.id) }}">🖨 Этикетка короба</a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="list-group d-md-none">
+    {% for box in packed_boxes %}
+      <div class="list-group-item py-2 px-2">
+        <div class="d-flex justify-content-between align-items-center gap-2">
+          <a href="{{ url_for('boxes.detail', box_id=box.id) }}" class="fw-bold text-decoration-none">{{ box.box_number }}</a>
+          <span class="badge badge-status-{{ box.status }}">{{ 'В ячейке' if box.status == 'stored' else 'Открыт' }}</span>
+        </div>
+        <div class="d-flex gap-2 mt-1">
+          {% if not (active_box and box.id == active_box.id) %}
+          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('receiving.detail', doc_id=doc.id, box=box.id) }}">Сканировать сюда</a>
+          {% endif %}
+          <a class="btn btn-sm btn-outline-secondary" target="_blank" href="{{ url_for('labels.box_label', box_id=box.id) }}">🖨</a>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
 {% endif %}
 
+{% set can_edit_defect = doc.status == 'sorting' and (doc.is_from_invoice_import() or current_user.is_admin) %}
+{% set can_bulk_edit_qty = doc.status in ('draft', 'recounting') %}
 <div class="card p-3">
   <h5>Позиции приемки</h5>
-  <table class="table table-sm">
-    <thead><tr><th>Товар</th><th>Кол-во</th>{% if doc.status == 'draft' %}<th></th>{% endif %}</tr></thead>
+  {% if can_bulk_edit_qty %}
+  <p class="text-muted small mb-2">Поправьте количество по нужным строкам и нажмите «Сохранить количества» один раз — страница не перезагружается после каждой строки.</p>
+  {% for line in lines %}
+    <form id="deleteLine{{ line.id }}" method="post" action="{{ url_for('receiving.delete_line', doc_id=doc.id, line_id=line.id) }}" hidden></form>
+  {% endfor %}
+  <form id="bulkQtyForm" method="post" action="{{ url_for('receiving.update_lines_bulk', doc_id=doc.id) }}">
+  {% endif %}
+  <table class="table table-sm d-none d-md-table">
+    <thead><tr><th>Товар</th><th>Короб</th><th>Кол-во</th><th>{% if doc.status in ('sorting', 'completed') %}Брак{% endif %}</th></tr></thead>
     <tbody>
     {% for line in lines %}
       <tr>
         <td>{{ line.nomenclature.name }} <span class="text-muted">({{ line.nomenclature.sku }})</span></td>
-        {% if doc.status == 'draft' %}
+        <td>{% if line.box %}<a href="{{ url_for('boxes.detail', box_id=line.box.id) }}">{{ line.box.box_number }}</a>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+        {% if doc.status in ('draft', 'recounting') %}
         <td style="min-width:160px">
-          <form method="post" action="{{ url_for('receiving.update_line', doc_id=doc.id, line_id=line.id) }}" class="d-flex gap-1">
-            <input type="number" name="qty" step="0.001" min="0.001" value="{{ line.qty }}" class="form-control form-control-sm" style="width:100px">
+          <div class="d-flex gap-1">
+            <input type="number" name="qty_{{ line.id }}" step="0.001" min="0.001" value="{{ line.qty }}"
+                   class="form-control form-control-sm bulk-qty-input" data-line-id="{{ line.id }}" style="width:100px">
             <span class="align-self-center small text-muted">{{ line.nomenclature.unit }}</span>
-            <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>
-          </form>
+          </div>
         </td>
         <td>
-          <form method="post" action="{{ url_for('receiving.delete_line', doc_id=doc.id, line_id=line.id) }}">
-            <button type="submit" class="btn btn-sm btn-outline-danger">✕</button>
-          </form>
+          {% if doc.status == 'draft' %}
+          <button type="submit" form="deleteLine{{ line.id }}" class="btn btn-sm btn-outline-danger">✕</button>
+          {% endif %}
+        </td>
+        {% elif doc.status == 'sorting' %}
+        <td>{{ line.qty }} {{ line.nomenclature.unit }}</td>
+        <td style="min-width:140px">
+          {% if line.box_id %}
+            <span class="text-muted">не подлежит</span>
+          {% elif can_edit_defect %}
+            <form method="post" action="{{ url_for('receiving.update_defect', doc_id=doc.id, line_id=line.id) }}" class="d-flex gap-1">
+              <input type="number" name="defect_qty" step="0.001" min="0" max="{{ line.qty }}" value="{{ line.defect_qty }}" class="form-control form-control-sm" style="width:90px">
+              <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>
+            </form>
+          {% else %}
+            <span class="text-muted">{{ line.defect_qty }}</span>
+          {% endif %}
         </td>
         {% else %}
         <td>{{ line.qty }} {{ line.nomenclature.unit }}</td>
+        <td>{% if line.defect_qty %}<span class="text-danger">{{ line.defect_qty }}</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
         {% endif %}
       </tr>
     {% else %}
-      <tr><td colspan="3" class="text-muted">Позиций еще нет</td></tr>
+      <tr><td colspan="4" class="text-muted">Позиций еще нет</td></tr>
     {% endfor %}
     </tbody>
     {% if lines %}
     <tfoot>
-      <tr class="fw-bold"><td>Итого</td><td>{{ doc.total_qty() }}</td>{% if doc.status == 'draft' %}<td></td>{% endif %}</tr>
+      <tr class="fw-bold"><td>Итого</td><td></td><td>{{ doc.total_qty() }}</td><td></td></tr>
     </tfoot>
     {% endif %}
   </table>
+
+  <div class="list-group d-md-none">
+    {% for line in lines %}
+      <div class="list-group-item py-2 px-2">
+        <div>{{ line.nomenclature.name }} <span class="text-muted small">({{ line.nomenclature.sku }})</span></div>
+        <div class="d-flex justify-content-between align-items-center gap-2 mt-1">
+          <div class="small text-muted">
+            {% if line.box %}<a href="{{ url_for('boxes.detail', box_id=line.box.id) }}">{{ line.box.box_number }}</a>{% else %}без короба{% endif %}
+          </div>
+          {% if doc.status in ('draft', 'recounting') %}
+          <div class="d-flex gap-2 flex-shrink-0 align-items-center">
+            {% set q = line.qty %}
+            <input type="number" name="qty_{{ line.id }}" step="0.001" min="0.001" value="{{ q | int if q == q | int else q }}"
+                   class="form-control form-control-sm bulk-qty-input" data-line-id="{{ line.id }}" style="width:4.5em">
+            {% if doc.status == 'draft' %}
+            <button type="submit" form="deleteLine{{ line.id }}" class="btn btn-sm btn-outline-danger">✕</button>
+            {% endif %}
+          </div>
+          {% elif doc.status == 'sorting' %}
+          <div class="small text-end">
+            <div>{{ line.qty }} {{ line.nomenclature.unit }}</div>
+            {% if line.box_id %}
+              <span class="text-muted">брак не подлежит</span>
+            {% elif can_edit_defect %}
+              <form method="post" action="{{ url_for('receiving.update_defect', doc_id=doc.id, line_id=line.id) }}" class="d-flex gap-1 align-items-center mt-1">
+                <span class="text-muted">брак:</span>
+                <input type="number" name="defect_qty" step="0.001" min="0" max="{{ line.qty }}" value="{{ line.defect_qty }}" class="form-control form-control-sm" style="width:4.5em">
+                <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>
+              </form>
+            {% else %}
+              <span class="text-muted">брак: {{ line.defect_qty }}</span>
+            {% endif %}
+          </div>
+          {% else %}
+          <div class="small text-end">
+            <div>{{ line.qty }} {{ line.nomenclature.unit }}</div>
+            {% if line.defect_qty %}<div class="text-danger">брак: {{ line.defect_qty }}</div>{% endif %}
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    {% else %}
+      <div class="list-group-item text-muted">Позиций еще нет</div>
+    {% endfor %}
+    {% if lines %}
+      <div class="list-group-item fw-bold d-flex justify-content-between">
+        <span>Итого</span><span>{{ doc.total_qty() }}</span>
+      </div>
+    {% endif %}
+  </div>
+  {% if can_bulk_edit_qty %}
+  {% if lines %}
+  <button type="submit" form="bulkQtyForm" class="btn btn-primary mt-3">💾 Сохранить количества</button>
+  {% endif %}
+  </form>
+  {% endif %}
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-  const scanInput = document.getElementById("scanInput");
-  const scanResult = document.getElementById("scanResult");
-  if (scanInput) {
-    initBarcodeInput(scanInput, (barcode) => {
-      fetch("{{ url_for('receiving.add_line_by_barcode', doc_id=doc.id) }}", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ barcode: barcode, qty: 1 }),
-      })
-        .then((r) => r.json())
-        .then((data) => {
-          if (data.ok) {
-            scanResult.innerHTML = '<span class="text-success">Добавлено: ' + data.line.name + '</span>';
-            location.reload();
-          } else {
-            scanResult.innerHTML = '<span class="text-danger">' + data.error + '</span>';
-          }
+  // Поле номера короба — сканируем как обычный штрихкод (Enter или пауза
+  // в наборе), без необходимости жать "Выбрать" — короб выбирается, и
+  // фокус страницы после перезагрузки сам уходит в поле товара (autofocus).
+  const boxNumberInput = document.getElementById("boxNumberInput");
+  if (boxNumberInput) {
+    // Пауза побольше, чем у обычного сканирования штрихкода товара — номер
+    // короба нередко вводят вручную по цифре, и со стандартной паузой
+    // форма улетала раньше, чем человек успевал дописать номер.
+    initBarcodeInput(
+      boxNumberInput,
+      (value) => {
+        boxNumberInput.value = value;
+        boxNumberInput.form.submit();
+      },
+      { debounceMs: 900 }
+    );
+  }
+
+  // Количество редактируется в двух местах разметки одновременно (таблица
+  // для десктопа, список для телефона — видна только одна, по ширине
+  // экрана), у обоих одинаковый name="qty_<id>" для отправки формой одной
+  // кнопкой. Держим оба поля одной строки синхронными, иначе браузер
+  // отправит два разных значения под одним именем и до сервера дойдет
+  // только первое по DOM-порядку — не обязательно то, что правили.
+  document.querySelectorAll(".bulk-qty-input").forEach((input) => {
+    input.addEventListener("input", () => {
+      document
+        .querySelectorAll('.bulk-qty-input[data-line-id="' + input.dataset.lineId + '"]')
+        .forEach((other) => {
+          if (other !== input) other.value = input.value;
         });
     });
-  }
+  });
+
 </script>
 {% endblock %}

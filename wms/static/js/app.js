@@ -46,6 +46,25 @@ function initNomenclatureAutocomplete(root) {
     input.dataset.selectedUnit = item.unit || "";
     closeList();
     input.dispatchEvent(new CustomEvent("nomenclature-selected", { detail: item }));
+    // После выбора (кликом, стрелками или автоматически по скану) сразу
+    // переводим фокус на количество — обычно следующее, что нужно ввести.
+    const form = input.closest("form");
+    const qtyInput = form && form.querySelector('[name="qty"]');
+    if (qtyInput) {
+      qtyInput.focus();
+      qtyInput.select();
+    }
+  }
+
+  function search(q) {
+    return fetch("/api/nomenclature/search?q=" + encodeURIComponent(q))
+      .then((r) => r.json())
+      .then((data) => {
+        items = data;
+        activeIndex = -1;
+        renderList();
+        return items;
+      });
   }
 
   input.addEventListener("input", () => {
@@ -56,32 +75,40 @@ function initNomenclatureAutocomplete(root) {
       closeList();
       return;
     }
-    debounceTimer = setTimeout(() => {
-      fetch("/api/nomenclature/search?q=" + encodeURIComponent(q))
-        .then((r) => r.json())
-        .then((data) => {
-          items = data;
-          activeIndex = -1;
-          renderList();
-        });
-    }, 200);
+    debounceTimer = setTimeout(() => search(q), 200);
   });
 
   input.addEventListener("keydown", (e) => {
-    if (!list.classList.contains("show")) return;
-    if (e.key === "ArrowDown") {
+    if (e.key === "ArrowDown" && list.classList.contains("show")) {
       e.preventDefault();
       activeIndex = Math.min(activeIndex + 1, items.length - 1);
       renderList();
-    } else if (e.key === "ArrowUp") {
+    } else if (e.key === "ArrowUp" && list.classList.contains("show")) {
       e.preventDefault();
       activeIndex = Math.max(activeIndex - 1, 0);
       renderList();
     } else if (e.key === "Enter") {
-      if (activeIndex >= 0) {
-        e.preventDefault();
+      e.preventDefault();
+      if (activeIndex >= 0 && list.classList.contains("show")) {
         selectItem(items[activeIndex]);
+        return;
       }
+      // Это же поле совмещает ручной поиск и сканирование штрихкода:
+      // сканер эмулирует ввод текста и Enter, поэтому здесь и решаем, что
+      // это было — сразу (не дожидаясь debounce) ищем текущий текст и, если
+      // нашелся ровно один вариант, подставляем его автоматически (см.
+      // обсуждение: "выпадает список, если единственный — подставляет
+      // данные"). Если вариантов несколько (обычный ручной поиск без
+      // стрелок) — просто показываем список, ничего не выбирая, поведение
+      // не меняется.
+      const q = input.value.trim();
+      if (!q) return;
+      clearTimeout(debounceTimer);
+      search(q).then((results) => {
+        if (results.length === 1) {
+          selectItem(results[0]);
+        }
+      });
     } else if (e.key === "Escape") {
       closeList();
     }
@@ -98,10 +125,28 @@ function initNomenclatureAutocomplete(root) {
  * (если сканер настроен без Enter, либо просто не был нажат) — так товар
  * добавляется сканированием без необходимости нажимать Enter.
  * onScan(value) вызывается ровно один раз на скан.
+ *
+ * Защита от "слипания" двух сканирований в один мусорный номер: если короб
+ * сканируют дважды подряд быстрее, чем срабатывает debounce (нервное
+ * повторное сканирование, или сканер с двойным срабатыванием на одно
+ * нажатие) — второй скан начинает печататься в то же поле, не дожидаясь,
+ * пока первый успеет отправиться и очистить его. Символы физического
+ * сканера идут практически без пауз (единицы мс) — заметно быстрее, чем
+ * может выдать даже очень быстрый человек на клавиатуре. Поэтому "разрыв"
+ * такого рода детектируем только внутри буфера, где ВСЕ символы шли строго
+ * быстрее человеческого предела (FAST_CHAR_GAP_MS) — если хотя бы один
+ * символ пришел медленнее, считаем ввод ручным и эту логику для всего
+ * оставшегося буфера больше не применяем (копится как раньше, до
+ * Enter/debounce) — так пауза человека посреди набора номера никогда не
+ * стирает то, что он уже ввел.
  */
 function initBarcodeInput(input, onScan, options) {
   const debounceMs = (options && options.debounceMs) || 350;
+  const FAST_CHAR_GAP_MS = 25; // быстрее человека, но с запасом ниже скорости сканера
+  const RESET_GAP_MS = 100; // пауза, которая обрывает "быструю" (сканерную) серию
   let timer = null;
+  let lastKeyTime = 0;
+  let bufferIsFastSoFar = true;
 
   function fire() {
     clearTimeout(timer);
@@ -111,6 +156,7 @@ function initBarcodeInput(input, onScan, options) {
       onScan(value);
       input.value = "";
     }
+    bufferIsFastSoFar = true;
   }
 
   input.addEventListener("keydown", (e) => {
@@ -120,7 +166,40 @@ function initBarcodeInput(input, onScan, options) {
     }
   });
 
-  input.addEventListener("input", () => {
+  input.addEventListener("input", (e) => {
+    const now = Date.now();
+    const gap = now - lastKeyTime;
+    const isFreshField = input.value.length <= 1;
+
+    if (isFreshField) {
+      bufferIsFastSoFar = true;
+    } else if (gap > FAST_CHAR_GAP_MS && gap <= RESET_GAP_MS) {
+      // Пауза уже не "сканерная", но еще не настолько большая, чтобы
+      // уверенно считать ее границей между двумя сканами (может быть и
+      // просто чуть замешкавшийся человек) — просто перестаем угадывать
+      // границы сканов для этого буфера, ничего не стираем.
+      bufferIsFastSoFar = false;
+    } else if (
+      timer !== null &&
+      bufferIsFastSoFar &&
+      gap > RESET_GAP_MS &&
+      input.value.length > 3 &&
+      typeof e.data === "string" &&
+      e.data
+    ) {
+      // До сих пор весь буфер набирался строго на скорости сканера (иначе
+      // сработала бы ветка выше) — длинная пауза именно ПОСЛЕ такого
+      // быстрого буфера означает конец одного скана и начало следующего,
+      // а не паузу внутри ручного набора. Проверка длины (>3) — на всякий
+      // случай, чтобы не стирать совсем короткий ввод, если он все же
+      // окажется случайным.
+      input.value = e.data;
+      bufferIsFastSoFar = true;
+    } else if (gap > FAST_CHAR_GAP_MS) {
+      bufferIsFastSoFar = false;
+    }
+
+    lastKeyTime = now;
     clearTimeout(timer);
     timer = setTimeout(fire, debounceMs);
   });
@@ -150,5 +229,12 @@ document.addEventListener("DOMContentLoaded", () => {
     if (el.dataset.autoprint === "1") {
       window.print();
     }
+  });
+
+  // Значки-подсказки "?" — текст показывается всплывающим попапом по
+  // нажатию (data-bs-trigger="focus" на кнопке закрывает его же по клику
+  // в любом другом месте страницы, без отдельного кода).
+  document.querySelectorAll('[data-bs-toggle="popover"]').forEach((el) => {
+    new bootstrap.Popover(el);
   });
 });

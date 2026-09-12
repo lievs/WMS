@@ -41,15 +41,32 @@ def item_label_pdf(item_id):
 @bp.route("/box/<int:box_id>")
 def box_label(box_id):
     box = Box.query.get_or_404(box_id)
-    img = generate_barcode_data_uri(box.box_number)
+    img = generate_barcode_data_uri(box.barcode_value)
     return render_template("labels/box.html", box=box, barcode_img=img, autoprint=_autoprint())
+
+
+# Крупный номер (без слова "Короб" — короче, легче прочитать издалека) и
+# крупный штрихкод — на всю доступную ширину этикетки (реже промахи
+# сканера, в т.ч. при смазанной/некачественной печати). Верхний отступ и
+# отступ до текста слегка ужаты (было 2мм/3мм), чтобы освободить место
+# под увеличенный штрихкод, не трогая размер самого штрихкода дальше —
+# ratio=0.65 уже упирается в ширину этикетки, крупнее в 58мм не влезет.
+BOX_TITLE_FONT_SIZE = 15
+BOX_MAX_IMG_H_RATIO = 0.65
+BOX_SUBTITLE_GAP_MM = 3.2
+BOX_TOP_MARGIN_MM = 1
+BOX_TEXT_GAP_MM = 2
 
 
 @bp.route("/box/<int:box_id>.pdf")
 def box_label_pdf(box_id):
     box = Box.query.get_or_404(box_id)
     subtitle = box.warehouse.name if box.warehouse else ""
-    pdf = build_label_pdf(box.box_number, f"Короб {box.box_number}", subtitle)
+    pdf = build_label_pdf(
+        box.barcode_value, box.box_number, subtitle,
+        title_font_size=BOX_TITLE_FONT_SIZE, max_img_h_ratio=BOX_MAX_IMG_H_RATIO, subtitle_gap_mm=BOX_SUBTITLE_GAP_MM,
+        top_margin_mm=BOX_TOP_MARGIN_MM, text_gap_mm=BOX_TEXT_GAP_MM,
+    )
     return Response(
         pdf,
         mimetype="application/pdf",
@@ -61,9 +78,12 @@ def box_label_pdf(box_id):
 def boxes_label_batch_pdf():
     """Печать этикеток сразу нескольких коробов одним PDF (например, для
     только что созданной массовой партии) — ?ids=1,2,3."""
-    ids_param = request.args.get("ids", "")
+    # Поддерживаем и "?ids=1,2,3" (одна ссылка "Печать всех"), и повторяющиеся
+    # "?ids=1&ids=2&ids=3" (форма с чекбоксами — печать выбранной части
+    # партии, если этикеток физически не хватает на все короба сразу).
+    ids_params = request.args.getlist("ids")
     try:
-        ids = [int(v) for v in ids_param.split(",") if v.strip()]
+        ids = [int(v) for part in ids_params for v in part.split(",") if v.strip()]
     except ValueError:
         abort(400, "Некорректный список коробов")
     if not ids:
@@ -77,12 +97,16 @@ def boxes_label_batch_pdf():
         if not box:
             continue
         subtitle = box.warehouse.name if box.warehouse else ""
-        entries.append((box.box_number, f"Короб {box.box_number}", subtitle))
+        entries.append((box.barcode_value, box.box_number, subtitle))
 
     if not entries:
         abort(404, "Короба не найдены")
 
-    pdf = build_labels_batch_pdf(entries)
+    pdf = build_labels_batch_pdf(
+        entries,
+        title_font_size=BOX_TITLE_FONT_SIZE, max_img_h_ratio=BOX_MAX_IMG_H_RATIO, subtitle_gap_mm=BOX_SUBTITLE_GAP_MM,
+        top_margin_mm=BOX_TOP_MARGIN_MM, text_gap_mm=BOX_TEXT_GAP_MM,
+    )
     return Response(
         pdf,
         mimetype="application/pdf",
@@ -149,7 +173,7 @@ def zone_label(zone_id):
 def zone_label_pdf(zone_id):
     zone = Zone.query.get_or_404(zone_id)
     subtitle = zone.warehouse.name if zone.warehouse else ""
-    title = f"Зона {zone.code}" + (f" — {zone.name}" if zone.name else "")
+    title = f"Ряд {zone.code}" + (f" — {zone.name}" if zone.name else "")
     cell_codes = [c.code for c in zone.cells.order_by(Cell.code).all()]
     pdf = build_zone_label_pdf(zone.code, title, subtitle, cell_codes)
     return Response(

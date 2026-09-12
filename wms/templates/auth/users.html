@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Пользователи{% endblock %}
+{% block title %}Настройки{% endblock %}
 {% block content %}
-<h3 class="mb-4">Пользователи</h3>
+<h3 class="mb-4">Настройки</h3>
 
-<div class="row g-4">
+<h5 class="mb-3">Пользователи</h5>
+<div class="row g-4 mb-5">
   <div class="col-md-4">
     <div class="card p-3">
       <h5>Добавить пользователя</h5>
@@ -39,14 +40,71 @@
 
   <div class="col-md-8">
     <div class="card p-3">
-      <table class="table table-sm">
-        <thead><tr><th>Логин</th><th>Имя</th><th>Права</th><th>Роль</th><th>Смена, мин</th><th>Статус</th><th></th></tr></thead>
+      <table class="table table-sm table-mobile-compact">
+        <thead><tr><th>Логин</th><th>Имя</th><th>Права</th><th>Разделы</th><th>Роль</th><th>Смена, мин</th><th>Статус</th><th></th></tr></thead>
         <tbody>
         {% for u in users %}
           <tr>
             <td>{{ u.username }}</td>
             <td>{{ u.full_name or '' }}</td>
             <td>{% if u.is_admin %}<span class="badge bg-primary">Админ</span>{% else %}Сотрудник{% endif %}</td>
+            <td>
+              {% if u.is_admin %}
+                <span class="text-muted small">Полный (админ)</span>
+              {% else %}
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#sectionsModal{{ u.id }}">
+                  {% if not u.allowed_sections %}Полный доступ
+                  {% elif u.allowed_sections == 'none' %}Доступа нет
+                  {% else %}Настроено ({{ u.allowed_section_set()|length }}){% endif %}
+                </button>
+                {% if not u.nomenclature_edit_allowed %}<div class="text-muted small">ред. номенклатуры запрещено</div>{% endif %}
+
+                <div class="modal fade" id="sectionsModal{{ u.id }}" tabindex="-1" aria-hidden="true">
+                  <div class="modal-dialog">
+                    <div class="modal-content">
+                      <form method="post" action="{{ url_for('auth.update_sections', user_id=u.id) }}">
+                        <div class="modal-header">
+                          <h5 class="modal-title">Доступ к разделам — {{ u.display_name() }}</h5>
+                          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Закрыть"></button>
+                        </div>
+                        <div class="modal-body">
+                          {% set allowed = u.allowed_section_set() %}
+                          <div class="form-check mb-2">
+                            <input class="form-check-input" type="radio" name="mode" value="full" id="modeFull{{ u.id }}"
+                                   {% if not u.allowed_sections %}checked{% endif %}
+                                   onchange="document.getElementById('sectionsList{{ u.id }}').classList.add('d-none')">
+                            <label class="form-check-label" for="modeFull{{ u.id }}">Полный доступ ко всем разделам</label>
+                          </div>
+                          <div class="form-check mb-2">
+                            <input class="form-check-input" type="radio" name="mode" value="restricted" id="modeRestricted{{ u.id }}"
+                                   {% if u.allowed_sections %}checked{% endif %}
+                                   onchange="document.getElementById('sectionsList{{ u.id }}').classList.remove('d-none')">
+                            <label class="form-check-label" for="modeRestricted{{ u.id }}">Только выбранные разделы</label>
+                          </div>
+                          <div id="sectionsList{{ u.id }}" class="{% if not u.allowed_sections %}d-none{% endif %} ps-3 border-start">
+                            {% for code, label in sections %}
+                            <div class="form-check">
+                              <input class="form-check-input" type="checkbox" name="section_{{ code }}" id="sec-{{ u.id }}-{{ code }}" {% if code in allowed %}checked{% endif %}>
+                              <label class="form-check-label" for="sec-{{ u.id }}-{{ code }}">{{ label }}</label>
+                            </div>
+                            {% endfor %}
+                          </div>
+                          <hr>
+                          <div class="form-check">
+                            <input class="form-check-input" type="checkbox" name="nomenclature_edit" id="nomEdit{{ u.id }}" {% if u.nomenclature_edit_allowed %}checked{% endif %}>
+                            <label class="form-check-label" for="nomEdit{{ u.id }}">Разрешить редактирование номенклатуры</label>
+                            <div class="text-muted small">Просмотр номенклатуры и «Где товар» не зависит от этой галочки — только добавление товаров, изменение вида/нормы и импорт из Excel.</div>
+                          </div>
+                        </div>
+                        <div class="modal-footer">
+                          <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
+                        </div>
+                      </form>
+                    </div>
+                  </div>
+                </div>
+              {% endif %}
+            </td>
             <td style="min-width:200px">
               <form method="post" action="{{ url_for('auth.update_role', user_id=u.id) }}" class="d-flex gap-1">
                 <select name="role" class="form-select form-select-sm" {% if u.id == current_user.id and not u.is_admin %}disabled{% endif %}>
@@ -81,5 +139,85 @@
       </table>
     </div>
   </div>
+</div>
+
+{% set hint_stickers = "Печатаются на стикерах отправления (см. «Перемещение» → печать стикеров по выбранным документам)." %}
+{% set hint_sender = "Если задано — печатается на всех стикерах вместо названия фактического склада-отправителя каждого документа. Пустое поле возвращает поведение по умолчанию (свой склад-отправитель на каждом направлении)." %}
+{% set hint_recipients = "Название/адрес/телефон получателя на складе назначения, в первую очередь для складов-городов маркетплейсов." %}
+{% set hint_fulfillment_1c = "1С не заводит отдельный физический склад под каждый склад-город WMS — вместо этого у нее свой набор промежуточных складов (например \"Товары в пути ФФ <город>\", СЦ и т.п.). Настраивается отдельно на каждый склад-город, а не на город целиком — одна и та же площадка одного города может ехать на разные склады 1С в зависимости от маркетплейса (например, ВБ Краснодар — на СЦ, а ОЗОН Краснодар — на фулфилмент). Пусто — при выгрузке подставится общий запасной склад «Товары в пути на Фулфилмент»." %}
+
+<h5 class="mb-3 d-flex align-items-center gap-2">
+  Склады выгрузки в 1С <span class="badge bg-success">новое</span>
+  <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
+          data-bs-placement="bottom" data-bs-content="{{ hint_fulfillment_1c }}" aria-label="Подсказка">?</button>
+</h5>
+<p class="text-muted small d-none d-md-block">{{ hint_fulfillment_1c }}</p>
+<div class="card p-3 mb-4">
+  <table class="table table-sm table-mobile-compact mb-0">
+    <thead><tr><th>Склад</th><th>Склад в 1С</th></tr></thead>
+    <tbody>
+    {% for wh in fulfillment_warehouses %}
+      <tr>
+        <td>{{ wh.name }}</td>
+        <td style="min-width:340px">
+          <form method="post" action="{{ url_for('warehouses.update_fulfillment_1c_name', warehouse_id=wh.id) }}" class="d-flex gap-1">
+            <input type="text" name="fulfillment_1c_name" value="{{ wh.fulfillment_1c_name or '' }}" class="form-control form-control-sm" placeholder="Товары в пути ФФ ...">
+            <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="2" class="text-muted">Складов-городов маркетплейсов еще нет</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h5 class="mb-3 d-flex align-items-center gap-2">
+  Стикеры перемещений
+  <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
+          data-bs-placement="bottom" data-bs-content="{{ hint_stickers }}" aria-label="Подсказка">?</button>
+</h5>
+<p class="text-muted small d-none d-md-block">{{ hint_stickers }}</p>
+
+<div class="card p-3 mb-3">
+  <h6 class="d-flex align-items-center gap-2">
+    Отправитель — сразу на все направления
+    <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
+            data-bs-placement="bottom" data-bs-content="{{ hint_sender }}" aria-label="Подсказка">?</button>
+  </h6>
+  <p class="text-muted small mb-2 d-none d-md-block">{{ hint_sender }}</p>
+  <form method="post" action="{{ url_for('movement.update_shipping_label_sender') }}" class="d-flex gap-1" style="max-width:480px">
+    <input type="text" name="sender" value="{{ shipping_label_sender or '' }}" class="form-control form-control-sm" placeholder="Название, адрес, телефон (необязательно)">
+    <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>
+  </form>
+</div>
+
+<h6 class="d-flex align-items-center gap-2">
+  Получатели по складам
+  <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
+          data-bs-placement="bottom" data-bs-content="{{ hint_recipients }}" aria-label="Подсказка">?</button>
+</h6>
+<p class="text-muted small d-none d-md-block">{{ hint_recipients }}</p>
+<div class="card p-3">
+  <table class="table table-sm table-mobile-compact">
+    <thead><tr><th>Код</th><th>Склад</th><th>Получатель</th></tr></thead>
+    <tbody>
+    {% for wh in warehouses %}
+      <tr>
+        <td>{{ wh.code }}</td>
+        <td>{{ wh.name }}</td>
+        <td style="min-width:320px">
+          <form method="post" action="{{ url_for('warehouses.update_recipient', warehouse_id=wh.id) }}" class="d-flex gap-1">
+            <input type="text" name="recipient_info" value="{{ wh.recipient_info or '' }}" class="form-control form-control-sm" placeholder="Название, адрес, телефон">
+            <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="3" class="text-muted">Склады еще не созданы</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
 </div>
 {% endblock %}

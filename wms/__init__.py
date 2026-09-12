@@ -1,18 +1,134 @@
 import os
 import secrets
 
-from flask import Flask, redirect, request, url_for
+from flask import Flask, flash, redirect, request, url_for
 from flask_login import current_user
-from sqlalchemy import event
+from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Engine
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .config import Config, INSTANCE_DIR
 from .extensions import db, login_manager
 from .paths import resource_dir
+from .utils.timezone import to_moscow
 
 
 _sqlite_functions_registered = False
+
+
+def _ensure_columns():
+    """db.create_all() создает только отсутствующие ТАБЛИЦЫ — если в модель
+    существующей таблицы добавили новое поле, на уже работающем сервере (где
+    таблица уже есть, но без этой колонки) оно само не появится, и первый же
+    запрос к нему упадет с "no such column". Здесь по каждой модели сверяем
+    колонки с тем, что реально есть в БД, и недостающие добавляем ALTER TABLE
+    (полноценный Alembic для проекта такого размера избыточен)."""
+    inspector = inspect(db.engine)
+    for table in db.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue
+        existing = {col["name"] for col in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in existing:
+                continue
+            col_type = column.type.compile(db.engine.dialect)
+            try:
+                with db.engine.begin() as conn:
+                    conn.execute(
+                        text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {col_type}')
+                    )
+                print(f"[schema] Добавлена колонка {table.name}.{column.name}")
+                if table.name == "movement_documents" and column.name == "received_at":
+                    # До этой версии перемещение засчитывалось в план отгрузок
+                    # сразу по завершении, отдельного подтверждения приемки не
+                    # было. Если считать все уже завершенные документы
+                    # "неполученными" (received_at пуст), кнопка "Принято на
+                    # складе" на них задвоила бы уже учтенное выполнение плана.
+                    # Поэтому именно в момент появления колонки (то есть один
+                    # раз, при обновлении с более старой версии) закрываем ее
+                    # задним числом для всего, что уже было завершено.
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE movement_documents SET received_at = completed_at "
+                                "WHERE status = 'completed' AND received_at IS NULL"
+                            )
+                        )
+                    print("[schema] movement_documents.received_at заполнен для уже завершенных документов")
+                if table.name == "warehouses" and column.name == "fulfillment_1c_name":
+                    # Известные соответствия "город -> склад 1С" (см.
+                    # wms.blueprints.warehouses.FULFILLMENT_1C_DEFAULTS) —
+                    # проставляем сразу при появлении колонки на уже
+                    # работающем сервере, чтобы выгрузка перемещений в 1С
+                    # начала разбивать склад-получатель по городу без ручной
+                    # настройки; администратор может поправить на странице
+                    # «Настройки». Новые склады-города, создаваемые после
+                    # этого момента, получают значение сразу при создании
+                    # (см. shipment_plan._get_or_create_city_warehouse), эта
+                    # разовая раскладка нужна только для уже существующих.
+                    from .blueprints.warehouses import FULFILLMENT_1C_DEFAULTS
+
+                    with db.engine.begin() as conn:
+                        for city_key, name_1c in FULFILLMENT_1C_DEFAULTS.items():
+                            conn.execute(
+                                text(
+                                    "UPDATE warehouses SET fulfillment_1c_name = :name_1c "
+                                    "WHERE fulfillment_1c_name IS NULL "
+                                    "AND lower(replace(marketplace_city, 'ё', 'е')) = :city_key"
+                                ),
+                                {"name_1c": name_1c, "city_key": city_key},
+                            )
+                    print(
+                        "[schema] warehouses.fulfillment_1c_name заполнен известными "
+                        "складами 1С по городу"
+                    )
+                if table.name == "users" and column.name == "nomenclature_edit_allowed":
+                    # ALTER TABLE ADD COLUMN не проставляет DEFAULT задним
+                    # числом — у уже существующих пользователей колонка
+                    # окажется NULL. Право редактировать номенклатуру у них
+                    # уже было (это новое ограничение, а не новая
+                    # возможность), поэтому явно проставляем True, а не
+                    # оставляем NULL.
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE users SET nomenclature_edit_allowed = 1 "
+                                "WHERE nomenclature_edit_allowed IS NULL"
+                            )
+                        )
+                    print("[schema] users.nomenclature_edit_allowed заполнен для уже существующих пользователей")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[schema] Не удалось добавить {table.name}.{column.name}: {exc}")
+
+
+def _ensure_indexes():
+    """Аналогично _ensure_columns(), но для индексов: index=True в модели
+    заставляет create_all() создать индекс только для НОВОЙ таблицы — для
+    уже существующей (обычный случай на работающем сервере) create_all()
+    таблицу не трогает вообще, и индекс, добавленный в код позже, сам по
+    себе на старой базе не появится. Без него запрос, для которого индекс
+    и добавляли, продолжит делать полное сканирование таблицы — тем
+    медленнее, чем больше в ней строк успело накопиться.
+    CREATE INDEX IF NOT EXISTS идемпотентен, поэтому просто повторяем его
+    при каждом старте вместо сверки с уже существующими индексами."""
+    inspector = inspect(db.engine)
+    for table in db.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue
+        for column in table.columns:
+            if not column.index:
+                continue
+            index_name = f"ix_{table.name}_{column.name}"
+            try:
+                with db.engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f'CREATE INDEX IF NOT EXISTS "{index_name}" '
+                            f'ON "{table.name}" ("{column.name}")'
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[schema] Не удалось создать индекс {index_name}: {exc}")
 
 
 def _register_sqlite_tuning():
@@ -22,7 +138,12 @@ def _register_sqlite_tuning():
     - WAL-режим и busy_timeout — чтобы несколько пользователей одновременно
       (несколько ПК и телефонов) не ловили "database is locked", а запись
       просто немного подождала своей очереди вместо мгновенной ошибки.
-    """
+
+    Слушатель "connect" глобальный (на весь процесс, а не на конкретный
+    Engine) — если в этом же процессе когда-нибудь подключится не-SQLite
+    БД (Postgres), dbapi_connection у нее не будет иметь create_function,
+    и это же отличие используем, чтобы не выполнять на ней PRAGMA (там их
+    нет и это синтаксическая ошибка) и не регистрировать функции."""
     global _sqlite_functions_registered
     if _sqlite_functions_registered:
         return
@@ -30,13 +151,15 @@ def _register_sqlite_tuning():
 
     @event.listens_for(Engine, "connect")
     def _on_connect(dbapi_connection, connection_record):  # noqa: ANN001
-        if hasattr(dbapi_connection, "create_function"):
-            dbapi_connection.create_function(
-                "LOWER", 1, lambda s: s.lower() if s is not None else None
-            )
-            dbapi_connection.create_function(
-                "UPPER", 1, lambda s: s.upper() if s is not None else None
-            )
+        if not hasattr(dbapi_connection, "create_function"):
+            return  # не SQLite (например, Postgres) — PRAGMA/функции здесь не применимы
+
+        dbapi_connection.create_function(
+            "LOWER", 1, lambda s: s.lower() if s is not None else None
+        )
+        dbapi_connection.create_function(
+            "UPPER", 1, lambda s: s.upper() if s is not None else None
+        )
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA busy_timeout=5000")
@@ -80,6 +203,12 @@ def create_app(config_class=Config):
     )
     app.config.from_object(config_class)
 
+    # Все даты в БД хранятся в UTC (datetime.utcnow() по всей модели) —
+    # шаблоны показывают их через этот фильтр в московском времени, а не
+    # как есть, чтобы время в списках документов совпадало с реальным
+    # часовым поясом склада.
+    app.jinja_env.filters["msk"] = to_moscow
+
     if app.config.get("BEHIND_PROXY"):
         # За nginx: доверяем X-Forwarded-For/-Proto/-Host от ровно одного
         # прокси перед приложением, чтобы Flask видел правильную схему
@@ -102,6 +231,9 @@ def create_app(config_class=Config):
     from .blueprints.reports import bp as reports_bp
     from .blueprints.production import bp as production_bp
     from .blueprints.api import bp as api_bp
+    from .blueprints.shipment_plan import bp as shipment_plan_bp
+    from .blueprints.integration_1c import bp as integration_1c_bp
+    from .blueprints.onboarding import bp as onboarding_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(main_bp)
@@ -116,12 +248,17 @@ def create_app(config_class=Config):
     app.register_blueprint(reports_bp, url_prefix="/reports")
     app.register_blueprint(production_bp, url_prefix="/production")
     app.register_blueprint(api_bp, url_prefix="/api")
+    app.register_blueprint(shipment_plan_bp, url_prefix="/shipment-plan")
+    app.register_blueprint(integration_1c_bp, url_prefix="/integrations/1c")
+    app.register_blueprint(onboarding_bp, url_prefix="/onboarding")
 
     with app.app_context():
         from . import models  # noqa: F401
         from .utils.categorize import bootstrap_categories
 
         db.create_all()
+        _ensure_columns()
+        _ensure_indexes()
         _bootstrap_admin()
         bootstrap_categories()
 
@@ -133,22 +270,42 @@ def create_app(config_class=Config):
 
     @app.before_request
     def require_login():
+        from .blueprints.integration_1c import API_1C_PUBLIC_ENDPOINTS
+
         if request.endpoint is None:
             return None
-        if request.endpoint == "static" or request.endpoint.startswith("auth."):
+        if (
+            request.endpoint == "static"
+            or request.endpoint.startswith("auth.")
+            or request.endpoint in API_1C_PUBLIC_ENDPOINTS
+        ):
             return None
         if not current_user.is_authenticated:
             return redirect(url_for("auth.login", next=request.full_path))
         # Роль "производство" — доступ только к сканированию ЧЗ, ничего
-        # больше (даже при прямом вводе адреса другой страницы).
-        if current_user.is_production_only() and not request.endpoint.startswith("production."):
+        # больше (даже при прямом вводе адреса другой страницы) — кроме
+        # страницы обучения, она должна быть доступна всем сотрудникам
+        # независимо от роли.
+        if (
+            current_user.is_production_only()
+            and not request.endpoint.startswith("production.")
+            and not request.endpoint.startswith("onboarding.")
+        ):
             return redirect(url_for("production.index"))
+        # Точечное ограничение разделов (см. User.allowed_sections) — тоже
+        # проверяем при прямом вводе адреса, не только скрываем пункт меню.
+        section = request.endpoint.split(".")[0]
+        if not current_user.has_section_access(section):
+            flash("Этот раздел вам не доступен — обратитесь к администратору", "danger")
+            return redirect(url_for("main.index"))
         return None
 
     @app.context_processor
     def inject_globals():
         from datetime import datetime
 
-        return {"current_year": datetime.now().year}
+        from .models import CELL_CAPACITY
+
+        return {"current_year": datetime.now().year, "CELL_CAPACITY": CELL_CAPACITY}
 
     return app

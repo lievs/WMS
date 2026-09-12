@@ -16,16 +16,52 @@
     <form method="post" action="{{ url_for('movement.complete', doc_id=doc.id) }}" class="d-inline">
       <button type="submit" class="btn btn-success">✅ Завершить перемещение</button>
     </form>
-    {% if current_user.is_admin %}
+    {% elif not doc.received_at %}
+    <form method="post" action="{{ url_for('movement.receive', doc_id=doc.id) }}" class="d-inline">
+      <button type="submit" class="btn btn-warning" title="До этой кнопки товар считается «в пути» и не засчитывается в план отгрузок">📥 Принято на складе</button>
+    </form>
+    <a class="btn btn-outline-warning" href="{{ url_for('movement.receive_with_discrepancy', doc_id=doc.id) }}"
+       title="Если на месте приняли не столько, сколько отправили — недостача или излишек">⚠️ Принято с расхождением</a>
+    {% else %}
+    <span class="badge bg-success">Принято на складе {{ (doc.received_at|msk).strftime('%d.%m.%Y %H:%M') }}</span>
+    {% if doc.discrepancies %}<span class="badge bg-warning text-dark">С расхождением</span>{% endif %}
+    {% endif %}
+    {% if doc.status == 'draft' and current_user.is_admin %}
     <form method="post" action="{{ url_for('movement.delete_document', doc_id=doc.id) }}" class="d-inline" onsubmit="return confirm('Удалить список перемещения {{ doc.number }} целиком? Действие необратимо.');">
       <button type="submit" class="btn btn-outline-danger">🗑 Удалить документ</button>
     </form>
     {% endif %}
-    {% endif %}
   </div>
 </div>
 
-{% if doc.status == 'draft' %}
+{% set can_edit = doc.status == 'draft' or current_user.is_admin %}
+{% if doc.status != 'draft' and current_user.is_admin %}
+<div class="alert alert-warning">
+  ⚠ Документ уже завершен. Как администратор вы можете добавлять/убирать короба и менять ячейку назначения —
+  изменения сразу же применяются к реальному расположению короба (и к выполнению плана отгрузок, если перемещение уже принято на складе).
+</div>
+{% endif %}
+
+{% if doc.discrepancies %}
+<div class="card p-3 mb-4 border-warning">
+  <h5>⚠️ Расхождения при приемке</h5>
+  <table class="table table-sm mb-0">
+    <thead><tr><th>Товар</th><th>Отправлено</th><th>Принято</th><th>Расхождение</th></tr></thead>
+    <tbody>
+    {% for d in doc.discrepancies %}
+      <tr>
+        <td>{{ d.nomenclature.name }} <span class="text-muted">({{ d.nomenclature.sku }})</span></td>
+        <td>{{ d.expected_qty | round(3) }}</td>
+        <td>{{ d.received_qty | round(3) }}</td>
+        <td class="{{ 'text-danger' if d.diff() < 0 else 'text-success' }}">{{ '%+g' % d.diff() }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if can_edit %}
 <div class="card p-3 mb-4">
   <h5>Сканировать короб</h5>
   <p class="text-muted small mb-2">Короб должен быть на складе «{{ doc.from_warehouse.name }}» — весь товар внутри него поедет вместе с ним на склад «{{ doc.to_warehouse.name }}».</p>
@@ -48,7 +84,7 @@
         <th>Короб</th>
         <th>Товары</th>
         <th>Откуда</th>
-        {% if doc.status == 'draft' %}<th>Ячейка на складе назначения</th><th></th>{% else %}<th>Ячейка назначения</th>{% endif %}
+        {% if can_edit %}<th>Ячейка на складе назначения</th><th></th>{% else %}<th>Ячейка назначения</th>{% endif %}
       </tr>
     </thead>
     <tbody>
@@ -66,7 +102,7 @@
           {% endfor %}
         </td>
         <td>{{ line.from_warehouse.name if line.from_warehouse else '—' }}{% if line.from_cell %} / {{ line.from_cell.code }}{% endif %}</td>
-        {% if doc.status == 'draft' %}
+        {% if can_edit %}
         <td style="min-width:260px">
           <form method="post" action="{{ url_for('movement.set_cell', doc_id=doc.id, line_id=line.id) }}" class="d-flex gap-2">
             <input type="text" id="cellCodeInput{{ line.id }}" name="cell_code" class="form-control form-control-sm"
@@ -76,7 +112,7 @@
           </form>
         </td>
         <td>
-          <form method="post" action="{{ url_for('movement.delete_line', doc_id=doc.id, line_id=line.id) }}">
+          <form method="post" action="{{ url_for('movement.delete_line', doc_id=doc.id, line_id=line.id) }}" {% if doc.status != 'draft' %}onsubmit="return confirm('Документ уже завершен — убрать короб из него и вернуть на прежнее место?');"{% endif %}>
             <button type="submit" class="btn btn-sm btn-outline-danger">✕</button>
           </form>
         </td>

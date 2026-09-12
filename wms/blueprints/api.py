@@ -8,20 +8,25 @@ bp = Blueprint("api", __name__)
 
 @bp.route("/nomenclature/search")
 def search_nomenclature():
-    """Поиск номенклатуры вручную: по вхождению строки в артикул/наименование/штрихкод."""
+    """Поиск номенклатуры вручную: по каждому слову запроса отдельно —
+    оно должно встретиться (как подстрока) в артикуле, наименовании или
+    штрихкоде, слова могут идти в любом порядке. Так "кар беж" находит
+    "Кардиган бежевый 44-45", хотя такой подстроки целиком в названии нет."""
     q = request.args.get("q", "").strip()
     if not q:
         return jsonify([])
 
-    like = f"%{q}%"
-    items = (
-        Nomenclature.query.filter(
-            db.or_(
-                Nomenclature.name.ilike(like),
-                Nomenclature.sku.ilike(like),
-                Nomenclature.barcode.ilike(like),
-            )
+    tokens = q.split()
+    conditions = [
+        db.or_(
+            Nomenclature.name.ilike(f"%{token}%"),
+            Nomenclature.sku.ilike(f"%{token}%"),
+            Nomenclature.barcode.ilike(f"%{token}%"),
         )
+        for token in tokens
+    ]
+    items = (
+        Nomenclature.query.filter(db.and_(*conditions))
         .order_by(Nomenclature.name)
         .limit(20)
         .all()
@@ -61,7 +66,7 @@ def nomenclature_by_barcode(barcode):
 
 @bp.route("/box/by-number/<box_number>")
 def box_by_number(box_number):
-    box = Box.query.filter_by(box_number=box_number.strip()).first()
+    box = Box.find_by_scanned_code(box_number)
     if not box:
         return jsonify({"found": False}), 404
     return jsonify(

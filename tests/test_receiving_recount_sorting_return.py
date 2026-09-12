@@ -1,0 +1,439 @@
+"""Приемка ИЗ НАКЛАДНОЙ (is_from_invoice_import()) идет в три этапа вместо
+одной кнопки "Завершить приемку": draft -> (Отправить на пересчет) ->
+recounting -> (Отправить на разбраковку) -> sorting -> (Завершить приемку)
+-> completed.
+
+На "Пересчете" можно поправить кол-во по строке, если оно разошлось с тем,
+что внесли при самой приемке. На "Разбраковке" по каждой строке (кроме уже
+упакованных в короб при приемке — они разбраковке не подлежат) выделяется
+кол-во брака: остальное уходит в неразмещенный остаток как обычно, а брак —
+отдельным SupplierReturn, привязанным к этой приемке (supplier_name/
+invoice_number — снимок для будущей синхронизации с 1С).
+
+Обычная приемка в короба (не из накладной) статусов не имеет вообще —
+пересчет/разбраковка ей не нужны (нечего сопоставлять с 1С), она
+завершается сразу из черновика, как и до появления этой функциональности."""
+
+from wms.extensions import db
+from wms.models import (
+    Box,
+    BoxItem,
+    Nomenclature,
+    ReceivingDocument,
+    ReceivingLine,
+    SupplierReturn,
+    UnplacedStock,
+    UnplacedStockLot,
+    User,
+    Warehouse,
+)
+
+
+def _make_warehouse(code="WH-RS"):
+    wh = Warehouse(code=code, name="Тест склад разбраковки")
+    db.session.add(wh)
+    db.session.commit()
+    return wh
+
+
+def _make_item(barcode, name="Товар разбраковки"):
+    item = Nomenclature(sku=barcode, barcode=barcode, name=name, unit="шт")
+    db.session.add(item)
+    db.session.commit()
+    return item
+
+
+def _make_doc(warehouse, supplier="ИП Тестов", from_invoice=True, number="RS-0001"):
+    doc = ReceivingDocument(
+        number=number,
+        warehouse_id=warehouse.id,
+        supplier=supplier,
+        invoice_file_name="накладная.xlsx" if from_invoice else None,
+    )
+    db.session.add(doc)
+    db.session.commit()
+    return doc
+
+
+def _make_staff_user():
+    user = User(username="staffer-rs", full_name="Складской", role="warehouse")
+    user.set_password("x")
+    db.session.add(user)
+    db.session.commit()
+    return user
+
+
+def _login_as(client, user):
+    with client.session_transaction() as sess:
+        sess["_user_id"] = str(user.id)
+        sess["_fresh"] = True
+
+
+def test_send_to_recount_and_sorting_transitions_status(db, client_logged_in):
+    wh = _make_warehouse("WH-RS-1")
+    item = _make_item("7770000101")
+    doc = _make_doc(wh, number="RS-0002")
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10))
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    assert ReceivingDocument.query.get(doc.id).status == "recounting"
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    assert ReceivingDocument.query.get(doc.id).status == "sorting"
+
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+    assert ReceivingDocument.query.get(doc.id).status == "completed"
+
+
+def test_complete_blocked_before_sorting(db, client_logged_in):
+    """Раньше "Завершить приемку" работала прямо из черновика — теперь
+    сначала нужно пройти пересчет и разбраковку."""
+    wh = _make_warehouse("WH-RS-2")
+    item = _make_item("7770000102")
+    doc = _make_doc(wh, number="RS-0003")
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=5))
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+    doc = ReceivingDocument.query.get(doc.id)
+    assert doc.status == "draft"
+    assert UnplacedStock.available(wh.id, item.id) == 0
+
+
+def test_recounting_allows_qty_correction(db, client_logged_in):
+    wh = _make_warehouse("WH-RS-3")
+    item = _make_item("7770000103")
+    doc = _make_doc(wh, number="RS-0004")
+    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10)
+    db.session.add(line)
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    client_logged_in.post(f"/receiving/{doc.id}/lines/{line.id}/update", data={"qty": "8"})
+
+    assert ReceivingLine.query.get(line.id).qty == 8
+
+
+def test_sorting_defect_creates_return_and_credits_only_good_qty(db, client_logged_in):
+    wh = _make_warehouse("WH-RS-4")
+    item = _make_item("7770000104")
+    doc = _make_doc(wh, supplier="ИП Бракоделов", from_invoice=True, number="RS-0005")
+    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10)
+    db.session.add(line)
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    client_logged_in.post(f"/receiving/{doc.id}/lines/{line.id}/update-defect", data={"defect_qty": "3"})
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+
+    assert UnplacedStock.available(wh.id, item.id) == 7
+
+    ret = SupplierReturn.query.filter_by(receiving_document_id=doc.id).first()
+    assert ret is not None
+    assert ret.qty == 3
+    assert ret.nomenclature_id == item.id
+    assert ret.supplier_name == "ИП Бракоделов"
+    assert ret.invoice_number == "RS-0005"
+
+
+def test_recount_shortage_creates_return(db, client_logged_in):
+    """Накладная заявляла 10, но на пересчете физически оказалось только 7 —
+    недостача (3) должна уйти отдельным возвратом поставщику, как и брак,
+    даже если разбраковка потом ничего не выделила."""
+    wh = _make_warehouse("WH-RS-SHORT-1")
+    item = _make_item("7770000201")
+    doc = _make_doc(wh, supplier="ИП Недопоставщиков", from_invoice=True, number="RS-SHORT-1")
+    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10, expected_qty=10)
+    db.session.add(line)
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    client_logged_in.post(f"/receiving/{doc.id}/lines/{line.id}/update", data={"qty": "7"})
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+
+    assert UnplacedStock.available(wh.id, item.id) == 7
+
+    ret = SupplierReturn.query.filter_by(receiving_document_id=doc.id).first()
+    assert ret is not None
+    assert ret.qty == 3
+    assert "Недостача" in ret.comment
+    assert ret.supplier_name == "ИП Недопоставщиков"
+    assert ret.invoice_number == "RS-SHORT-1"
+
+
+def test_recount_shortage_and_sorting_defect_both_create_separate_returns(db, client_logged_in):
+    wh = _make_warehouse("WH-RS-SHORT-2")
+    item = _make_item("7770000202")
+    doc = _make_doc(wh, number="RS-SHORT-2")
+    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10, expected_qty=10)
+    db.session.add(line)
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    client_logged_in.post(f"/receiving/{doc.id}/lines/{line.id}/update", data={"qty": "8"})
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    client_logged_in.post(f"/receiving/{doc.id}/lines/{line.id}/update-defect", data={"defect_qty": "2"})
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+
+    assert UnplacedStock.available(wh.id, item.id) == 6  # 8 - 2 брака
+
+    returns = SupplierReturn.query.filter_by(receiving_document_id=doc.id).order_by(SupplierReturn.id).all()
+    assert len(returns) == 2
+    comments = {r.comment for r in returns}
+    assert any("Недостача" in c for c in comments)
+    assert any("Брак" in c for c in comments)
+    assert sorted(r.qty for r in returns) == [2, 2]
+
+
+def test_recount_qty_increase_does_not_create_shortage_return(db, client_logged_in):
+    """Нашли БОЛЬШЕ, чем заявлено в накладной — это не недостача, возврат
+    создавать не нужно."""
+    wh = _make_warehouse("WH-RS-SHORT-3")
+    item = _make_item("7770000203")
+    doc = _make_doc(wh, number="RS-SHORT-3")
+    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10, expected_qty=10)
+    db.session.add(line)
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    client_logged_in.post(f"/receiving/{doc.id}/lines/{line.id}/update", data={"qty": "12"})
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+
+    assert UnplacedStock.available(wh.id, item.id) == 12
+    assert SupplierReturn.query.filter_by(receiving_document_id=doc.id).count() == 0
+
+
+def test_manually_added_line_without_expected_qty_has_no_shortage_return(db, client_logged_in):
+    wh = _make_warehouse("WH-RS-SHORT-4")
+    item = _make_item("7770000204")
+    doc = _make_doc(wh, number="RS-SHORT-4")
+    # Как строка, добавленная вручную ("Добавить товар") — без expected_qty,
+    # сравнивать не с чем.
+    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=5)
+    db.session.add(line)
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+
+    assert UnplacedStock.available(wh.id, item.id) == 5
+    assert SupplierReturn.query.filter_by(receiving_document_id=doc.id).count() == 0
+
+
+def test_defect_qty_cannot_exceed_line_qty(db, client_logged_in):
+    wh = _make_warehouse("WH-RS-5")
+    item = _make_item("7770000105")
+    doc = _make_doc(wh, number="RS-0006")
+    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10)
+    db.session.add(line)
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    client_logged_in.post(f"/receiving/{doc.id}/lines/{line.id}/update-defect", data={"defect_qty": "999"})
+
+    assert ReceivingLine.query.get(line.id).defect_qty == 0
+
+
+def test_boxed_line_skips_sorting_and_stays_in_box(db, client_logged_in):
+    """Товар, упакованный в короб прямо при приемке, минует и неразмещенный
+    остаток, и разбраковку — как и раньше."""
+    wh = _make_warehouse("WH-RS-6")
+    item = _make_item("7770000106")
+    doc = _make_doc(wh, number="RS-0007")
+    box = Box(box_number="BOX-RS-1", warehouse_id=wh.id, status="open")
+    db.session.add(box)
+    db.session.commit()
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=4))
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=4, box_id=box.id))
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+
+    assert UnplacedStock.available(wh.id, item.id) == 0
+    assert BoxItem.query.filter_by(box_id=box.id, nomenclature_id=item.id).first().qty == 4
+    assert SupplierReturn.query.filter_by(receiving_document_id=doc.id).count() == 0
+
+
+def test_non_admin_cannot_flag_defect_without_invoice_import(db, client):
+    wh = _make_warehouse("WH-RS-7")
+    item = _make_item("7770000107")
+    doc = _make_doc(wh, from_invoice=False, number="RS-0008")
+    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10)
+    db.session.add(line)
+    db.session.commit()
+    staff = _make_staff_user()
+    _login_as(client, staff)
+
+    client.post(f"/receiving/{doc.id}/send-to-recount")
+    client.post(f"/receiving/{doc.id}/send-to-sorting")
+    client.post(f"/receiving/{doc.id}/lines/{line.id}/update-defect", data={"defect_qty": "2"})
+
+    assert ReceivingLine.query.get(line.id).defect_qty == 0
+
+
+def test_change_warehouse_updates_document_before_completion(db, client_logged_in):
+    wh1 = _make_warehouse("WH-RS-9")
+    wh2 = _make_warehouse("WH-RS-10")
+    item = _make_item("7770000109")
+    doc = _make_doc(wh1, number="RS-0010")
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=5))
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/change-warehouse", data={"warehouse_id": wh2.id})
+
+    assert ReceivingDocument.query.get(doc.id).warehouse_id == wh2.id
+
+
+def test_change_warehouse_blocked_after_completion(db, client_logged_in):
+    wh1 = _make_warehouse("WH-RS-11")
+    wh2 = _make_warehouse("WH-RS-12")
+    item = _make_item("7770000110")
+    doc = _make_doc(wh1, number="RS-0011")
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=5))
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+
+    client_logged_in.post(f"/receiving/{doc.id}/change-warehouse", data={"warehouse_id": wh2.id})
+
+    assert ReceivingDocument.query.get(doc.id).warehouse_id == wh1.id
+
+
+def test_change_warehouse_blocked_when_boxes_packed(db, client_logged_in):
+    wh1 = _make_warehouse("WH-RS-13")
+    wh2 = _make_warehouse("WH-RS-14")
+    item = _make_item("7770000111")
+    doc = _make_doc(wh1, number="RS-0012")
+    box = Box(box_number="BOX-RS-2", warehouse_id=wh1.id, status="open")
+    db.session.add(box)
+    db.session.commit()
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=2))
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=2, box_id=box.id))
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/change-warehouse", data={"warehouse_id": wh2.id})
+
+    assert ReceivingDocument.query.get(doc.id).warehouse_id == wh1.id
+
+
+def test_non_invoice_receiving_completes_directly_from_draft(db, client_logged_in):
+    """Обычная приемка в короба (не из накладной) не проходит пересчет и
+    разбраковку — статусы нужны только для приемок по накладным (см.
+    ReceivingDocument.is_from_invoice_import). Завершается сразу из
+    черновика, весь принятый товар уходит в неразмещенный остаток без
+    разбраковки, как это было до появления пересчета/разбраковки."""
+    wh = _make_warehouse("WH-RS-8")
+    item = _make_item("7770000108")
+    doc = _make_doc(wh, from_invoice=False, number="RS-0009")
+    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10)
+    db.session.add(line)
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+
+    doc = ReceivingDocument.query.get(doc.id)
+    assert doc.status == "completed"
+    assert UnplacedStock.available(wh.id, item.id) == 10
+    assert SupplierReturn.query.filter_by(receiving_document_id=doc.id).count() == 0
+
+
+def test_non_invoice_receiving_cannot_enter_recount_sorting_flow(db, client_logged_in):
+    """send-to-recount и revert-to-sorting отказывают для приемки не из
+    накладной — статус для нее всегда остается draft/completed напрямую."""
+    wh = _make_warehouse("WH-RS-8b")
+    item = _make_item("7770000108b")
+    doc = _make_doc(wh, from_invoice=False, number="RS-0009b")
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10))
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    assert ReceivingDocument.query.get(doc.id).status == "draft"
+
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+    assert ReceivingDocument.query.get(doc.id).status == "completed"
+
+    client_logged_in.post(f"/receiving/{doc.id}/revert-to-sorting")
+    assert ReceivingDocument.query.get(doc.id).status == "completed"
+
+
+def test_revert_to_sorting_allows_redoing_defect_without_double_counting(db, client_logged_in):
+    """Приемки, завершенные еще до появления пересчета/разбраковки (или
+    просто с ошибкой в браке), админ может вернуть на разбраковку и пройти
+    ее заново — без задвоения зачисленного остатка."""
+    wh = _make_warehouse("WH-RS-15")
+    item = _make_item("7770000112")
+    doc = _make_doc(wh, number="RS-0013")
+    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10)
+    db.session.add(line)
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+    assert UnplacedStock.available(wh.id, item.id) == 10
+
+    resp = client_logged_in.post(f"/receiving/{doc.id}/revert-to-sorting")
+    doc = ReceivingDocument.query.get(doc.id)
+    assert doc.status == "sorting"
+    assert doc.completed_at is None
+    assert UnplacedStock.available(wh.id, item.id) == 0
+    assert UnplacedStockLot.query.filter_by(receiving_document_id=doc.id).count() == 0
+
+    client_logged_in.post(f"/receiving/{doc.id}/lines/{line.id}/update-defect", data={"defect_qty": "4"})
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+
+    assert UnplacedStock.available(wh.id, item.id) == 6
+    returns = SupplierReturn.query.filter_by(receiving_document_id=doc.id).all()
+    assert len(returns) == 1
+    assert returns[0].qty == 4
+
+
+def test_revert_to_sorting_blocked_once_stock_already_placed(db, client_logged_in):
+    wh = _make_warehouse("WH-RS-16")
+    item = _make_item("7770000113")
+    doc = _make_doc(wh, number="RS-0014")
+    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10)
+    db.session.add(line)
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+
+    # Часть уже разместили в короб (как это делает "Размещение").
+    UnplacedStock.consume(wh.id, item.id, 3)
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/revert-to-sorting")
+
+    doc = ReceivingDocument.query.get(doc.id)
+    assert doc.status == "completed"
+    assert UnplacedStock.available(wh.id, item.id) == 7
+
+
+def test_revert_to_sorting_requires_admin(db, client):
+    wh = _make_warehouse("WH-RS-17")
+    item = _make_item("7770000114")
+    doc = _make_doc(wh, number="RS-0015")
+    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10)
+    db.session.add(line)
+    db.session.commit()
+    staff = _make_staff_user()
+    _login_as(client, staff)
+
+    client.post(f"/receiving/{doc.id}/send-to-recount")
+    client.post(f"/receiving/{doc.id}/send-to-sorting")
+    client.post(f"/receiving/{doc.id}/complete")
+    client.post(f"/receiving/{doc.id}/revert-to-sorting")
+
+    assert ReceivingDocument.query.get(doc.id).status == "completed"
