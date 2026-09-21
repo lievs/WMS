@@ -34,6 +34,7 @@ try:
 
     datas += collect_data_files("barcode")
     datas += collect_data_files("reportlab")
+    datas += collect_data_files("googleapiclient")
 except Exception:
     pass
 

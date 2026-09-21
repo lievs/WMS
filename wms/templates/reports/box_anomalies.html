@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}Аномалии в коробах{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('reports.index') }}">&larr; Отчеты</a></p>
+<h3 class="mb-1">Аномалии в коробах</h3>
+<p class="text-muted small mb-4">
+  Сравнивает количество товара в каждом коробе с типичным (медианным)
+  количеством для той же связки "вид товара + размер" по всем цветам —
+  обычно короб одной модели того же размера набирают одинаковым
+  количеством независимо от цвета. Сильное отклонение чаще всего
+  означает ошибку при приемке: перепутан товар, лишний скан или опечатка
+  в количестве.
+</p>
+
+<div class="card p-3 mb-4">
+  <form method="get" class="row g-2 align-items-end">
+    <div class="col-md-5">
+      <label class="form-label">Склад</label>
+      <select name="warehouse_id" class="form-select">
+        <option value="">Все склады</option>
+        {% for wh in warehouses %}
+          <option value="{{ wh.id }}" {% if selected_warehouse_id == wh.id %}selected{% endif %}>{{ wh.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Порог отклонения (во сколько раз от типичного)</label>
+      <input type="number" step="0.1" min="1.1" name="threshold" class="form-control" value="{{ threshold }}">
+    </div>
+    <div class="col-md-3">
+      <button type="submit" class="btn btn-primary w-100">Показать</button>
+    </div>
+  </form>
+</div>
+
+<div class="card p-3">
+  <h5 class="mb-2">Результат: {{ rows|length }}</h5>
+  <table class="table table-sm table-mobile-compact">
+    <thead>
+      <tr>
+        <th>Короб</th>
+        <th>Склад</th>
+        <th>Товар</th>
+        <th>Размер</th>
+        <th>Кол-во в коробе</th>
+        <th>Типично для группы</th>
+        <th>Отклонение</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in rows %}
+      {% set n = row.nomenclature %}
+      <tr>
+        <td>
+          <a href="{{ url_for('movement.box_transfer', source_box_number=row.box.box_number) }}">{{ row.box.box_number }}</a>
+        </td>
+        <td>{{ row.box.warehouse.name if row.box.warehouse else '—' }}</td>
+        <td>
+          <button type="button" class="btn btn-link p-0 text-start anomaly-nomenclature-btn"
+                  data-bs-toggle="modal" data-bs-target="#anomalyBoxesModal"
+                  data-nomenclature-id="{{ n.id }}" data-nomenclature-name="{{ n.name }} ({{ n.sku }})">
+            {{ n.name }} <span class="text-muted small">({{ n.sku }})</span>
+          </button>
+        </td>
+        <td>{{ n.size }}</td>
+        <td>{{ row.qty | int if row.qty == row.qty | int else row.qty | round(3) }}</td>
+        <td>{{ row.median | int if row.median == row.median | int else row.median | round(3) }}
+          <span class="text-muted small">(по {{ row.group_size }} коробам)</span>
+        </td>
+        <td class="{{ 'text-danger fw-semibold' if row.ratio >= 1 else 'text-warning fw-semibold' }}">
+          {{ '×%.1f' | format(row.ratio) if row.ratio >= 1 else '÷%.1f' | format(1 / row.ratio) }}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="text-muted">Аномалий не найдено</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- Клик по товару в аномальной строке — все короба с этим товаром (по
+     всем складам, без учета фильтра отчета — та же выборка, из которой
+     считалась медиана), чтобы на месте свериться: реально ошибка приемки
+     или так и должно быть. Данные уже посчитаны на сервере (см.
+     boxes_by_nomenclature), модалка просто достает нужный кусок по id. -->
+<div class="modal fade" id="anomalyBoxesModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="anomalyBoxesModalTitle">Короба с товаром</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Закрыть"></button>
+      </div>
+      <div class="modal-body">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Короб</th><th>Склад</th><th>Кол-во</th></tr></thead>
+          <tbody id="anomalyBoxesModalBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="application/json" id="anomalyBoxesData">{{ boxes_by_nomenclature | tojson }}</script>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const anomalyBoxesData = JSON.parse(document.getElementById("anomalyBoxesData").textContent);
+  const anomalyBoxesModal = document.getElementById("anomalyBoxesModal");
+  anomalyBoxesModal.addEventListener("show.bs.modal", (event) => {
+    const btn = event.relatedTarget;
+    const nomenclatureId = btn.dataset.nomenclatureId;
+    const boxes = anomalyBoxesData[nomenclatureId] || [];
+    document.getElementById("anomalyBoxesModalTitle").textContent =
+      "Короба с товаром: " + btn.dataset.nomenclatureName;
+    const body = document.getElementById("anomalyBoxesModalBody");
+    body.innerHTML = "";
+    if (boxes.length === 0) {
+      body.innerHTML = '<tr><td colspan="3" class="text-muted">Короба не найдены</td></tr>';
+      return;
+    }
+    boxes.forEach((b) => {
+      const tr = document.createElement("tr");
+      const qty = Number.isInteger(b.qty) ? b.qty : Math.round(b.qty * 1000) / 1000;
+      [b.box_number, b.warehouse, qty].forEach((value) => {
+        const td = document.createElement("td");
+        td.textContent = value;
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+  });
+</script>
+{% endblock %}

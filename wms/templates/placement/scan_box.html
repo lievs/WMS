@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Сканировать короб — Размещение{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('placement.list_documents') }}">&larr; Размещение</a></p>
+<h3 class="mb-1">Сканировать короб</h3>
+<p class="text-muted small mb-4">
+  Сканируете уже упакованный короб (например, приехавший перемещением) —
+  сразу видите рекомендованную ячейку и подтверждаете, без захода в
+  документ размещения.
+</p>
+
+<div class="card p-3" style="max-width: 520px">
+  <form method="get" id="scanBoxForm" class="d-flex gap-2">
+    <input type="text" name="box_number" id="scanBoxInput" class="form-control form-control-lg"
+           placeholder="Отсканируйте или введите номер короба" value="{{ box_number }}" required autofocus>
+    <button type="button" class="btn btn-outline-primary" data-camera-scan-target="#scanBoxInput" title="Сканировать камерой">📷</button>
+    <button type="submit" class="btn btn-primary">Найти</button>
+  </form>
+
+  {% if box_number %}
+    {% if not_found %}
+      <div class="alert alert-danger mt-3 mb-0">Короб «{{ box_number }}» не найден.</div>
+    {% elif already_placed %}
+      <div class="alert alert-secondary mt-3 mb-0">
+        Короб <b>{{ box.box_number }}</b> уже расставлен в ячейке <b>{{ box.cell.code }}</b>.
+      </div>
+    {% elif empty_box %}
+      <div class="alert alert-secondary mt-3 mb-0">
+        Короб <b>{{ box.box_number }}</b> пуст — размещать пока нечего.
+      </div>
+    {% elif box %}
+      <div class="mt-3">
+        <div class="mb-2"><b>{{ box.box_number }}</b> · {{ box.warehouse.name }}</div>
+        <div class="text-muted small mb-2">
+          {% for it in box.items %}
+            {{ it.nomenclature.name }} — {{ it.qty | int if it.qty == it.qty | int else it.qty | round(3) }} {{ it.nomenclature.unit }}{% if not loop.last %}, {% endif %}
+          {% endfor %}
+        </div>
+        <form method="post" action="{{ url_for('placement.place_box_standalone', box_id=box.id) }}" class="d-flex gap-2">
+          <input type="hidden" name="next" value="{{ url_for('placement.scan_box', box_number=box.box_number) }}">
+          <input type="text" name="cell_code" class="form-control form-control-lg"
+                 value="{{ suggestion.cell.code if suggestion else '' }}" placeholder="Код ячейки" required autofocus>
+          <button type="submit" class="btn btn-success">Разместить</button>
+        </form>
+        {% if suggestion %}
+          <div class="text-muted small mt-2">Рекомендуем <b>{{ suggestion.cell.code }}</b> — {{ suggestion.reason }}</div>
+        {% endif %}
+      </div>
+    {% endif %}
+  {% endif %}
+</div>
+{% endblock %}

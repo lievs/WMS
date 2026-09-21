@@ -138,10 +138,9 @@ def test_sorting_defect_creates_return_and_credits_only_good_qty(db, client_logg
     assert ret.invoice_number == "RS-0005"
 
 
-def test_recount_shortage_creates_return(db, client_logged_in):
-    """Накладная заявляла 10, но на пересчете физически оказалось только 7 —
-    недостача (3) должна уйти отдельным возвратом поставщику, как и брак,
-    даже если разбраковка потом ничего не выделила."""
+def test_recount_shortage_uses_actual_qty_without_return(db, client_logged_in):
+    """Недостача относительно накладной не является возвратом: учитываем
+    только фактически принятые 7 единиц."""
     wh = _make_warehouse("WH-RS-SHORT-1")
     item = _make_item("7770000201")
     doc = _make_doc(wh, supplier="ИП Недопоставщиков", from_invoice=True, number="RS-SHORT-1")
@@ -156,15 +155,66 @@ def test_recount_shortage_creates_return(db, client_logged_in):
 
     assert UnplacedStock.available(wh.id, item.id) == 7
 
+    assert SupplierReturn.query.filter_by(receiving_document_id=doc.id).count() == 0
+
+
+def test_unconfirmed_invoice_line_is_not_credited_to_stock(db, client_logged_in):
+    """Не поступившая позиция из накладной сохраняет заявленное qty, но без
+    отметки приемки не должна создавать остаток после завершения."""
+    wh = _make_warehouse("WH-RS-NOT-RECEIVED")
+    item = _make_item("7770000299")
+    doc = _make_doc(wh, number="RS-NOT-RECEIVED")
+    db.session.add(
+        ReceivingLine(
+            document_id=doc.id,
+            nomenclature_id=item.id,
+            qty=10,
+            expected_qty=10,
+            confirmed=False,
+        )
+    )
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+
+    assert UnplacedStock.available(wh.id, item.id) == 0
+
+
+def test_defect_on_never_touched_line_still_credits_stock_and_return(db, client_logged_in):
+    """Баг: строка из накладной, кол-во которой совпало с заявленным (на
+    пересчете ее никто не трогал — расхождения не было, confirmed остался
+    False), затем получает брак на разбраковке. complete() пропускает
+    ЛЮБУЮ неподтвержденную строку целиком (см.
+    test_unconfirmed_invoice_line_is_not_credited_to_stock) — без этой
+    защиты выделенный брак и остаток по такой строке тихо терялись бы:
+    ни SupplierReturn, ни UnplacedStock не создавались, хотя кладовщик
+    только что явно поработал со строкой на разбраковке."""
+    wh = _make_warehouse("WH-RS-UNTOUCHED")
+    item = _make_item("7770000298")
+    doc = _make_doc(wh, supplier="ИП Нетронутый", number="RS-UNTOUCHED")
+    line = ReceivingLine(
+        document_id=doc.id, nomenclature_id=item.id, qty=10, expected_qty=10, confirmed=False
+    )
+    db.session.add(line)
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    # Строку на пересчете НЕ трогаем — кол-во и так совпадает с накладной.
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    client_logged_in.post(f"/receiving/{doc.id}/lines/{line.id}/update-defect", data={"defect_qty": "4"})
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+
+    assert UnplacedStock.available(wh.id, item.id) == 6  # 10 - 4 брака
+
     ret = SupplierReturn.query.filter_by(receiving_document_id=doc.id).first()
     assert ret is not None
-    assert ret.qty == 3
-    assert "Недостача" in ret.comment
-    assert ret.supplier_name == "ИП Недопоставщиков"
-    assert ret.invoice_number == "RS-SHORT-1"
+    assert ret.qty == 4
+    assert ret.supplier_name == "ИП Нетронутый"
 
 
-def test_recount_shortage_and_sorting_defect_both_create_separate_returns(db, client_logged_in):
+def test_only_sorting_defect_creates_return(db, client_logged_in):
     wh = _make_warehouse("WH-RS-SHORT-2")
     item = _make_item("7770000202")
     doc = _make_doc(wh, number="RS-SHORT-2")
@@ -181,11 +231,9 @@ def test_recount_shortage_and_sorting_defect_both_create_separate_returns(db, cl
     assert UnplacedStock.available(wh.id, item.id) == 6  # 8 - 2 брака
 
     returns = SupplierReturn.query.filter_by(receiving_document_id=doc.id).order_by(SupplierReturn.id).all()
-    assert len(returns) == 2
-    comments = {r.comment for r in returns}
-    assert any("Недостача" in c for c in comments)
-    assert any("Брак" in c for c in comments)
-    assert sorted(r.qty for r in returns) == [2, 2]
+    assert len(returns) == 1
+    assert "Брак" in returns[0].comment
+    assert returns[0].qty == 2
 
 
 def test_recount_qty_increase_does_not_create_shortage_return(db, client_logged_in):
@@ -429,6 +477,8 @@ def test_revert_to_sorting_requires_admin(db, client):
     db.session.add(line)
     db.session.commit()
     staff = _make_staff_user()
+    doc.created_by_id = staff.id
+    db.session.commit()
     _login_as(client, staff)
 
     client.post(f"/receiving/{doc.id}/send-to-recount")

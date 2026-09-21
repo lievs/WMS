@@ -1,9 +1,9 @@
 import os
 import secrets
 
-from flask import Flask, flash, redirect, request, url_for
-from flask_login import current_user
-from sqlalchemy import event, inspect, text
+from flask import Flask, flash, redirect, request, session, url_for
+from flask_login import current_user, logout_user
+from sqlalchemy import event, inspect, select, text
 from sqlalchemy.engine import Engine
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -97,6 +97,48 @@ def _ensure_columns():
                             )
                         )
                     print("[schema] users.nomenclature_edit_allowed заполнен для уже существующих пользователей")
+                if table.name == "users" and column.name == "warehouse_mapping_allowed":
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE users SET warehouse_mapping_allowed = 0 "
+                                "WHERE warehouse_mapping_allowed IS NULL"
+                            )
+                        )
+                    print("[schema] users.warehouse_mapping_allowed заполнен для уже существующих пользователей")
+                if table.name == "users" and column.name == "session_version":
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE users SET session_version = 0 "
+                                "WHERE session_version IS NULL"
+                            )
+                        )
+                    print("[schema] users.session_version заполнен для уже существующих пользователей")
+                if table.name == "users" and column.name == "invoice_receiving_view_allowed":
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE users SET invoice_receiving_view_allowed = 0 "
+                                "WHERE invoice_receiving_view_allowed IS NULL"
+                            )
+                        )
+                    print(
+                        "[schema] users.invoice_receiving_view_allowed заполнен "
+                        "для уже существующих пользователей"
+                    )
+                if table.name == "users" and column.name == "movement_view_allowed":
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE users SET movement_view_allowed = 0 "
+                                "WHERE movement_view_allowed IS NULL"
+                            )
+                        )
+                    print(
+                        "[schema] users.movement_view_allowed заполнен "
+                        "для уже существующих пользователей"
+                    )
             except Exception as exc:  # noqa: BLE001
                 print(f"[schema] Не удалось добавить {table.name}.{column.name}: {exc}")
 
@@ -129,6 +171,21 @@ def _ensure_indexes():
                     )
             except Exception as exc:  # noqa: BLE001
                 print(f"[schema] Не удалось создать индекс {index_name}: {exc}")
+
+    # Идемпотентность добавления товара требует именно уникальности токена,
+    # в том числе на базах, где колонка появилась через ALTER TABLE.
+    if inspector.has_table("receiving_lines"):
+        try:
+            with db.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS "
+                        '"uq_receiving_lines_request_token" '
+                        'ON "receiving_lines" ("request_token")'
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[schema] Не удалось создать индекс токенов приемки: {exc}")
 
 
 def _register_sqlite_tuning():
@@ -234,6 +291,7 @@ def create_app(config_class=Config):
     from .blueprints.shipment_plan import bp as shipment_plan_bp
     from .blueprints.integration_1c import bp as integration_1c_bp
     from .blueprints.onboarding import bp as onboarding_bp
+    from .blueprints.marketplace_export import bp as marketplace_export_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(main_bp)
@@ -251,6 +309,7 @@ def create_app(config_class=Config):
     app.register_blueprint(shipment_plan_bp, url_prefix="/shipment-plan")
     app.register_blueprint(integration_1c_bp, url_prefix="/integrations/1c")
     app.register_blueprint(onboarding_bp, url_prefix="/onboarding")
+    app.register_blueprint(marketplace_export_bp, url_prefix="/marketplace-export")
 
     with app.app_context():
         from . import models  # noqa: F401
@@ -271,13 +330,37 @@ def create_app(config_class=Config):
     @app.before_request
     def require_login():
         from .blueprints.integration_1c import API_1C_PUBLIC_ENDPOINTS
+        from .blueprints.shipment_plan import GOOGLE_SHEETS_PUBLIC_ENDPOINTS
+        from .models import User
 
         if request.endpoint is None:
             return None
+        if current_user.is_authenticated:
+            cookie_version = session.get("session_version")
+            # Читаем скалярным запросом прямо из БД, а не из уже загруженного
+            # объекта current_user: так отзыв сессий сразу виден и при
+            # нескольких процессах приложения.
+            current_version = (
+                db.session.execute(
+                    select(User.session_version).where(User.id == current_user.id)
+                ).scalar_one()
+                or 0
+            )
+            # Тесты старых маршрутов подставляют _user_id напрямую, без
+            # настоящего login_user. В рабочем приложении отсутствие версии
+            # означает старую/недействительную cookie и требует нового входа.
+            if cookie_version is None and app.testing:
+                session["session_version"] = current_version
+            elif cookie_version != current_version:
+                logout_user()
+                session.pop("session_version", None)
+                flash("Сессия завершена администратором. Войдите снова.", "warning")
+                return redirect(url_for("auth.login"))
         if (
             request.endpoint == "static"
             or request.endpoint.startswith("auth.")
             or request.endpoint in API_1C_PUBLIC_ENDPOINTS
+            or request.endpoint in GOOGLE_SHEETS_PUBLIC_ENDPOINTS
         ):
             return None
         if not current_user.is_authenticated:

@@ -2,13 +2,24 @@
 {% block title %}Номенклатура{% endblock %}
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
-  <h3 class="mb-0">Номенклатура</h3>
+  <div class="d-flex align-items-center gap-2 flex-wrap">
+    <h3 class="mb-0">Номенклатура</h3>
+    <a class="btn btn-sm btn-outline-primary" href="{{ url_for('nomenclature.locate') }}">📍 Где товар</a>
+  </div>
   <div class="d-none d-md-flex gap-2">
     {% if current_user.can_edit_nomenclature() %}
     <a class="btn btn-outline-secondary" href="{{ url_for('nomenclature.download_template') }}">📄 Скачать шаблон</a>
     <a class="btn btn-outline-secondary" href="{{ url_for('nomenclature.import_nomenclature') }}">📥 Импорт из Excel</a>
     {% endif %}
-    <a class="btn btn-outline-secondary" href="{{ url_for('nomenclature.export_all') }}">📤 Экспорт в Excel</a>
+    <form method="get" action="{{ url_for('nomenclature.export_all') }}" class="d-flex gap-1">
+      <select name="warehouse_id" class="form-select form-select-sm" title="Остаток по складу">
+        <option value="">Остаток: все склады</option>
+        {% for wh in stock_warehouses %}
+        <option value="{{ wh.id }}">Остаток: {{ wh.name }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-outline-secondary">📤 Экспорт в Excel</button>
+    </form>
     {% if current_user.is_admin %}
     <form method="post" action="{{ url_for('nomenclature.clear_nomenclature') }}" class="d-inline" onsubmit="return confirm('Удалить всю номенклатуру, у которой нет остатков и документов? Товары, уже использованные в реальных данных, не тронет. Действие необратимо.');">
       <button type="submit" class="btn btn-outline-danger">🗑 Очистить номенклатуру</button>
@@ -69,7 +80,9 @@
             <th>Штрихкод</th><th>Наименование</th><th>Размер</th>
             <th>Артикул</th>
             <th>Ед.</th>
-            <th>Вид</th><th>Норма, мин</th><th></th>
+            <th>Вид</th>
+            {% for wh in stock_warehouses %}<th>{{ wh.name }}</th>{% endfor %}
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -109,32 +122,23 @@
                 </select>
               </form>
             </td>
-            <td style="min-width:190px">
-              <form method="post" action="{{ url_for('nomenclature.update_norm', item_id=item.id) }}" class="d-flex gap-1 align-items-center">
-                <input type="hidden" name="q" value="{{ q }}">
-                <input type="number" step="0.1" min="0" name="norm_minutes" value="{{ item.norm_minutes if item.norm_minutes is not none else '' }}" class="form-control form-control-sm" style="width:80px" placeholder="{{ item.category.norm_minutes if item.category and item.category.norm_minutes is not none else '' }}">
-                <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>
-                {% if item.norm_minutes is none and item.category and item.category.norm_minutes is not none %}
-                <span class="text-muted small">(по виду: {{ item.category.norm_minutes }})</span>
-                {% endif %}
-              </form>
-            </td>
             {% else %}
             <td>{{ item.category.name if item.category else '—' }}</td>
-            <td>{{ item.norm_minutes if item.norm_minutes is not none else (item.category.norm_minutes if item.category and item.category.norm_minutes is not none else '—') }}</td>
             {% endif %}
+            {% for wh in stock_warehouses %}
+            <td><a href="{{ url_for('nomenclature.locate', barcode=item.barcode) }}">{{ '%g' % stock_by_item_warehouse.get((item.id, wh.id), 0) }} {{ item.unit }}</a></td>
+            {% endfor %}
             <td><a target="_blank" href="{{ url_for('labels.item_label', item_id=item.id) }}">🖨 Этикетка</a></td>
           </tr>
         {% else %}
-          <tr><td colspan="8" class="text-muted">Ничего не найдено</td></tr>
+          <tr><td colspan="{{ 7 + stock_warehouses|length }}" class="text-muted">Ничего не найдено</td></tr>
         {% endfor %}
         </tbody>
       </table>
 
       <!-- Мобильный вид: каждая позиция карточкой (не таблицей) — иначе
-           два инлайн-редактора (вид/норма) не помещаются на узком экране
-           даже при переносе текста, поле "Вид" в таблице требует
-           фиксированной ширины. -->
+           инлайн-редакторы не помещаются на узком экране даже при переносе
+           текста, поле "Вид" в таблице требует фиксированной ширины. -->
       <div class="list-group d-md-none">
         {% for item in items %}
           <div class="list-group-item py-2 px-2">
@@ -175,18 +179,15 @@
                   {% endfor %}
                 </select>
               </form>
-              <form method="post" action="{{ url_for('nomenclature.update_norm', item_id=item.id) }}" class="d-flex gap-1 align-items-center flex-shrink-0">
-                <input type="hidden" name="q" value="{{ q }}">
-                <input type="number" step="0.1" min="0" name="norm_minutes" value="{{ item.norm_minutes if item.norm_minutes is not none else '' }}" class="form-control form-control-sm" style="width:60px" placeholder="{{ item.category.norm_minutes if item.category and item.category.norm_minutes is not none else '' }}">
-                <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>
-              </form>
             </div>
             {% else %}
-            <div class="small text-muted mt-1">
-              Вид: {{ item.category.name if item.category else '—' }} ·
-              Норма: {{ item.norm_minutes if item.norm_minutes is not none else (item.category.norm_minutes if item.category and item.category.norm_minutes is not none else '—') }}
-            </div>
+            <div class="small text-muted mt-1">Вид: {{ item.category.name if item.category else '—' }}</div>
             {% endif %}
+            <div class="small mt-1">
+              {% for wh in stock_warehouses %}
+              {{ wh.name }}: <a href="{{ url_for('nomenclature.locate', barcode=item.barcode) }}">{{ '%g' % stock_by_item_warehouse.get((item.id, wh.id), 0) }} {{ item.unit }}</a>{% if not loop.last %} · {% endif %}
+              {% endfor %}
+            </div>
           </div>
         {% else %}
           <div class="list-group-item text-muted">Ничего не найдено</div>

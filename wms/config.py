@@ -42,3 +42,17 @@ class Config:
     # чтобы Flask знал, что запрос пришел по HTTPS. Включается на сервере
     # через WMS_BEHIND_PROXY=1.
     BEHIND_PROXY = _env_bool("WMS_BEHIND_PROXY")
+
+    # Прямой обмен планом отгрузок с Google Таблицей. JSON-ключ всегда
+    # хранится вне репозитория; для desktop-сборки его удобно положить в
+    # instance/google-service-account.json рядом с постоянной базой.
+    GOOGLE_SHEETS_SPREADSHEET_ID = os.environ.get(
+        "WMS_GOOGLE_SHEETS_ID", "1o_hA_CRNIGy4dLq36rpru65gGE_ZmfFI35aqQFHaISI"
+    )
+    GOOGLE_SERVICE_ACCOUNT_FILE = os.environ.get(
+        "WMS_GOOGLE_CREDENTIALS_FILE",
+        os.path.join(INSTANCE_DIR, "google-service-account.json"),
+    )
+    # Постоянный публичный адрес нужен сценарию Google Таблицы: на него
+    # отправляется запрос только после нажатия пользователем кнопки.
+    WMS_PUBLIC_URL = os.environ.get("WMS_PUBLIC_URL", "https://wms.wmsmeviar.ru").rstrip("/")

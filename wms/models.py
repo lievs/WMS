@@ -105,6 +105,27 @@ class User(UserMixin, db.Model):
     # (см. _ensure_columns: у уже существующих пользователей после
     # миграции тоже принудительно выставляется True, а не NULL).
     nomenclature_edit_allowed = db.Column(db.Boolean, nullable=False, default=True)
+    # Отдельное право на редактирование соответствия складов WMS складам
+    # 1С. Сама страница складов доступна по allowed_sections, а эта галочка
+    # разрешает только чувствительную интеграционную настройку.
+    warehouse_mapping_allowed = db.Column(db.Boolean, nullable=False, default=False)
+    # Право видеть все приемки, созданные из накладных. Используется для
+    # приемщиков и заведующих складом; ручные приемки других сотрудников
+    # этот флаг не открывает.
+    invoice_receiving_view_allowed = db.Column(db.Boolean, nullable=False, default=False)
+    # Право просматривать перемещения всех сотрудников. Изменение чужих
+    # документов этим правом не разрешается.
+    movement_view_allowed = db.Column(db.Boolean, nullable=False, default=False)
+    # Право завершать чужие перемещения и отмечать "Принято на складе" (см.
+    # movement.complete/receive) — в отличие от movement_view_allowed (только
+    # просмотр), это право позволяет менять документ. Дает и просмотр тоже
+    # (см. movement._can_view_movement_document) — без него не добраться до
+    # кнопок на детальной странице.
+    movement_complete_allowed = db.Column(db.Boolean, nullable=False, default=False)
+    # Версия входа используется для принудительного завершения сессий.
+    # Она записывается в cookie при авторизации; увеличение значения делает
+    # все ранее выданные cookie пользователя недействительными.
+    session_version = db.Column(db.Integer, nullable=False, default=0)
 
     def is_production_only(self):
         return self.role == "production" and not self.is_admin
@@ -122,6 +143,18 @@ class User(UserMixin, db.Model):
         # (ALTER TABLE ADD COLUMN не проставляет DEFAULT задним числом),
         # трактуем это как "не запрещено", а не как "запрещено".
         return self.is_admin or self.nomenclature_edit_allowed is not False
+
+    def can_manage_warehouse_mapping(self):
+        return self.is_admin or self.warehouse_mapping_allowed is True
+
+    def can_view_invoice_receivings(self):
+        return self.is_admin or self.invoice_receiving_view_allowed is True
+
+    def can_view_movements(self):
+        return self.is_admin or self.movement_view_allowed is True
+
+    def can_complete_movements(self):
+        return self.is_admin or self.movement_complete_allowed is True
 
     def has_section_access(self, section):
         """Раздел не из SECTIONS (например, служебные api/boxes/labels) не
@@ -163,9 +196,9 @@ class Warehouse(db.Model):
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     # Заполнено только для складов-городов, созданных автоматически при
     # загрузке плана отгрузок (см. ShipmentPlan) — "ozon"/"wb". У обычных
-    # физических складов оба поля пустые. marketplace_city хранит исходное
-    # название города из файла плана, чтобы при повторной загрузке находить
-    # тот же склад, а не плодить дубликаты каждые 2 недели.
+    # физических складов оба поля пустые. marketplace_city хранит
+    # каноническое направление без префикса площадки; регистр, пробелы и
+    # алиасы нормализуются при импорте плана.
     marketplace = db.Column(db.String(20), nullable=True)
     marketplace_city = db.Column(db.String(100), nullable=True)
     # Свободный текст (название организации/адрес/телефон) — печатается на
@@ -190,6 +223,9 @@ class Warehouse(db.Model):
     fulfillment_1c_name = db.Column(db.String(200), nullable=True)
 
     cells = db.relationship("Cell", backref="warehouse", lazy="dynamic")
+
+    def marketplace_label(self):
+        return {"ozon": "ОЗОН", "wb": "ВБ"}.get(self.marketplace, "")
 
     def __repr__(self):
         return f"<Warehouse {self.code}>"
@@ -557,8 +593,14 @@ class ReceivingDocument(db.Model):
     status = db.Column(db.String(20), nullable=False, default="draft")
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    # Когда документ перешел на пересчет/разбраковку — для истории статусов
+    # на странице приемки (см. receiving.send_to_recount/send_to_sorting).
+    # У приемок, завершенных до появления этих отметок, останутся пустыми.
+    recounting_started_at = db.Column(db.DateTime, nullable=True)
+    sorting_started_at = db.Column(db.DateTime, nullable=True)
     completed_at = db.Column(db.DateTime)
-    # Номер заявки поставщику — вносится вручную при загрузке накладной,
+    # Номер заказа поставщику ("№ заказа" в интерфейсе) — вносится вручную
+    # при загрузке накладной,
     # т.к. в самом файле от 1С его нет (это внутренний номер, по которому
     # заказывали товар). Вместе с supplier это то, по чему потом ищут,
     # откуда взялся неразмещенный остаток (см. UnplacedStockLot).
@@ -569,6 +611,21 @@ class ReceivingDocument(db.Model):
     # нагрузка на БД (см. обсуждение в чате при внедрении).
     invoice_file_data = db.Column(db.LargeBinary, nullable=True)
     invoice_file_name = db.Column(db.String(255), nullable=True)
+    # Заполняется, когда 1С подтвердила, что поправила количество в уже
+    # заведенной приходной накладной под фактически принятое по итогам
+    # пересчета WMS (см. integration_1c._receiving_adjustments_export и
+    # SyncWMS.bsl СкорректироватьПриемку) — чтобы при повторной синхронизации
+    # не отправлять одну и ту же корректировку снова.
+    recount_synced_to_1c_at = db.Column(db.DateTime, nullable=True)
+    # Ручное исключение корректировки из очереди выгрузки в 1С (см.
+    # MovementDocument.accounting_entered_at) — например, бухгалтер уже
+    # поправил количество в накладной сам и повторно выгружать не нужно.
+    accounting_entered_at = db.Column(db.DateTime, nullable=True)
+    # Отметка "проверено в 1С" — просто галочка для контроля бухгалтером
+    # (см. чат), никак не влияет на сам документ и не связана с выгрузкой
+    # (в отличие от accounting_entered_at выше и recount_synced_to_1c_at) —
+    # только чтобы видеть в списке приемок, что документ уже сверили с 1С.
+    checked_in_1c_at = db.Column(db.DateTime, nullable=True)
 
     warehouse = db.relationship("Warehouse")
     created_by = db.relationship("User")
@@ -619,6 +676,17 @@ class ReceivingLine(db.Model):
     # короб при приемке (box_id заполнен), разбраковка не применяется —
     # остается 0.
     defect_qty = db.Column(db.Float, nullable=False, default=0)
+    # Заполняется, когда строку завершили ПО ОТДЕЛЬНОСТИ на разбраковке (см.
+    # receiving.complete_line) — не дожидаясь, пока проверят остальные
+    # строки документа. Годное количество уже зачислено в неразмещенный
+    # остаток и/или брак уже ушел в SupplierReturn — повторно эта строка при
+    # обычном complete() не обрабатывается. NULL — строка еще не завершена
+    # по отдельности (обычный путь: завершится вместе со всем документом).
+    line_completed_at = db.Column(db.DateTime, nullable=True)
+    # Один токен соответствует одному нажатию «Добавить». Повторная
+    # отправка той же формы (двойной клик/зависший интернет) находит уже
+    # созданную строку и не проводит приемку второй раз.
+    request_token = db.Column(db.String(64), nullable=True)
 
     nomenclature = db.relationship("Nomenclature")
     box = db.relationship("Box")
@@ -683,7 +751,7 @@ class MovementDocument(db.Model):
     number = db.Column(db.String(30), unique=True, nullable=False)
     from_warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=False)
     to_warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=False, index=True)
-    status = db.Column(db.String(20), nullable=False, default="draft")  # draft | completed
+    status = db.Column(db.String(20), nullable=False, default="draft")  # draft | completed | merged
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime)
@@ -703,10 +771,43 @@ class MovementDocument(db.Model):
     # бухгалтеру не нужно было дублировать галочку руками по факту, который
     # система и так подтвердила.
     accounting_entered_at = db.Column(db.DateTime, nullable=True)
+    # Заполняется через export_confirm, когда 1С подтвердила создание
+    # документа, но часть строк не сопоставилась с номенклатурой и была
+    # пропущена (см. SyncWMS.bsl СоздатьПеремещениеТоваров — раньше одна
+    # такая строка проваливала весь документ, теперь он создается по
+    # совпавшим строкам, а несовпавшие видны здесь) — текст пришедших от
+    # 1С предупреждений, показывается значком "!" в списке перемещений.
+    # NULL — документ выгрузился полностью, без пропусков.
+    sync_warning = db.Column(db.Text, nullable=True)
+    # Заполняется, когда несколько параллельных черновиков на один и тот же
+    # маршрут (тот же склад-отправитель и склад назначения — например,
+    # несколько сотрудников собирали одно направление порознь) свели в один
+    # итоговый документ — см. movement.merge_documents. Статус такого
+    # документа становится "merged", его короба (MovementLine) переезжают
+    # в итоговый документ, здесь остается только ссылка на него для истории.
+    merged_into_id = db.Column(db.Integer, db.ForeignKey("movement_documents.id"), nullable=True)
+    # Отметка "заявка на маркетплейс создана" — ручная галочка (см.
+    # movement.toggle_marketplace_request), синего цвета в списке в отличие
+    # от зеленой "1С" — независима от нее и от самой отправки, для
+    # отдельного контроля за заявкой на приемку на стороне маркетплейса.
+    marketplace_request_created_at = db.Column(db.DateTime, nullable=True)
+    # Номер самой заявки на приемку у маркетплейса — вносится вручную,
+    # когда становится известен (галочка выше могла быть отмечена раньше,
+    # до того как номер стал известен). См. movement.update_marketplace_request_number.
+    marketplace_request_number = db.Column(db.String(50), nullable=True)
+    # Заполняется, когда состав уже выгруженного в 1С документа меняют
+    # (добавили/удалили короб — movement.add_box/delete_line, или поправили
+    # количество в коробе, уже уехавшем этим перемещением — boxes.add_item/
+    # update_item/move_item/delete_item) — см. integration_1c.
+    # _movement_corrections_export. NULL — 1С видит актуальный состав, менять
+    # ничего не нужно. Сбрасывается обратно в NULL, когда 1С подтверждает,
+    # что скорректировала документ у себя (см. export_confirm).
+    composition_changed_at = db.Column(db.DateTime, nullable=True)
 
     from_warehouse = db.relationship("Warehouse", foreign_keys=[from_warehouse_id])
     to_warehouse = db.relationship("Warehouse", foreign_keys=[to_warehouse_id])
     created_by = db.relationship("User")
+    merged_into = db.relationship("MovementDocument", remote_side=[id], backref="merged_from")
     lines = db.relationship(
         "MovementLine", backref="document", lazy="dynamic", cascade="all, delete-orphan"
     )
@@ -723,14 +824,44 @@ class MovementDocument(db.Model):
             .scalar()
         ) or 0
 
+    def total_received_qty(self):
+        """Фактически принято на складе назначения с учетом расхождений."""
+        if self.received_at is None:
+            return None
+        return self.total_item_qty() + sum(
+            discrepancy.received_qty - discrepancy.expected_qty
+            for discrepancy in self.discrepancies
+        )
+
+    def total_shortage_qty(self):
+        """Сколько товара не принято на складе назначения и нужно найти."""
+        return sum(discrepancy.shortage_qty() for discrepancy in self.discrepancies)
+
+    def total_plan_fact_qty(self):
+        """Количество документа, которое может входить в факт плана.
+
+        До создания заявки завершенный документ не считается отгрузкой.
+        В пути учитываем состав коробов, после приемки — фактически принятое.
+        """
+        if self.status != "completed":
+            return 0
+        if self.received_at is not None:
+            return self.total_received_qty()
+        if self.marketplace_request_created_at is not None or (
+            self.marketplace_request_number or ""
+        ).strip():
+            return self.total_item_qty()
+        return 0
+
 
 class MovementReceiptDiscrepancy(db.Model):
     """Расхождение между тем, что отправлено (по коробам документа), и тем,
     что реально приняли на складе назначения — по одной строке на товар.
-    Заполняется через "Принято с расхождением" (см. movement.receive_with_discrepancy)
-    вместо обычной кнопки "Принято на складе", когда факт не совпадает —
-    недостача или излишек. Обычная приемка без расхождений таких строк не
-    создает вообще."""
+    Заполняется кнопкой "Принято на складе" (см. movement.receive), когда
+    фактически введенное количество не совпадает с тем, что было упаковано
+    в коробах — недостача или излишек. Обычная приемка без расхождений
+    (введенное количество совпало с ожидаемым) таких строк не создает
+    вообще."""
 
     __tablename__ = "movement_receipt_discrepancies"
 
@@ -749,6 +880,12 @@ class MovementReceiptDiscrepancy(db.Model):
 
     def diff(self):
         return self.received_qty - self.expected_qty
+
+    def shortage_qty(self):
+        return max(self.expected_qty - self.received_qty, 0)
+
+    def excess_qty(self):
+        return max(self.received_qty - self.expected_qty, 0)
 
 
 class MovementLine(db.Model):
@@ -821,13 +958,26 @@ class InventoryDocument(db.Model):
     completed_at = db.Column(db.DateTime)
     # См. MovementDocument.synced_to_1c_at.
     synced_to_1c_at = db.Column(db.DateTime, nullable=True)
+    # См. MovementDocument.accounting_entered_at — ручное исключение из
+    # очереди выгрузки в 1С.
+    accounting_entered_at = db.Column(db.DateTime, nullable=True)
     # Заполняется, когда несколько параллельных листов (по разным
     # людям/участкам склада) свели в один итоговый документ — см.
     # inventory.merge_documents. Статус такого листа становится "merged",
     # его короба и позиции остаются на месте как история подсчета.
     merged_into_id = db.Column(db.Integer, db.ForeignKey("inventory_documents.id"), nullable=True)
+    # NULL — обычная (общая) инвентаризация по складу целиком, как раньше.
+    # Заполнено — выборочная инвентаризация ОДНОЙ ячейки (см. чат): для
+    # сравнения берется не весь учётный остаток склада, а только то, что
+    # по системе сейчас физически стоит в этой ячейке (см.
+    # inventory._cell_stock_by_nomenclature). Сканирование короба в таком
+    # листе не только учитывает его в подсчете, но и сразу переставляет в
+    # эту ячейку (см. inventory.add_box) — по сути инвентаризация ячейки
+    # одновременно и есть ее фактическое размещение.
+    cell_id = db.Column(db.Integer, db.ForeignKey("cells.id"), nullable=True)
 
     warehouse = db.relationship("Warehouse")
+    cell = db.relationship("Cell")
     created_by = db.relationship("User")
     merged_into = db.relationship("InventoryDocument", remote_side=[id], backref="merged_from")
     lines = db.relationship(
@@ -893,7 +1043,6 @@ class ShipmentPlan(db.Model):
     # см. utils.shipment_plan_import.extract_period_start. Пусто, если в
     # названии листа не нашлось даты. Период считается равным 14 дням.
     period_start = db.Column(db.Date, nullable=True)
-
     uploaded_by = db.relationship("User")
     lines = db.relationship(
         "ShipmentPlanLine", backref="plan", lazy="dynamic", cascade="all, delete-orphan"
@@ -918,6 +1067,10 @@ class ShipmentPlanLine(db.Model):
     size = db.Column(db.String(50))
     planned_qty = db.Column(db.Float, nullable=False, default=0)
     fulfilled_qty = db.Column(db.Float, nullable=False, default=0)
+    # Дата берется из названия конкретного листа «Распределение». Поэтому
+    # строки одного объединенного плана могут начинаться в разные даты.
+    # Только перемещения с этой даты закрывают потребность строки.
+    period_start = db.Column(db.Date, nullable=True)
 
     warehouse = db.relationship("Warehouse")
     nomenclature = db.relationship("Nomenclature")
@@ -927,17 +1080,15 @@ class ShipmentPlanLine(db.Model):
     )
 
     def remaining_qty(self):
-        return max(self.planned_qty - self.fulfilled_qty, 0)
+        fulfilled_qty = getattr(self, "current_fulfilled_qty", self.fulfilled_qty)
+        return max(self.planned_qty - fulfilled_qty, 0)
 
 
 class SupplierReturn(db.Model):
-    """Возврат поставщику — списание брака. Два источника:
-    1) ручное списание с общего неразмещенного остатка (placement.write_off_stock)
-       — receiving_document_id пуст, к конкретной накладной не привязан,
-       синхронизации с 1С не подлежит (нечем сопоставить документ поступления);
-    2) разбраковка конкретной приемки (receiving.complete, после этапов
-       "Пересчет"/"Разбраковка") — receiving_document_id заполнен, есть с
-       каким поставщиком/накладной сверяться, попадает в /api/export для 1С.
+    """Возврат поставщику — брак, выделенный только на этапе разбраковки
+    конкретной приемки. receiving_document_id связывает возврат с накладной
+    и поставщиком для последующей выгрузки в 1С. Старые записи, созданные до
+    введения этого правила, могут не иметь receiving_document_id.
     supplier_name/invoice_number — снимок на момент создания (как у
     UnplacedStockLot), чтобы отображение не менялось задним числом."""
 
@@ -961,8 +1112,30 @@ class SupplierReturn(db.Model):
     invoice_number = db.Column(db.String(30), nullable=True)
     # См. MovementDocument.synced_to_1c_at.
     synced_to_1c_at = db.Column(db.DateTime, nullable=True)
+    # См. MovementDocument.accounting_entered_at — ручное исключение из
+    # очереди выгрузки в 1С (проставляется сразу на все строки возврата по
+    # одной приемке, см. integration_1c.toggle_supplier_return).
+    accounting_entered_at = db.Column(db.DateTime, nullable=True)
 
     warehouse = db.relationship("Warehouse")
     nomenclature = db.relationship("Nomenclature")
     created_by = db.relationship("User")
     receiving_document = db.relationship("ReceivingDocument")
+
+
+class OzonArticleMapping(db.Model):
+    """Сопоставление штрихкода товара с артикулом, под которым он заведен в
+    личном кабинете Ozon — нужно для выгрузки «Состав грузовых мест» (см.
+    marketplace_export.export_ozon_package_composition): в файле для Ozon
+    колонка «ШК товара» — это наш обычный Nomenclature.barcode, а вот
+    «Артикул товара» у Ozon — отдельная строка, которая с нашим
+    Nomenclature.sku не совпадает. Загружается отдельным файлом
+    (см. marketplace_export.upload_ozon_mapping) — просто две колонки,
+    штрихкод и артикул, без заголовка."""
+
+    __tablename__ = "ozon_article_mappings"
+
+    id = db.Column(db.Integer, primary_key=True)
+    barcode = db.Column(db.String(50), unique=True, nullable=False, index=True)
+    article = db.Column(db.String(200), nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)

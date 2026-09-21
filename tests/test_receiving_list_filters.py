@@ -57,3 +57,30 @@ def test_invoice_only_filter_keeps_documents_with_supplier_id(db, client_logged_
 
     assert "RL-5" not in html
     assert "RL-6" in html
+
+
+def test_supplier_filter_matches_by_substring(db, client_logged_in):
+    wh = _make_warehouse("WH-RL-SUP")
+    matching = ReceivingDocument(number="RL-7", warehouse_id=wh.id, supplier="ИП Иванов Иван Иванович")
+    other = ReceivingDocument(number="RL-8", warehouse_id=wh.id, supplier="ООО Ромашка")
+    db.session.add_all([matching, other])
+    db.session.commit()
+
+    html = client_logged_in.get("/receiving/?supplier=Иванов").get_data(as_text=True)
+
+    assert "RL-7" in html
+    assert "RL-8" not in html
+
+
+def test_warehouse_filter_keeps_only_matching_warehouse(db, client_logged_in):
+    wh1 = _make_warehouse("WH-RL-A")
+    wh2 = _make_warehouse("WH-RL-B")
+    doc1 = ReceivingDocument(number="RL-9", warehouse_id=wh1.id)
+    doc2 = ReceivingDocument(number="RL-10", warehouse_id=wh2.id)
+    db.session.add_all([doc1, doc2])
+    db.session.commit()
+
+    html = client_logged_in.get(f"/receiving/?warehouse_id={wh1.id}").get_data(as_text=True)
+
+    assert "RL-9" in html
+    assert "RL-10" not in html

@@ -16,6 +16,7 @@ from wms.models import (
     MovementLine,
     Nomenclature,
     ReceivingDocument,
+    ReceivingLine,
     SupplierReturn,
     Warehouse,
 )
@@ -35,7 +36,9 @@ def _make_item(barcode, name="Товар для 1С"):
     return item
 
 
-def _ship_box(sender, receiver, item, qty, box_number, client, accounting_entered=False, mark_received=True):
+def _ship_box(
+    sender, receiver, item, qty, box_number, client, accounting_entered=False, mark_request_created=True
+):
     box = Box(box_number=box_number, warehouse_id=sender.id, status="open")
     db.session.add(box)
     db.session.commit()
@@ -51,8 +54,11 @@ def _ship_box(sender, receiver, item, qty, box_number, client, accounting_entere
     db.session.commit()
     client.post(f"/movement/{doc.id}/complete")
     doc = MovementDocument.query.get(doc.id)
-    if mark_received:
-        doc.received_at = doc.completed_at
+    if mark_request_created:
+        # Гейт выгрузки в 1С — "Создана заявка на МП" (marketplace_request_
+        # created_at), а не "Отгружено" (см. чат) — до приемки на складе
+        # получателя ждать не нужно.
+        doc.marketplace_request_created_at = doc.completed_at
     if accounting_entered:
         from datetime import datetime
 
@@ -115,11 +121,10 @@ def test_export_excludes_movements_marked_entered_in_1c(db, client_logged_in):
     assert all(m["number"] != "PER-BOX-1C-3" for m in data["movements"])
 
 
-def test_export_includes_movement_still_in_transit(db, client_logged_in):
-    """Перемещение выгружается в 1С сразу по завершении в WMS, не дожидаясь
-    "Принято на складе" — в 1С документ "Перемещение товаров" как раз и
-    отражает то, что товар в пути; отдельный документ по факту приемки
-    заводится в 1С вручную бухгалтерией."""
+def test_export_excludes_movement_before_marketplace_request_created(db, client_logged_in):
+    """Перемещение выгружается в 1С только когда дошло до статуса "Создана
+    заявка" (marketplace_request_created_at заполнен, см. чат) — на "Собрано"
+    выгружать еще рано, а ждать "Отгружено" (Принято на складе) не нужно."""
     _set_token()
     sender = Warehouse(code="WH-1C-9", name="Основной склад")
     city = Warehouse(code="WH-1C-10", name="ОЗОН: Уфа", marketplace="ozon", marketplace_city="Уфа")
@@ -127,12 +132,53 @@ def test_export_includes_movement_still_in_transit(db, client_logged_in):
     db.session.commit()
     item = _make_item("9990000007")
 
-    doc = _ship_box(sender, city, item, 4, "BOX-1C-4", client_logged_in, mark_received=False)
-    assert doc.received_at is None
+    doc = _ship_box(sender, city, item, 4, "BOX-1C-4", client_logged_in, mark_request_created=False)
+    assert doc.marketplace_request_created_at is None
 
     resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
     data = resp.get_json()
-    assert any(m["number"] == "PER-BOX-1C-4" for m in data["movements"])
+    assert all(m["number"] != "PER-BOX-1C-4" for m in data["movements"])
+
+
+def test_export_comment_includes_marketplace_request_number(db, client_logged_in):
+    """Номер заявки на приемку у маркетплейса (вносится вручную в списке
+    перемещений, см. movement.update_marketplace_request_number) должен
+    попадать в комментарий документа при выгрузке в 1С — рядом с номером
+    перемещения, чтобы документ можно было найти в 1С по любому из них."""
+    _set_token()
+    sender = Warehouse(code="WH-1C-11", name="Основной склад")
+    city = Warehouse(code="WH-1C-12", name="ОЗОН: Сочи", marketplace="ozon", marketplace_city="Сочи")
+    db.session.add_all([sender, city])
+    db.session.commit()
+    item = _make_item("9990000008")
+
+    doc = _ship_box(sender, city, item, 1, "BOX-1C-5", client_logged_in)
+    doc.marketplace_request_number = "REQ-778"
+    db.session.commit()
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    data = resp.get_json()
+    movement = next(m for m in data["movements"] if m["number"] == "PER-BOX-1C-5")
+    assert "(№ заявки МП: REQ-778)" in movement["comment"]
+    # Номер перемещения уже есть в начале комментария — не дублируем его
+    # еще раз в конце строки с заявкой.
+    assert "REQ-778: PER-BOX-1C-5" not in movement["comment"]
+
+
+def test_export_comment_without_marketplace_request_number_unchanged(db, client_logged_in):
+    _set_token()
+    sender = Warehouse(code="WH-1C-13", name="Основной склад")
+    city = Warehouse(code="WH-1C-14", name="ОЗОН: Тула", marketplace="ozon", marketplace_city="Тула")
+    db.session.add_all([sender, city])
+    db.session.commit()
+    item = _make_item("9990000009")
+
+    _ship_box(sender, city, item, 1, "BOX-1C-6", client_logged_in)
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    data = resp.get_json()
+    movement = next(m for m in data["movements"] if m["number"] == "PER-BOX-1C-6")
+    assert "№ заявки МП" not in movement["comment"]
 
 
 def test_export_groups_supplier_returns_by_receiving_document(db, client_logged_in):
@@ -186,6 +232,207 @@ def test_export_groups_supplier_returns_by_receiving_document(db, client_logged_
     assert ret_doc["order_number"] == "Ш-00105"
     assert ret_doc["supplier"] == "ИП Тестов"
     assert {line["qty"] for line in ret_doc["lines"]} == {3, 1}
+
+
+def test_export_supplier_return_order_number_uses_first_of_slash_separated_list(db, client_logged_in):
+    """Накладная закрывает сразу две заявки (см. чат — например
+    «ВБ-К11/ВБ-К10») — возврат привязывается к ПЕРВОЙ из них, даже если по
+    факту возвращаемая позиция относится ко второй."""
+    _set_token()
+    wh = Warehouse(code="WH-1C-20", name="Основной склад")
+    db.session.add(wh)
+    db.session.commit()
+    item = _make_item("9990000020")
+    doc = ReceivingDocument(
+        number="НАКЛ-900",
+        warehouse_id=wh.id,
+        invoice_file_name="накладная.xlsx",
+        order_number="ВБ-К11/ВБ-К10",
+    )
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add(
+        SupplierReturn(
+            warehouse_id=wh.id,
+            nomenclature_id=item.id,
+            qty=2,
+            receiving_document_id=doc.id,
+            invoice_number="НАКЛ-900",
+        )
+    )
+    db.session.commit()
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    ret_doc = resp.get_json()["supplier_returns"][0]
+    assert ret_doc["order_number"] == "ВБ-К11"
+
+
+def test_export_supplier_return_order_number_uses_first_of_comma_separated_list(db, client_logged_in):
+    _set_token()
+    wh = Warehouse(code="WH-1C-21", name="Основной склад")
+    db.session.add(wh)
+    db.session.commit()
+    item = _make_item("9990000021")
+    doc = ReceivingDocument(
+        number="НАКЛ-901",
+        warehouse_id=wh.id,
+        invoice_file_name="накладная.xlsx",
+        order_number="ВБ-К11, ВБ-К10",
+    )
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add(
+        SupplierReturn(
+            warehouse_id=wh.id,
+            nomenclature_id=item.id,
+            qty=2,
+            receiving_document_id=doc.id,
+            invoice_number="НАКЛ-901",
+        )
+    )
+    db.session.commit()
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    ret_doc = resp.get_json()["supplier_returns"][0]
+    assert ret_doc["order_number"] == "ВБ-К11"
+
+
+def test_export_supplier_return_order_number_without_separator_unchanged(db, client_logged_in):
+    _set_token()
+    wh = Warehouse(code="WH-1C-22", name="Основной склад")
+    db.session.add(wh)
+    db.session.commit()
+    item = _make_item("9990000022")
+    doc = ReceivingDocument(
+        number="НАКЛ-902",
+        warehouse_id=wh.id,
+        invoice_file_name="накладная.xlsx",
+        order_number="ШМ-005",
+    )
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add(
+        SupplierReturn(
+            warehouse_id=wh.id,
+            nomenclature_id=item.id,
+            qty=1,
+            receiving_document_id=doc.id,
+            invoice_number="НАКЛ-902",
+        )
+    )
+    db.session.commit()
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    ret_doc = resp.get_json()["supplier_returns"][0]
+    assert ret_doc["order_number"] == "ШМ-005"
+
+
+def test_export_includes_receiving_adjustment_when_recount_mismatches_invoice(db, client_logged_in):
+    """Приемка из накладной, ушедшая в разбраковку/завершение с расхождением
+    (qty != expected_qty хотя бы по одной строке) — 1С должна поправить
+    количество в уже заведенной приходной накладной (см.
+    SyncWMS.bsl СкорректироватьПриемку)."""
+    _set_token()
+    wh = Warehouse(code="WH-1C-15", name="Основной склад")
+    db.session.add(wh)
+    db.session.commit()
+    item = _make_item("9990000010")
+    doc = ReceivingDocument(
+        number="НАКЛ-888",
+        warehouse_id=wh.id,
+        invoice_file_name="накладная.xlsx",
+        status="sorting",
+    )
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=7, expected_qty=10))
+    db.session.commit()
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    data = resp.get_json()
+
+    assert len(data["receiving_adjustments"]) == 1
+    adjustment = data["receiving_adjustments"][0]
+    assert adjustment["id"] == doc.id
+    assert adjustment["invoice_number"] == "НАКЛ-888"
+    assert adjustment["lines"][0]["qty"] == 7
+
+
+def test_export_excludes_receiving_without_discrepancy(db, client_logged_in):
+    _set_token()
+    wh = Warehouse(code="WH-1C-16", name="Основной склад")
+    db.session.add(wh)
+    db.session.commit()
+    item = _make_item("9990000011")
+    doc = ReceivingDocument(
+        number="НАКЛ-889",
+        warehouse_id=wh.id,
+        invoice_file_name="накладная.xlsx",
+        status="completed",
+    )
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10, expected_qty=10))
+    db.session.commit()
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    data = resp.get_json()
+
+    assert data["receiving_adjustments"] == []
+
+
+def test_export_excludes_receiving_still_recounting(db, client_logged_in):
+    """Пока приемка в статусе draft/recounting, цифры могут еще измениться
+    (см. receiving.confirm_line) — рано отправлять корректировку в 1С."""
+    _set_token()
+    wh = Warehouse(code="WH-1C-17", name="Основной склад")
+    db.session.add(wh)
+    db.session.commit()
+    item = _make_item("9990000012")
+    doc = ReceivingDocument(
+        number="НАКЛ-890",
+        warehouse_id=wh.id,
+        invoice_file_name="накладная.xlsx",
+        status="recounting",
+    )
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=7, expected_qty=10))
+    db.session.commit()
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    data = resp.get_json()
+
+    assert data["receiving_adjustments"] == []
+
+
+def test_export_confirm_marks_receiving_adjustment_synced(db, client_logged_in):
+    _set_token()
+    wh = Warehouse(code="WH-1C-18", name="Основной склад")
+    db.session.add(wh)
+    db.session.commit()
+    item = _make_item("9990000013")
+    doc = ReceivingDocument(
+        number="НАКЛ-891",
+        warehouse_id=wh.id,
+        invoice_file_name="накладная.xlsx",
+        status="completed",
+    )
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=5, expected_qty=8))
+    db.session.commit()
+
+    resp = client_logged_in.post(
+        "/integrations/1c/api/export/confirm",
+        data=json.dumps({"receiving_adjustment_ids": [doc.id]}),
+        headers={"X-1C-Token": TOKEN, "Content-Type": "application/json"},
+    )
+    assert resp.get_json()["confirmed"]["receiving_adjustments"] == 1
+    assert ReceivingDocument.query.get(doc.id).recount_synced_to_1c_at is not None
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    assert resp.get_json()["receiving_adjustments"] == []
 
 
 def test_export_confirm_marks_everything_synced(db, client_logged_in):
@@ -247,3 +494,55 @@ def test_export_confirm_auto_ticks_accounting_checkbox_for_movements(db, client_
     doc = MovementDocument.query.get(doc.id)
     assert doc.synced_to_1c_at is not None
     assert doc.accounting_entered_at is not None
+
+
+def test_export_confirm_stores_movement_warning(db, client_logged_in):
+    """1С может подтвердить документ, но сообщить, что часть строк не
+    сопоставилась с номенклатурой и была пропущена (см. SyncWMS.bsl
+    СоздатьПеремещениеТоваров) — WMS сохраняет текст предупреждения, чтобы
+    показать "!" в списке перемещений."""
+    _set_token()
+    sender = Warehouse(code="WH-1C-11", name="Основной склад")
+    receiver = Warehouse(code="WH-1C-12", name="Склад №2 (Шоссейная 167)")
+    db.session.add_all([sender, receiver])
+    db.session.commit()
+    item = _make_item("9990000008")
+    doc = _ship_box(sender, receiver, item, 3, "BOX-1C-WARN", client_logged_in)
+
+    resp = client_logged_in.post(
+        "/integrations/1c/api/export/confirm",
+        data=json.dumps(
+            {
+                "movement_ids": [doc.id],
+                "inventory_ids": [],
+                "supplier_return_ids": [],
+                "movement_warnings": {str(doc.id): "строка 2 не сопоставлена (barcode=\"999\")"},
+            }
+        ),
+        content_type="application/json",
+        headers={"X-1C-Token": TOKEN},
+    )
+    assert resp.get_json()["confirmed"]["movements"] == 1
+
+    doc = MovementDocument.query.get(doc.id)
+    assert doc.synced_to_1c_at is not None
+    assert doc.sync_warning == 'строка 2 не сопоставлена (barcode="999")'
+
+
+def test_export_confirm_without_warnings_leaves_sync_warning_empty(db, client_logged_in):
+    _set_token()
+    sender = Warehouse(code="WH-1C-13", name="Основной склад")
+    receiver = Warehouse(code="WH-1C-14", name="Склад №2 (Шоссейная 167)")
+    db.session.add_all([sender, receiver])
+    db.session.commit()
+    item = _make_item("9990000009")
+    doc = _ship_box(sender, receiver, item, 3, "BOX-1C-NOWARN", client_logged_in)
+
+    client_logged_in.post(
+        "/integrations/1c/api/export/confirm",
+        data=json.dumps({"movement_ids": [doc.id], "inventory_ids": [], "supplier_return_ids": []}),
+        content_type="application/json",
+        headers={"X-1C-Token": TOKEN},
+    )
+
+    assert MovementDocument.query.get(doc.id).sync_warning is None

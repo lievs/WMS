@@ -15,7 +15,7 @@ from flask import Blueprint, flash, jsonify, redirect, render_template, request,
 from flask_login import current_user
 
 from ..extensions import db
-from ..models import AppSetting, InventoryDocument, MovementDocument, SupplierReturn
+from ..models import AppSetting, InventoryDocument, MovementDocument, ReceivingDocument, SupplierReturn
 
 bp = Blueprint("integration_1c", __name__)
 
@@ -71,6 +71,28 @@ def _check_token():
     return bool(expected) and token == expected
 
 
+def _pending_movements_query():
+    return MovementDocument.query.filter_by(status="completed", synced_to_1c_at=None).filter(
+        MovementDocument.marketplace_request_created_at.isnot(None),
+        MovementDocument.accounting_entered_at.is_(None),
+    )
+
+
+def _pending_inventories_query():
+    return InventoryDocument.query.filter_by(status="completed", synced_to_1c_at=None).filter(
+        InventoryDocument.accounting_entered_at.is_(None)
+    )
+
+
+def _admin_required():
+    """Общая проверка для страниц/действий очереди выгрузки — возвращает
+    редирект, если доступ запрещен, иначе None (см. вызовы ниже)."""
+    if not current_user.is_admin:
+        flash("Доступно только администратору", "danger")
+        return redirect(url_for("main.index"))
+    return None
+
+
 @bp.route("/", methods=["GET", "POST"])
 def settings():
     if not current_user.is_admin:
@@ -87,18 +109,15 @@ def settings():
         db.session.commit()
         flash("Новый токен сгенерирован — старый перестал действовать", "success")
 
-    pending_movements = (
-        MovementDocument.query.filter_by(status="completed", synced_to_1c_at=None)
-        .filter(MovementDocument.accounting_entered_at.is_(None))
-        .count()
-    )
-    pending_inventories = InventoryDocument.query.filter_by(
-        status="completed", synced_to_1c_at=None
-    ).count()
+    pending_movements = _pending_movements_query().count()
+    pending_inventories = _pending_inventories_query().count()
     pending_supplier_returns = SupplierReturn.query.filter(
         SupplierReturn.synced_to_1c_at.is_(None),
         SupplierReturn.invoice_number.isnot(None),
+        SupplierReturn.accounting_entered_at.is_(None),
     ).count()
+    pending_receiving_adjustments = len(_receiving_adjustments_export())
+    pending_movement_corrections = len(_movement_corrections_candidates())
 
     return render_template(
         "integration_1c/settings.html",
@@ -106,6 +125,8 @@ def settings():
         pending_movements=pending_movements,
         pending_inventories=pending_inventories,
         pending_supplier_returns=pending_supplier_returns,
+        pending_receiving_adjustments=pending_receiving_adjustments,
+        pending_movement_corrections=pending_movement_corrections,
     )
 
 
@@ -121,6 +142,14 @@ def _movement_payload(doc):
                 }
             )
     to_warehouse_name = doc.to_warehouse.name if doc.to_warehouse else ""
+    comment = f"WMS: {doc.number} (склад получатель: {to_warehouse_name})"
+    if doc.marketplace_request_number:
+        # Номер заявки на приемку у маркетплейса (вносится вручную в списке
+        # перемещений, см. movement.update_marketplace_request_number) —
+        # рядом с номером перемещения (уже есть в начале комментария), чтобы
+        # можно было найти документ в 1С по любому из двух номеров, без
+        # повторного дублирования номера перемещения в конце строки.
+        comment += f" (№ заявки МП: {doc.marketplace_request_number})"
     return {
         "id": doc.id,
         "number": doc.number,
@@ -131,7 +160,7 @@ def _movement_payload(doc):
         # to_warehouse выше подменен на общий "Товары в пути на
         # Фулфилмент" (см. _to_warehouse_name_for_1c), это единственное
         # место, где виден настоящий адресат перемещения.
-        "comment": f"WMS: {doc.number} (склад получатель: {to_warehouse_name})",
+        "comment": comment,
         "lines": lines,
     }
 
@@ -154,6 +183,23 @@ def _inventory_payload(doc):
     }
 
 
+def _first_order_number(order_number):
+    """Если накладная закрывает сразу несколько заявок (см. чат — например
+    «ВБ-К11/ВБ-К10» или «ВБ-К11, ВБ-К10»), в 1С возврат все равно можно
+    привязать только к ОДНОМУ «Заказу поставщику» — берем первый из
+    перечисленных, даже если конкретная возвращаемая позиция по факту
+    относится к другой заявке из этого же списка. Разбирать возврат по
+    заявкам построчно WMS сейчас не умеет — эта привязка сугубо
+    приблизительная, для реального разделения нужно заводить накладную
+    отдельными документами приемки (по одному на заявку)."""
+    if not order_number:
+        return order_number
+    for sep in ("/", ","):
+        if sep in order_number:
+            return order_number.split(sep, 1)[0].strip()
+    return order_number.strip()
+
+
 def _supplier_returns_export():
     """Возвраты поставщику из разбраковки приемок (см. receiving.complete) —
     группируем по приемке в один документ на 1С с несколькими строками
@@ -167,6 +213,7 @@ def _supplier_returns_export():
         SupplierReturn.query.filter(
             SupplierReturn.synced_to_1c_at.is_(None),
             SupplierReturn.invoice_number.isnot(None),
+            SupplierReturn.accounting_entered_at.is_(None),
         )
         .order_by(SupplierReturn.receiving_document_id, SupplierReturn.id)
         .all()
@@ -179,7 +226,9 @@ def _supplier_returns_export():
     payloads = []
     for receiving_document_id, group in groups.items():
         first = group[0]
-        order_number = first.receiving_document.order_number if first.receiving_document else None
+        order_number = _first_order_number(
+            first.receiving_document.order_number if first.receiving_document else None
+        )
         # ИНН поставщика (из справочника Supplier, заполняется при загрузке
         # накладной — см. receiving._find_or_create_supplier) — надежный
         # уникальный идентификатор для поиска контрагента в 1С, в отличие
@@ -218,32 +267,130 @@ def _supplier_returns_export():
     return payloads
 
 
-@bp.route("/api/export")
-def export():
-    """Отдает документы, готовые к переносу в 1С: перемещение — сразу как
-    завершено в WMS (кнопка "Завершить перемещение"), не дожидаясь "Принято
-    на складе" — в 1С документ "Перемещение товаров" как раз и отражает,
-    что товар в пути; отдельный документ по факту приемки на складе
-    назначения бухгалтерия заводит в 1С вручную. Инвентаризация —
-    завершенные. Уже выгруженные (synced_to_1c_at заполнен) не отдаются
-    повторно — 1С подтверждает получение через export/confirm. Перемещения,
-    которые бухгалтер уже отметил галочкой "внесено в 1С" вручную
-    (accounting_entered_at заполнен), тоже не отдаются — он ведет их отдельно
-    и повторный автоматический перенос задвоил бы документ."""
-    if not _check_token():
-        return jsonify({"ok": False, "error": "Неверный или отсутствующий токен"}), 401
-
-    movements = (
-        MovementDocument.query.filter_by(status="completed", synced_to_1c_at=None)
-        .filter(MovementDocument.accounting_entered_at.is_(None))
+def _movement_corrections_candidates():
+    """Уже выгруженные в 1С перемещения (synced_to_1c_at заполнен), состав
+    которых потом поменяли — добавили/удалили короб (movement.add_box/
+    delete_line) или поправили количество в уже уехавшем коробе (boxes.
+    add_item/update_item/move_item/delete_item), см.
+    MovementDocument.composition_changed_at. В отличие от корректировки
+    приемки, искать документ в 1С приходится не по отдельному реквизиту
+    (у перемещения такого нет), а по номеру WMS, который зашит в текст
+    "Комментарий" при создании (см. _movement_payload) — см. SyncWMS.bsl
+    НайтиПеремещениеПоНомеруWMS."""
+    return (
+        MovementDocument.query.filter(
+            MovementDocument.synced_to_1c_at.isnot(None),
+            MovementDocument.composition_changed_at.isnot(None),
+        )
         .order_by(MovementDocument.id)
         .all()
     )
-    inventories = (
-        InventoryDocument.query.filter_by(status="completed", synced_to_1c_at=None)
-        .order_by(InventoryDocument.id)
+
+
+def _movement_corrections_export():
+    """Полный актуальный состав документа (не дельта) — 1С проще целиком
+    пересобрать табличную часть под этот список (см. SyncWMS.bsl
+    СкорректироватьПеремещение), чем разбирать построчные диффы."""
+    payloads = []
+    for doc in _movement_corrections_candidates():
+        lines = []
+        for line in doc.lines:
+            for item in line.box.items:
+                lines.append(
+                    {
+                        "barcode": item.nomenclature.barcode,
+                        "name": item.nomenclature.name,
+                        "qty": item.qty,
+                    }
+                )
+        payloads.append(
+            {
+                "id": doc.id,
+                "number": doc.number,
+                "lines": lines,
+            }
+        )
+    return payloads
+
+
+def _receiving_adjustments_export():
+    """Приемки из накладной (см. is_from_invoice_import), где пересчет уже
+    завершен (пересчет меняет qty только в статусах draft/recounting — см.
+    receiving.confirm_line — значит после них цифры больше не изменятся) и
+    есть расхождение хотя бы по одной строке (qty != expected_qty) — 1С
+    должна поправить "Количество" в уже заведенной приходной накладной под
+    фактически принятое (см. SyncWMS.bsl СкорректироватьПриемку). Она НЕ
+    трогает проведение документа — если накладная уже проведена, поправить
+    количество должен бухгалтер вручную (сама 1С-обработка это пропустит и
+    напишет предупреждение в диагностику).
+
+    Еще не выгруженные — recount_synced_to_1c_at пусто; выгружаем ЦЕЛИКОМ
+    актуальные qty по всем строкам документа (не только расходящимся) —
+    проще сопоставить в 1С один раз, чем помнить, какие строки уже
+    поправлены."""
+    payloads = []
+    for doc, _diff_lines in _receiving_adjustments_candidates():
+        lines = doc.lines.all()
+        payloads.append(
+            {
+                "id": doc.id,
+                "invoice_number": doc.number,
+                "lines": [
+                    {
+                        "barcode": line.nomenclature.barcode,
+                        "name": line.nomenclature.name,
+                        "qty": line.qty,
+                    }
+                    for line in lines
+                ],
+            }
+        )
+    return payloads
+
+
+def _receiving_adjustments_candidates():
+    """(doc, diff_lines) для документов, которые реально попадут в
+    _receiving_adjustments_export — используется и там, и в списке очереди
+    выгрузки (pending()), чтобы список на экране совпадал с тем, что
+    отправится в 1С."""
+    documents = (
+        ReceivingDocument.query.filter(
+            ReceivingDocument.invoice_file_name.isnot(None),
+            ReceivingDocument.status.in_(("sorting", "completed")),
+            ReceivingDocument.recount_synced_to_1c_at.is_(None),
+            ReceivingDocument.accounting_entered_at.is_(None),
+        )
+        .order_by(ReceivingDocument.id)
         .all()
     )
+    result = []
+    for doc in documents:
+        diff_lines = [
+            line for line in doc.lines.all()
+            if line.expected_qty is not None and line.qty != line.expected_qty
+        ]
+        if diff_lines:
+            result.append((doc, diff_lines))
+    return result
+
+
+@bp.route("/api/export")
+def export():
+    """Отдает документы, готовые к переносу в 1С: перемещение — только когда
+    в WMS дошло до статуса "Создана заявка" (marketplace_request_created_at
+    заполнен) — на сборке/собрано еще рано, а ждать "Отгружено" (кнопка
+    "Принято на складе", doc.received_at) не нужно: как только заявка на
+    маркетплейс создана, документ уже достаточно определен для 1С.
+    Инвентаризация — завершенные. Уже выгруженные (synced_to_1c_at заполнен)
+    не отдаются повторно — 1С подтверждает получение через export/confirm.
+    Перемещения, которые бухгалтер уже отметил галочкой "внесено в 1С"
+    вручную (accounting_entered_at заполнен), тоже не отдаются — он ведет их
+    отдельно и повторный автоматический перенос задвоил бы документ."""
+    if not _check_token():
+        return jsonify({"ok": False, "error": "Неверный или отсутствующий токен"}), 401
+
+    movements = _pending_movements_query().order_by(MovementDocument.id).all()
+    inventories = _pending_inventories_query().order_by(InventoryDocument.id).all()
 
     return jsonify(
         {
@@ -251,6 +398,8 @@ def export():
             "movements": [_movement_payload(d) for d in movements],
             "inventories": [_inventory_payload(d) for d in inventories],
             "supplier_returns": _supplier_returns_export(),
+            "receiving_adjustments": _receiving_adjustments_export(),
+            "movement_corrections": _movement_corrections_export(),
         }
     )
 
@@ -268,6 +417,12 @@ def export_confirm():
     movement_ids = data.get("movement_ids") or []
     inventory_ids = data.get("inventory_ids") or []
     supplier_return_ids = data.get("supplier_return_ids") or []
+    receiving_adjustment_ids = data.get("receiving_adjustment_ids") or []
+    # {str(movement_id): "текст предупреждения"} — часть строк документа не
+    # сопоставилась с номенклатурой в 1С и была пропущена (см. SyncWMS.bsl
+    # СоздатьПеремещениеТоваров); документ при этом всё равно создан и
+    # подтвержден, только не полностью — показываем "!" в списке.
+    movement_warnings = data.get("movement_warnings") or {}
 
     now = datetime.utcnow()
     confirmed_movements = (
@@ -279,6 +434,7 @@ def export_confirm():
         doc.synced_to_1c_at = now
         if doc.accounting_entered_at is None:
             doc.accounting_entered_at = now
+        doc.sync_warning = movement_warnings.get(str(doc.id))
 
     confirmed_inventories = (
         InventoryDocument.query.filter(
@@ -300,6 +456,38 @@ def export_confirm():
     for ret in confirmed_returns:
         ret.synced_to_1c_at = now
 
+    # id здесь — id приемки (см. _receiving_adjustments_export), а не строк.
+    # 1С присылает сюда только те id, которые реально поправила — если
+    # накладная уже проведена (см. SyncWMS.bsl СкорректироватьПриемку),
+    # документ остается в ошибках 1С и НЕ попадает в этот список, поэтому
+    # WMS продолжит присылать его на каждой синхронизации, пока бухгалтер
+    # не поправит накладную вручную и корректировка не пройдет успешно.
+    confirmed_receiving_adjustments = (
+        ReceivingDocument.query.filter(
+            ReceivingDocument.id.in_(receiving_adjustment_ids),
+            ReceivingDocument.recount_synced_to_1c_at.is_(None),
+        ).all()
+    )
+    for doc in confirmed_receiving_adjustments:
+        doc.recount_synced_to_1c_at = now
+
+    # id здесь — id перемещения (см. _movement_corrections_export). Сбрасываем
+    # только composition_changed_at — само перемещение уже выгружено раньше
+    # (synced_to_1c_at не трогаем), просто состав в 1С теперь снова
+    # актуальный. Если 1С не смогла поправить документ (например, он уже
+    # проведен — см. SyncWMS.bsl СкорректироватьПеремещение), она не пришлет
+    # его id сюда, и WMS продолжит предлагать коррекцию на каждой
+    # синхронизации.
+    movement_correction_ids = data.get("movement_correction_ids") or []
+    confirmed_movement_corrections = (
+        MovementDocument.query.filter(
+            MovementDocument.id.in_(movement_correction_ids),
+            MovementDocument.composition_changed_at.isnot(None),
+        ).all()
+    )
+    for doc in confirmed_movement_corrections:
+        doc.composition_changed_at = None
+
     db.session.commit()
     return jsonify(
         {
@@ -308,6 +496,136 @@ def export_confirm():
                 "movements": len(confirmed_movements),
                 "inventories": len(confirmed_inventories),
                 "supplier_returns": len(confirmed_returns),
+                "receiving_adjustments": len(confirmed_receiving_adjustments),
+                "movement_corrections": len(confirmed_movement_corrections),
             },
         }
     )
+
+
+@bp.route("/pending")
+def pending():
+    """Полные списки того, что ждет выгрузки в 1С (см. настройки — там
+    только счетчики), с возможностью убрать конкретный документ из очереди
+    вручную (см. toggle_* ниже) — например, если бухгалтер уже внес его в
+    1С сам, минуя автоматическую синхронизацию."""
+    guard = _admin_required()
+    if guard:
+        return guard
+
+    movements = _pending_movements_query().order_by(MovementDocument.completed_at.desc()).all()
+    inventories = _pending_inventories_query().order_by(InventoryDocument.completed_at.desc()).all()
+    receiving_adjustments = _receiving_adjustments_candidates()
+    supplier_return_groups = _supplier_returns_export()
+    movement_corrections = _movement_corrections_candidates()
+
+    return render_template(
+        "integration_1c/pending.html",
+        movements=movements,
+        inventories=inventories,
+        receiving_adjustments=receiving_adjustments,
+        supplier_return_groups=supplier_return_groups,
+        movement_corrections=movement_corrections,
+    )
+
+
+@bp.route("/pending/movement/<int:doc_id>/toggle", methods=["POST"])
+def toggle_movement(doc_id):
+    guard = _admin_required()
+    if guard:
+        return guard
+
+    doc = MovementDocument.query.get_or_404(doc_id)
+    doc.accounting_entered_at = None if doc.accounting_entered_at else datetime.utcnow()
+    db.session.commit()
+    if doc.accounting_entered_at:
+        flash(f"Перемещение {doc.number} убрано из очереди выгрузки в 1С", "success")
+    else:
+        flash(f"Перемещение {doc.number} возвращено в очередь выгрузки", "success")
+    return redirect(url_for("integration_1c.pending"))
+
+
+@bp.route("/pending/inventory/<int:doc_id>/toggle", methods=["POST"])
+def toggle_inventory(doc_id):
+    guard = _admin_required()
+    if guard:
+        return guard
+
+    doc = InventoryDocument.query.get_or_404(doc_id)
+    doc.accounting_entered_at = None if doc.accounting_entered_at else datetime.utcnow()
+    db.session.commit()
+    if doc.accounting_entered_at:
+        flash(f"Инвентаризация {doc.number} убрана из очереди выгрузки в 1С", "success")
+    else:
+        flash(f"Инвентаризация {doc.number} возвращена в очередь выгрузки", "success")
+    return redirect(url_for("integration_1c.pending"))
+
+
+@bp.route("/pending/receiving-adjustment/<int:doc_id>/toggle", methods=["POST"])
+def toggle_receiving_adjustment(doc_id):
+    guard = _admin_required()
+    if guard:
+        return guard
+
+    doc = ReceivingDocument.query.get_or_404(doc_id)
+    doc.accounting_entered_at = None if doc.accounting_entered_at else datetime.utcnow()
+    db.session.commit()
+    if doc.accounting_entered_at:
+        flash(f"Корректировка по приемке {doc.number} убрана из очереди выгрузки в 1С", "success")
+    else:
+        flash(f"Корректировка по приемке {doc.number} возвращена в очередь выгрузки", "success")
+    return redirect(url_for("integration_1c.pending"))
+
+
+@bp.route("/pending/movement-correction/<int:doc_id>/toggle", methods=["POST"])
+def toggle_movement_correction(doc_id):
+    """Убрать перемещение из очереди коррекции — бухгалтер поправил документ
+    в 1С сам, минуя автовыгрузку. В отличие от остальных toggle_* здесь нет
+    "вернуть обратно": composition_changed_at либо уже отражает реальное
+    расхождение (и ставится заново само, стоит еще раз поменять состав —
+    см. movement.add_box/delete_line, boxes.*), либо расхождения нет вовсе."""
+    guard = _admin_required()
+    if guard:
+        return guard
+
+    doc = MovementDocument.query.get_or_404(doc_id)
+    if doc.composition_changed_at is None:
+        flash("У этого перемещения нет несинхронизированных изменений", "danger")
+        return redirect(url_for("integration_1c.pending"))
+
+    doc.composition_changed_at = None
+    db.session.commit()
+    flash(f"Перемещение {doc.number} убрано из очереди коррекции 1С", "success")
+    return redirect(url_for("integration_1c.pending"))
+
+
+@bp.route("/pending/supplier-return/<int:receiving_document_id>/toggle", methods=["POST"])
+def toggle_supplier_return(receiving_document_id):
+    """Возврат выгружается в 1С одним документом на всю приемку сразу (см.
+    _supplier_returns_export) — значит и исключать из очереди нужно все
+    строки возврата этой приемки разом, а не по одной."""
+    guard = _admin_required()
+    if guard:
+        return guard
+
+    returns = SupplierReturn.query.filter(
+        SupplierReturn.receiving_document_id == receiving_document_id,
+        SupplierReturn.invoice_number.isnot(None),
+        SupplierReturn.synced_to_1c_at.is_(None),
+    ).all()
+    if not returns:
+        flash("Возвраты по этой приемке не найдены или уже выгружены", "danger")
+        return redirect(url_for("integration_1c.pending"))
+
+    excluding = any(r.accounting_entered_at is None for r in returns)
+    now = datetime.utcnow() if excluding else None
+    for r in returns:
+        r.accounting_entered_at = now
+    db.session.commit()
+
+    invoice_number = returns[0].invoice_number
+    if excluding:
+        flash(f"Возврат по приемке {invoice_number} убран из очереди выгрузки в 1С", "success")
+    else:
+        flash(f"Возврат по приемке {invoice_number} возвращен в очередь выгрузки", "success")
+    return redirect(url_for("integration_1c.pending"))

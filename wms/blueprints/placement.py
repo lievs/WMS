@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import datetime
 
 from flask import (
@@ -23,54 +24,153 @@ from ..models import (
     Nomenclature,
     PlacementDocument,
     PlacementLine,
-    SupplierReturn,
     UnplacedStock,
     Warehouse,
 )
 from ..utils.excel_io import export_placement_to_excel, timestamp_for_filename
+from ..utils.document_access import ensure_view_document_access, owned_query
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 
 bp = Blueprint("placement", __name__)
 
 
-def suggest_cell(warehouse_id, box):
-    """Подсказка ячейки под конкретный короб: сначала ищем ячейку, где уже
-    лежит короб с тем же товаром (пусть даже вперемешку с другим — это не
-    критично), затем — просто ячейку в том же ряду, где такой товар уже
-    есть где-нибудь, и только если совсем ничего похожего нет — любую
-    ячейку с местом (предпочитая уже частично заполненные, чтобы не плодить
-    начатые ячейки по одной коробке)."""
-    nomenclature_ids = {item.nomenclature_id for item in box.items}
-    if not nomenclature_ids:
-        return None
+@bp.before_request
+def _restrict_document_access():
+    ensure_view_document_access(PlacementDocument)
 
+
+def _cell_suggestion_context(warehouse_id):
+    """Общие для всех коробов склада данные, нужные _suggest_cell_from_context
+    — вынесено отдельно, чтобы считать их ОДИН РАЗ на страницу (см.
+    suggest_cells_for_boxes), а не заново на каждый короб: список открытых
+    коробов на складе может быть большим (массовое создание коробов), и
+    пересчет этих запросов на каждый из них — основная причина, почему
+    страница размещения могла долго грузиться.
+
+    Все нижеследующие запросы фильтруют коробы с Box.cell_id.isnot(None) —
+    то есть уже РАССТАВЛЕННЫЕ короба. Короб, для которого мы подбираем
+    ячейку, сам еще не расставлен (cell_id is None у обоих вызывающих —
+    см. suggest_cell/suggest_cells_for_boxes), поэтому исключать его из
+    этих запросов явно не нужно, он и так не мог бы туда попасть. Единственное
+    исключение — счетчики по складу в целом (warehouse_nom_counts/
+    unplaced_nom_counts), которые считаются без фильтра по cell_id и потому
+    ЗАХВАТЫВАЮТ сам этот короб — их корректировка на конкретный короб
+    происходит уже в _suggest_cell_from_context, в памяти, без лишнего запроса."""
     cells = Cell.query.filter_by(warehouse_id=warehouse_id, is_active=True).all()
-    if not cells:
-        return None
 
-    matched_cell_ids = {
-        row[0]
-        for row in (
-            db.session.query(Box.cell_id)
-            .join(BoxItem, BoxItem.box_id == Box.id)
-            .filter(
-                Box.warehouse_id == warehouse_id,
-                Box.cell_id.isnot(None),
-                Box.id != box.id,
-                BoxItem.nomenclature_id.in_(nomenclature_ids),
-            )
-            .distinct()
-            .all()
-        )
-    }
-    matched_zone_ids = {c.zone_id for c in cells if c.id in matched_cell_ids and c.zone_id}
+    nom_to_cell_ids = {}
+    for nid, cell_id_val in (
+        db.session.query(BoxItem.nomenclature_id, Box.cell_id)
+        .join(Box, BoxItem.box_id == Box.id)
+        .filter(Box.warehouse_id == warehouse_id, Box.cell_id.isnot(None))
+        .distinct()
+        .all()
+    ):
+        nom_to_cell_ids.setdefault(nid, set()).add(cell_id_val)
+
     box_counts = dict(
         db.session.query(Box.cell_id, func.count(Box.id))
-        .filter(Box.warehouse_id == warehouse_id, Box.cell_id.isnot(None), Box.id != box.id)
+        .filter(Box.warehouse_id == warehouse_id, Box.cell_id.isnot(None))
         .group_by(Box.cell_id)
         .all()
     )
+
+    # Остатки по товару на складе: всего коробов (в любом статусе) и
+    # сколько из них еще не размещено — чтобы понять, "ходовой" ли товар
+    # (bulk) и не закончился ли он. Группировка по (nomenclature_id, box_id) —
+    # именно короб, а не ячейка, иначе несколько неразмещенных коробов с
+    # одним товаром (все с cell_id=None) схлопнулись бы в одну строку.
+    warehouse_nom_counts = {}
+    unplaced_nom_counts = {}
+    for nid, box_id, is_unplaced in (
+        db.session.query(BoxItem.nomenclature_id, Box.id, Box.cell_id.is_(None))
+        .join(Box, BoxItem.box_id == Box.id)
+        .filter(Box.warehouse_id == warehouse_id)
+        .distinct()
+        .all()
+    ):
+        warehouse_nom_counts[nid] = warehouse_nom_counts.get(nid, 0) + 1
+        if is_unplaced:
+            unplaced_nom_counts[nid] = unplaced_nom_counts.get(nid, 0) + 1
+
+    cell_occupant_noms = {}
+    for cell_id_val, nid in (
+        db.session.query(Box.cell_id, BoxItem.nomenclature_id)
+        .join(BoxItem, BoxItem.box_id == Box.id)
+        .filter(Box.warehouse_id == warehouse_id, Box.cell_id.isnot(None))
+        .distinct()
+        .all()
+    ):
+        cell_occupant_noms.setdefault(cell_id_val, set()).add(nid)
+
+    return {
+        "cells": cells,
+        "nom_to_cell_ids": nom_to_cell_ids,
+        "box_counts": box_counts,
+        "warehouse_nom_counts": warehouse_nom_counts,
+        "unplaced_nom_counts": unplaced_nom_counts,
+        "cell_occupant_noms": cell_occupant_noms,
+    }
+
+
+def _suggest_cell_from_context(ctx, box, box_items=None):
+    """Подсказка ячейки под конкретный короб: сначала ищем ячейку, где уже
+    лежит короб с тем же товаром (пусть даже вперемешку с другим — это не
+    критично), затем — просто ячейку в том же ряду, где такой товар уже
+    есть где-нибудь.
+
+    Дальше поведение зависит от того, "ходовой" ли это товар — коробов с
+    ним на складе больше, чем вмещает одна ячейка (см. is_bulk ниже). Для
+    такого товара выгоднее завести под него отдельную (пустую) ячейку и
+    заполнять именно ее, а не распылять его по чужим ячейкам вперемешку —
+    поэтому пустая ячейка предпочтительнее уже занятой чем-то другим. По
+    той же причине ячейку, целиком занятую под ДРУГОЙ ходовой товар, пока
+    у него еще остались неразмещенные короба, стараемся не трогать — как
+    только он закончится (неразмещенных коробов не останется), ячейка
+    перестает быть "зарезервированной" и снова участвует в общем подборе.
+    Для обычного (не ходового) товара поведение прежнее — предпочитаем уже
+    начатую ячейку, чтобы не плодить начатые ячейки по одной коробке.
+
+    box_items — заранее загруженный список BoxItem этого короба (см.
+    suggest_cells_for_boxes: batch-запрос сразу по всем коробам, чтобы не
+    дергать box.items — lazy="dynamic" связь, которая иначе шлет отдельный
+    SELECT на каждый короб). None — обычный доступ через box.items, годится
+    для одиночного вызова (suggest_cell)."""
+    if box_items is None:
+        box_items = box.items
+    nomenclature_ids = {item.nomenclature_id for item in box_items}
+    if not nomenclature_ids:
+        return None
+
+    cells = ctx["cells"]
+    if not cells:
+        return None
+
+    matched_cell_ids = set()
+    for nid in nomenclature_ids:
+        matched_cell_ids |= ctx["nom_to_cell_ids"].get(nid, set())
+    matched_zone_ids = {c.zone_id for c in cells if c.id in matched_cell_ids and c.zone_id}
+    box_counts = ctx["box_counts"]
+
+    # ctx["warehouse_nom_counts"]/["unplaced_nom_counts"] считаются по
+    # складу в целом, без исключения самого box — вычитаем его вклад здесь,
+    # в памяти (эквивалентно фильтру Box.id != box.id в исходной версии,
+    # но без отдельного запроса на каждый короб).
+    warehouse_nom_counts = dict(ctx["warehouse_nom_counts"])
+    unplaced_nom_counts = dict(ctx["unplaced_nom_counts"])
+    for nid in nomenclature_ids:
+        if nid in warehouse_nom_counts:
+            warehouse_nom_counts[nid] -= 1
+        if box.cell_id is None and nid in unplaced_nom_counts:
+            unplaced_nom_counts[nid] -= 1
+
+    def is_bulk(nid):
+        return warehouse_nom_counts.get(nid, 0) > CELL_CAPACITY
+
+    bulk_own = any(is_bulk(nid) for nid in nomenclature_ids)
+
+    cell_occupant_noms = ctx["cell_occupant_noms"]
 
     best = None
     for cell in cells:
@@ -81,7 +181,26 @@ def suggest_cell(warehouse_id, box):
             continue
         direct_match = cell.id in matched_cell_ids
         row_match = bool(cell.zone_id and cell.zone_id in matched_zone_ids)
-        score = (not direct_match, not row_match, -count, cell.code)
+
+        occupants = cell_occupant_noms.get(cell.id, set())
+        reserved_for_other_bulk = False
+        if not direct_match and len(occupants) == 1:
+            (occupant_nid,) = occupants
+            reserved_for_other_bulk = (
+                occupant_nid not in nomenclature_ids
+                and is_bulk(occupant_nid)
+                and unplaced_nom_counts.get(occupant_nid, 0) > 0
+            )
+
+        mix_penalty = bulk_own and not direct_match and count > 0
+        score = (
+            not direct_match,
+            reserved_for_other_bulk,
+            not row_match,
+            mix_penalty,
+            count if bulk_own else -count,
+            cell.code,
+        )
         if best is None or score < best[0]:
             best = (score, cell, direct_match, row_match, count)
 
@@ -90,6 +209,11 @@ def suggest_cell(warehouse_id, box):
     _, cell, direct_match, row_match, count = best
     if direct_match:
         reason = f"в ячейке уже есть такой же товар ({count} короб. в ячейке)"
+    elif bulk_own and count == 0:
+        # Приоритетнее row_match: пустая ячейка могла быть выбрана среди
+        # нескольких row_match именно из-за bulk-логики (см. mix_penalty
+        # выше) — это и есть настоящая причина выбора, а не совпадение ряда.
+        reason = "этого товара много на складе — заводим под него отдельную ячейку"
     elif row_match:
         reason = f"такой товар уже есть в этом ряду ({cell.zone.code})"
     elif count > 0:
@@ -99,66 +223,207 @@ def suggest_cell(warehouse_id, box):
     return {"cell": cell, "reason": reason, "free": CELL_CAPACITY - count}
 
 
+def suggest_cell(warehouse_id, box):
+    """Подсказка ячейки для ОДНОГО короба — см. _suggest_cell_from_context
+    для самой логики подбора. Строит контекст под этот единственный вызов;
+    если нужно подсказать ячейки сразу для многих коробов (страница со
+    списком) — использовать suggest_cells_for_boxes, которая считает
+    общий для склада контекст один раз, а не на каждый короб заново."""
+    ctx = _cell_suggestion_context(warehouse_id)
+    return _suggest_cell_from_context(ctx, box)
+
+
+def suggest_cells_for_boxes(warehouse_id, boxes):
+    """Подсказка ячеек сразу для нескольких коробов одного склада — общий
+    контекст (список ячеек, занятость, остатки по товару) считается ОДИН
+    РАЗ, а не заново на каждый короб, как было бы при вызове suggest_cell
+    в цикле. Список открытых коробов на складе (не размещенных) может быть
+    большим — массовое создание коробов заготавливает их впрок — и именно
+    повторный пересчет одних и тех же запросов на каждый такой короб был
+    основной причиной медленной загрузки страницы размещения.
+
+    Состав коробов (BoxItem) тоже загружается одним batch-запросом сразу
+    по всем переданным коробам — box.items сам по себе lazy="dynamic" и
+    иначе слал бы отдельный SELECT на каждый короб."""
+    unplaced_boxes = [box for box in boxes if box.cell_id is None]
+    ctx = _cell_suggestion_context(warehouse_id)
+
+    items_by_box_id = {}
+    if unplaced_boxes:
+        for item in BoxItem.query.filter(
+            BoxItem.box_id.in_([box.id for box in unplaced_boxes])
+        ).all():
+            items_by_box_id.setdefault(item.box_id, []).append(item)
+
+    return {
+        box.id: _suggest_cell_from_context(ctx, box, box_items=items_by_box_id.get(box.id, []))
+        for box in unplaced_boxes
+    }
+
+
+PLACEMENT_PAGE_SIZE = 50
+
+
 @bp.route("/")
 def list_documents():
-    documents = PlacementDocument.query.order_by(PlacementDocument.created_at.desc()).all()
+    """Неразмещенный остаток и короба без ячейки постранично (см. чат) —
+    на активном складе оба списка могут разрастись до тысяч строк, а
+    рендерить их разом на одной странице ощутимо тормозило. Два отдельных
+    номера страницы (stock_page/boxes_page), т.к. таблицы независимые —
+    перелистывание одной не должно сбрасывать страницу другой."""
+    documents = owned_query(PlacementDocument).order_by(PlacementDocument.created_at.desc()).all()
 
-    stock_rows = (
+    stock_page = request.args.get("stock_page", 1, type=int)
+    stock_pagination = (
         db.session.query(UnplacedStock)
         .filter(UnplacedStock.qty > 0)
         .join(Warehouse)
         .order_by(Warehouse.code, UnplacedStock.nomenclature_id)
-        .all()
+        .paginate(page=stock_page, per_page=PLACEMENT_PAGE_SIZE, error_out=False)
     )
-    open_boxes = (
+
+    boxes_page = request.args.get("boxes_page", 1, type=int)
+    boxes_pagination = (
         Box.query.filter_by(cell_id=None)
         .join(Warehouse, Box.warehouse_id == Warehouse.id)
         .order_by(Warehouse.code, Box.box_number)
-        .all()
+        .paginate(page=boxes_page, per_page=PLACEMENT_PAGE_SIZE, error_out=False)
     )
-    cell_suggestions = {box.id: suggest_cell(box.warehouse_id, box) for box in open_boxes}
-    returns = SupplierReturn.query.order_by(SupplierReturn.created_at.desc()).limit(20).all()
+    open_boxes = boxes_pagination.items
+
+    # open_boxes здесь — только текущая страница, поэтому и контекст подбора
+    # ячейки (suggest_cells_for_boxes, считается один раз НА СКЛАД) теперь
+    # тоже стоит дешевле, чем при подсчете сразу по всем неразмещенным
+    # коробам склада.
+    boxes_by_warehouse = defaultdict(list)
+    for box in open_boxes:
+        boxes_by_warehouse[box.warehouse_id].append(box)
+    cell_suggestions = {}
+    for warehouse_id, boxes in boxes_by_warehouse.items():
+        cell_suggestions.update(suggest_cells_for_boxes(warehouse_id, boxes))
     return render_template(
         "placement/list.html",
         documents=documents,
-        stock_rows=stock_rows,
+        stock_rows=stock_pagination.items,
+        stock_pagination=stock_pagination,
         open_boxes=open_boxes,
+        boxes_pagination=boxes_pagination,
         cell_suggestions=cell_suggestions,
-        returns=returns,
     )
 
 
 @bp.route("/write-off-stock", methods=["POST"])
 def write_off_stock():
-    """Списание брака с неразмещенного остатка через возврат поставщику.
-    Сам документ возврата оформляется в 1С отдельно — здесь только
-    списываем количество со склада и фиксируем его для сверки."""
-    warehouse_id = request.form.get("warehouse_id", type=int)
-    nomenclature_id = request.form.get("nomenclature_id", type=int)
-    qty = request.form.get("qty", type=float)
-    item = Nomenclature.query.get_or_404(nomenclature_id)
-
-    available = UnplacedStock.available(warehouse_id, nomenclature_id)
-    if not qty or qty <= 0 or qty > available:
-        flash(
-            f"Недостаточно неразмещенного остатка «{item.name}»: доступно {available} {item.unit}",
-            "danger",
-        )
-        return redirect(url_for("placement.list_documents"))
-
-    UnplacedStock.consume(warehouse_id, nomenclature_id, qty)
-
-    db.session.add(
-        SupplierReturn(
-            warehouse_id=warehouse_id,
-            nomenclature_id=nomenclature_id,
-            qty=qty,
-            created_by_id=current_user.id,
-        )
-    )
-    db.session.commit()
-    flash(f"Списано {qty} {item.unit} «{item.name}» — возврат поставщику", "success")
+    """Старый адрес оставлен безопасным: возврат создается только в приемке."""
+    flash("Возврат поставщику доступен только на этапе разбраковки приемки", "danger")
     return redirect(url_for("placement.list_documents"))
+
+
+@bp.route("/scan-box")
+def scan_box():
+    """Быстрое размещение уже упакованного короба (например, приехавшего
+    перемещением) по принципу "куда везти короб" в перемещениях —
+    сканируем короб, сразу видим рекомендованную ячейку и подтверждаем,
+    без захода в какой-либо документ размещения (см. place_box_standalone,
+    который уже умеет расставлять короб без документа — этой странице не
+    хватало только самого сканирования как отдельного входа, а не строчки
+    в общем списке "Короба без ячейки" на placement.list_documents)."""
+    box_number = request.args.get("box_number", "").strip()
+    box = None
+    suggestion = None
+    not_found = False
+    already_placed = False
+    empty_box = False
+    if box_number:
+        box = Box.find_by_scanned_code(box_number)
+        if not box:
+            not_found = True
+        elif box.cell_id is not None:
+            already_placed = True
+        elif box.items.count() == 0:
+            empty_box = True
+        else:
+            suggestion = suggest_cell(box.warehouse_id, box)
+
+    return render_template(
+        "placement/scan_box.html",
+        box_number=box_number,
+        box=box,
+        suggestion=suggestion,
+        not_found=not_found,
+        already_placed=already_placed,
+        empty_box=empty_box,
+    )
+
+
+@bp.route("/scan-cell")
+def scan_cell():
+    """Обратный порядок относительно scan_box (там сначала короб, потом
+    ячейка) — здесь сначала выбирают склад и сканируют/вводят ЯЧЕЙКУ, а
+    потом сканируют в нее короба один за другим без повторного ввода ячейки
+    каждый раз. Удобно, когда несколько коробов подряд едут в одно и то же
+    место. Код ячейки уникален только в пределах склада (см. Cell.
+    __table_args__), поэтому склад выбирается явно, не по одному скану."""
+    warehouse_id = request.args.get("warehouse_id", type=int)
+    cell_code = request.args.get("cell_code", "").strip()
+
+    warehouses = Warehouse.query.filter_by(is_active=True).order_by(Warehouse.code).all()
+    warehouse = None
+    cell = None
+    cell_not_found = False
+
+    if warehouse_id:
+        warehouse = Warehouse.query.get(warehouse_id)
+        if warehouse and cell_code:
+            cell = Cell.query.filter_by(warehouse_id=warehouse_id, code=cell_code).first()
+            if not cell:
+                cell_not_found = True
+
+    return render_template(
+        "placement/scan_cell.html",
+        warehouses=warehouses,
+        warehouse=warehouse,
+        warehouse_id=warehouse_id,
+        cell_code=cell_code,
+        cell=cell,
+        cell_not_found=cell_not_found,
+        CELL_CAPACITY=CELL_CAPACITY,
+    )
+
+
+@bp.route("/scan-cell/add-box", methods=["POST"])
+def scan_cell_add_box():
+    """Разместить очередной короб в уже выбранной (и зафиксированной на
+    экране) ячейке — см. scan_cell. Возвращаемся туда же с теми же
+    warehouse_id/cell_code, чтобы список коробов в ячейке обновился и можно
+    было сразу сканировать следующий короб."""
+    warehouse_id = request.form.get("warehouse_id", type=int)
+    cell_code = request.form.get("cell_code", "").strip()
+    box_number = request.form.get("box_number", "").strip()
+    back_url = url_for("placement.scan_cell", warehouse_id=warehouse_id, cell_code=cell_code)
+
+    warehouse = Warehouse.query.get(warehouse_id) if warehouse_id else None
+    if not warehouse or not cell_code:
+        flash("Сначала выберите склад и ячейку", "danger")
+        return redirect(url_for("placement.scan_cell"))
+
+    box = Box.find_by_scanned_code(box_number)
+    if not box:
+        flash(f"Короб «{box_number}» не найден", "danger")
+        return redirect(back_url)
+    if box.warehouse_id != warehouse_id:
+        flash(f"Короб {box.box_number} числится на складе «{box.warehouse.name}», а не «{warehouse.name}»", "danger")
+        return redirect(back_url)
+    if box.items.count() == 0:
+        flash(f"Короб {box.box_number} пуст — размещать пока нечего", "danger")
+        return redirect(back_url)
+
+    error = _place_box(box, cell_code, warehouse_id)
+    if error:
+        flash(error, "danger")
+    else:
+        flash(f"Короб {box.box_number} размещен в ячейке {cell_code}", "success")
+    return redirect(back_url)
 
 
 @bp.route("/new", methods=["GET", "POST"])
@@ -191,11 +456,20 @@ def detail(doc_id):
     open_boxes = Box.query.filter_by(warehouse_id=doc.warehouse_id, cell_id=None).all()
     # Пустые короба (заготовлены массовой печатью, но еще ничем не
     # заполнены) не показываем как "неразмещенные" — размещать в ячейку
-    # там пока нечего, только замусоривают список.
+    # там пока нечего, только замусоривают список. Кол-во товара в коробе
+    # считаем одним batch-запросом сразу по всем коробам — box.items.count()
+    # в цикле слал бы отдельный SELECT на каждый короб.
+    non_empty_box_ids = {
+        row[0]
+        for row in db.session.query(BoxItem.box_id)
+        .filter(BoxItem.box_id.in_([box.id for box in open_boxes]))
+        .distinct()
+        .all()
+    }
     other_open_boxes = [
         box
         for box in open_boxes
-        if box.placement_document_id != doc.id and box.items.count() > 0
+        if box.placement_document_id != doc.id and box.id in non_empty_box_ids
     ]
     available_stock = (
         UnplacedStock.query.filter_by(warehouse_id=doc.warehouse_id)
@@ -212,11 +486,7 @@ def detail(doc_id):
     if active_box_id:
         active_box = Box.query.filter_by(id=active_box_id, warehouse_id=doc.warehouse_id).first()
 
-    cell_suggestions = {
-        box.id: suggest_cell(doc.warehouse_id, box)
-        for box in boxes + open_boxes
-        if box.cell_id is None
-    }
+    cell_suggestions = suggest_cells_for_boxes(doc.warehouse_id, boxes + open_boxes)
 
     return render_template(
         "placement/detail.html",

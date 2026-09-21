@@ -237,4 +237,20 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll('[data-bs-toggle="popover"]').forEach((el) => {
     new bootstrap.Popover(el);
   });
+
+  // Первый клик сразу блокирует кнопку. Сервер дополнительно проверяет
+  // request_token, поэтому даже повтор после долгого ожидания безопасен.
+  document.querySelectorAll("form[data-single-submit]").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      if (form.dataset.submitting === "1") {
+        event.preventDefault();
+        return;
+      }
+      form.dataset.submitting = "1";
+      form.querySelectorAll('button[type="submit"], input[type="submit"]').forEach((button) => {
+        button.disabled = true;
+        if (button.tagName === "BUTTON") button.textContent = "Добавляем…";
+      });
+    });
+  });
 });

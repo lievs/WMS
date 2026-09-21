@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Состав ГМ для Ozon — {{ doc.number }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('movement.detail', doc_id=doc.id) }}">&larr; Перемещение {{ doc.number }}</a></p>
+<h3 class="mb-1">Состав грузовых мест для Ozon</h3>
+<p class="text-muted small mb-4">
+  Каждый короб этого перемещения станет одним грузовым местом (ГМ) в
+  файле для Ozon. Ozon сам генерирует штрихкоды ГМ в личном кабинете —
+  вставьте их ниже по одному в строке, СТРОГО в том же порядке, что и
+  короба в списке (порядок совпадает со списком в перемещении).
+  «Артикул товара» подставляется автоматически по штрихкоду — см.
+  <a href="{{ url_for('marketplace_export.ozon_mapping') }}">сопоставление артикулов Ozon</a>.
+</p>
+
+<div class="card p-3 mb-4">
+  <h5 class="mb-2">Короба в перемещении ({{ lines|length }})</h5>
+  <table class="table table-sm table-mobile-compact">
+    <thead><tr><th>№</th><th>Короб</th><th>Товары</th></tr></thead>
+    <tbody>
+    {% for line in lines %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>{{ line.box.box_number }}</td>
+        <td>
+          {% for item in line.box.items %}
+            {{ item.nomenclature.name }} — {{ item.qty | int if item.qty == item.qty | int else item.qty | round(3) }} {{ item.nomenclature.unit }}{% if not loop.last %}, {% endif %}
+          {% endfor %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card p-3" style="max-width: 480px">
+  <form method="post">
+    <div class="mb-3">
+      <label class="form-label">ШК ГМ от Ozon — по одному в строке, {{ lines|length }} шт.</label>
+      <textarea name="cargo_barcodes" class="form-control" rows="{{ lines|length + 1 }}" required>{{ cargo_barcodes_raw }}</textarea>
+    </div>
+    <button type="submit" class="btn btn-primary">📤 Сформировать файл</button>
+  </form>
+</div>
+{% endblock %}

@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Статусы приемки{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('reports.index') }}">&larr; Отчеты</a></p>
+<h3 class="mb-1">Статусы приемки</h3>
+<p class="text-muted small mb-4">
+  По каждой приемке — текущий статус, сколько дней она в нем висит,
+  суммарное количество товара и вид(ы) товара. Помогает найти заявки,
+  застрявшие на каком-то этапе дольше обычного.
+</p>
+
+<div class="card p-3 mb-4">
+  <form method="get" class="row g-2 align-items-end">
+    <div class="col-md-4">
+      <label class="form-label">Склад</label>
+      <select name="warehouse_id" class="form-select">
+        <option value="">Все склады</option>
+        {% for wh in warehouses %}
+          <option value="{{ wh.id }}" {% if selected_warehouse_id == wh.id %}selected{% endif %}>{{ wh.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-6 col-md-2">
+      <label class="form-label">С даты</label>
+      <input type="date" name="date_from" class="form-control" value="{{ date_from }}">
+    </div>
+    <div class="col-6 col-md-2">
+      <label class="form-label">По дату</label>
+      <input type="date" name="date_to" class="form-control" value="{{ date_to }}">
+    </div>
+    <div class="col-md-2 form-check ms-2 mb-2">
+      <input type="checkbox" name="unfinished" class="form-check-input" id="unfinishedOnly" {% if unfinished_only %}checked{% endif %}>
+      <label class="form-check-label" for="unfinishedOnly">Только незавершенные</label>
+    </div>
+    <div class="col-md-2">
+      <button type="submit" class="btn btn-primary w-100">Показать</button>
+    </div>
+  </form>
+  <div class="mt-2">
+    <a class="btn btn-outline-secondary btn-sm"
+       href="{{ url_for('reports.receiving_status_report_export', warehouse_id=selected_warehouse_id, date_from=date_from, date_to=date_to, unfinished='on' if unfinished_only else none) }}">
+      📤 Выгрузить в Excel
+    </a>
+  </div>
+</div>
+
+<div class="card p-3">
+  <h5 class="mb-2">Результат: {{ rows|length }}</h5>
+  <table class="table table-sm table-mobile-compact d-none d-md-table">
+    <thead>
+      <tr>
+        <th>Номер</th>
+        <th>Склад</th>
+        <th>Статус</th>
+        <th>Дней в статусе</th>
+        <th>Кол-во товара</th>
+        <th>Вид товара</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in rows %}
+      {% set d = row.document %}
+      <tr class="{{ 'table-danger' if row.days_in_status and row.days_in_status >= 3 and d.status != 'completed' else '' }}">
+        <td><a href="{{ url_for('receiving.detail', doc_id=d.id) }}">{{ d.number }}</a></td>
+        <td>{{ d.warehouse.name if d.warehouse else '' }}</td>
+        <td><span class="badge badge-status-{{ d.status }}">{{ row.status_label }}</span></td>
+        <td>{{ row.days_in_status }}</td>
+        <td>{{ row.qty | int if row.qty == row.qty | int else row.qty | round(3) }}</td>
+        <td>{{ row.categories or '—' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="text-muted">Приемок не найдено</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="list-group d-md-none">
+    {% for row in rows %}
+      {% set d = row.document %}
+      <div class="list-group-item py-2 px-2 {{ 'list-group-item-danger' if row.days_in_status and row.days_in_status >= 3 and d.status != 'completed' else '' }}">
+        <div class="d-flex justify-content-between align-items-center gap-2">
+          <a href="{{ url_for('receiving.detail', doc_id=d.id) }}" class="fw-bold text-decoration-none">{{ d.number }}</a>
+          <span class="badge badge-status-{{ d.status }}">{{ row.status_label }}</span>
+        </div>
+        <div class="small text-muted">{{ d.warehouse.name if d.warehouse else '' }} · {{ row.categories or '—' }}</div>
+        <div class="small">Дней в статусе: <strong>{{ row.days_in_status }}</strong> · Кол-во: {{ row.qty | int if row.qty == row.qty | int else row.qty | round(3) }}</div>
+      </div>
+    {% else %}
+      <div class="list-group-item text-muted">Приемок не найдено</div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

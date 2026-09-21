@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Артикулы Ozon{% endblock %}
+{% block content %}
+<h3 class="mb-1">Сопоставление артикулов Ozon</h3>
+<p class="text-muted small mb-4">
+  Ozon требует в выгрузке «Состав грузовых мест» отдельный «Артикул товара»,
+  который не совпадает с нашим внутренним артикулом/SKU — только с
+  собственным штрихкодом товара (Nomenclature.barcode). Загрузите файл с
+  двумя колонками: штрихкод и артикул Ozon, без заголовка — так, как он
+  выгружается из личного кабинета Ozon.
+</p>
+
+<div class="card p-3 mb-4" style="max-width: 480px">
+  <div class="mb-3">Сейчас в сопоставлении: <strong>{{ count }}</strong> штрихкодов</div>
+  <form method="post" enctype="multipart/form-data">
+    <div class="mb-3">
+      <label class="form-label">Файл xlsx (штрихкод, артикул)</label>
+      <input type="file" name="file" accept=".xlsx" class="form-control" required>
+    </div>
+    <button type="submit" class="btn btn-primary">Загрузить</button>
+  </form>
+</div>
+
+{% if preview %}
+<div class="card p-3" style="max-width: 480px">
+  <h6 class="mb-2">Последние загруженные (для проверки)</h6>
+  <table class="table table-sm">
+    <thead><tr><th>Штрихкод</th><th>Артикул</th></tr></thead>
+    <tbody>
+    {% for row in preview %}
+      <tr><td>{{ row.barcode }}</td><td>{{ row.article }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

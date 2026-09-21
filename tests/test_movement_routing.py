@@ -2,6 +2,10 @@
 потребности плана отгрузок, с учетом уже едущих туда (но не принятых)
 коробов — см. обсуждение "нужно 30, отсканировали короб с 10"."""
 
+from datetime import date, datetime, timedelta
+
+from flask import g
+
 from wms.extensions import db
 from wms.models import (
     Box,
@@ -11,8 +15,29 @@ from wms.models import (
     Nomenclature,
     ShipmentPlan,
     ShipmentPlanLine,
+    User,
     Warehouse,
 )
+from wms.blueprints.movement import _compute_routing
+
+
+def _login_as(client, user):
+    # Тест держит один app context на весь запуск (см. фикстуру db) — без
+    # сброса кэша Flask-Login "current_user" следующий запрос тем же
+    # client все еще резолвился бы в ПРЕДЫДУЩЕГО пользователя (см. тот же
+    # прием в test_auth_session_revocation.py).
+    g.pop("_login_user", None)
+    with client.session_transaction() as sess:
+        sess["_user_id"] = str(user.id)
+        sess["_fresh"] = True
+
+
+def _make_staff_user(username):
+    user = User(username=username, full_name=username, role="warehouse")
+    user.set_password("x")
+    db.session.add(user)
+    db.session.commit()
+    return user
 
 
 def _setup_plan(planned_qty=30, fulfilled_qty=0):
@@ -59,7 +84,13 @@ def test_routing_recommends_city_with_demand(db, client_logged_in):
     assert resp.status_code == 200
     html = resp.get_data(as_text=True)
     assert "ОЗОН: Город" in html
-    assert "30 шт." in html  # полная потребность, пока ничего еще не отправлено
+    assert box.box_number in html
+    assert "Покрывает" not in html
+    assert "Нужно всего" not in html
+    assert "Содержимое короба" in html
+    assert "Товар" in html
+    assert "30 шт." not in html
+    assert html.index("Содержимое короба") < html.index("ОЗОН: Город")
 
 
 def test_routing_subtracts_already_committed_boxes(db, client_logged_in):
@@ -73,11 +104,8 @@ def test_routing_subtracts_already_committed_boxes(db, client_logged_in):
         "/movement/route-box/add", data={"box_id": box1.id, "to_warehouse_id": city.id}
     )
 
-    resp = client_logged_in.get(f"/movement/route-box?box_number={box2.box_number}")
-    html = resp.get_data(as_text=True)
-
-    assert "20 шт." in html
-    assert "30 шт." not in html
+    routing = _compute_routing(box2)
+    assert routing[0]["total_remaining"] == 20
 
 
 def test_routing_subtracts_boxes_already_in_transit(db, client_logged_in):
@@ -99,11 +127,41 @@ def test_routing_subtracts_boxes_already_in_transit(db, client_logged_in):
     assert doc.status == "completed"
     assert doc.received_at is None  # именно "в пути", не принято
 
-    resp = client_logged_in.get(f"/movement/route-box?box_number={box2.box_number}")
-    html = resp.get_data(as_text=True)
+    routing = _compute_routing(box2)
+    assert routing[0]["total_remaining"] == 20
 
-    assert "20 шт." in html
-    assert "30 шт." not in html
+
+def test_routing_does_not_carry_old_boxes_into_new_dated_plan(db, client_logged_in):
+    """После смены даты листа это новый план: короб, отсканированный в
+    перемещение до новой даты, не уменьшает новую потребность."""
+    sender, city, item = _setup_plan(planned_qty=30)
+    plan = ShipmentPlan.query.filter_by(marketplace="ozon").first()
+    plan.period_start = date.today()
+    line = ShipmentPlanLine.query.filter_by(plan_id=plan.id).first()
+    line.period_start = date.today()
+
+    old_box = _make_box(sender, item, qty=10, box_number="BOX-OLD-PLAN")
+    new_box = _make_box(sender, item, qty=5, box_number="BOX-NEW-PLAN")
+    doc = MovementDocument(
+        number="MOV-OLD-PLAN",
+        from_warehouse_id=sender.id,
+        to_warehouse_id=city.id,
+        status="draft",
+    )
+    db.session.add(doc)
+    db.session.flush()
+    db.session.add(
+        MovementLine(
+            document_id=doc.id,
+            box_id=old_box.id,
+            from_warehouse_id=sender.id,
+            scanned_at=datetime.combine(date.today() - timedelta(days=1), datetime.min.time()),
+        )
+    )
+    db.session.commit()
+
+    routing = _compute_routing(new_box)
+    assert routing[0]["total_remaining"] == 30
 
 
 def test_routing_add_stays_on_scanning_page_not_document(db, client_logged_in):
@@ -153,6 +211,31 @@ def test_routing_add_creates_draft_movement_and_reuses_it(db, client_logged_in):
         from_warehouse_id=sender.id, to_warehouse_id=city.id
     ).all()
     assert len(docs) == 1  # второй вызов не создал новый документ
+    assert docs[0].lines.count() == 2
+
+
+def test_route_box_add_joins_draft_started_by_a_different_user(db, client):
+    """Регрессия: route_box_add искал существующий черновик через
+    owned_query (только СВОИ документы), поэтому второй сотрудник,
+    собирающий то же направление, не находил черновик первого и получал
+    отдельный документ — то есть двое собирали одно направление в двух
+    разных документах вместо одного общего. Тесты с client_logged_in
+    (админ) это не ловили: owned_query не ограничивает админа."""
+    sender, city, item = _setup_plan(planned_qty=30)
+    box1 = _make_box(sender, item, qty=10, box_number="BOX-000020")
+    box2 = _make_box(sender, item, qty=5, box_number="BOX-000021")
+
+    alice = _make_staff_user("alice-routing")
+    bob = _make_staff_user("bob-routing")
+
+    _login_as(client, alice)
+    client.post("/movement/route-box/add", data={"box_id": box1.id, "to_warehouse_id": city.id})
+
+    _login_as(client, bob)
+    client.post("/movement/route-box/add", data={"box_id": box2.id, "to_warehouse_id": city.id})
+
+    docs = MovementDocument.query.filter_by(from_warehouse_id=sender.id, to_warehouse_id=city.id).all()
+    assert len(docs) == 1
     assert docs[0].lines.count() == 2
 
 

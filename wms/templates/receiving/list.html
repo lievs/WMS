@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Приемка{% endblock %}
 {% block content %}
+<div class="mobile-compact-list-page">
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
   <h3 class="mb-0">Приемка товара</h3>
   <div class="d-flex flex-wrap gap-2">
@@ -10,7 +11,7 @@
   </div>
 </div>
 
-<form method="get" class="d-flex flex-wrap gap-3 mb-3">
+<form method="get" class="d-flex flex-wrap align-items-center gap-3 mb-3">
   <div class="form-check">
     <input type="checkbox" name="unfinished" class="form-check-input" id="filterUnfinished" onchange="this.form.submit()" {% if unfinished_only %}checked{% endif %}>
     <label class="form-check-label" for="filterUnfinished">Показывать только незавершенные</label>
@@ -19,22 +20,70 @@
     <input type="checkbox" name="invoice_only" class="form-check-input" id="filterInvoiceOnly" onchange="this.form.submit()" {% if invoice_only %}checked{% endif %}>
     <label class="form-check-label" for="filterInvoiceOnly">Приемка по накладным</label>
   </div>
+  <select name="warehouse_id" class="form-select form-select-sm" style="max-width:220px" onchange="this.form.submit()">
+    <option value="">Все склады</option>
+    {% for wh in warehouses %}
+    <option value="{{ wh.id }}" {% if warehouse_id == wh.id %}selected{% endif %}>{{ wh.name }}</option>
+    {% endfor %}
+  </select>
+  <div class="d-flex gap-1">
+    <input type="text" name="supplier" class="form-control form-control-sm" style="max-width:220px" placeholder="Поставщик" value="{{ supplier_q }}">
+    <button type="submit" class="btn btn-sm btn-outline-primary">Найти</button>
+  </div>
 </form>
 
-{% set status_labels = {'draft': 'Черновик', 'recounting': 'На пересчете', 'sorting': 'На разбраковке', 'completed': 'Завершен'} %}
-<div class="card p-3">
+<div class="card p-3 receiving-list-card">
   <table class="table d-none d-md-table">
-    <thead><tr><th>Номер</th><th>Дата</th><th>Склад</th><th>Поставщик</th><th>№ заявки</th><th>Автор</th><th>Статус</th><th></th></tr></thead>
+    <thead><tr><th>Номер</th><th>Дата</th><th>Склад</th><th>Поставщик</th><th>№ заказа</th><th>Автор</th><th>Статус</th><th>Кол-во</th><th>Возвраты</th><th class="text-center">Провер. в 1С</th><th></th></tr></thead>
     <tbody>
     {% for d in documents %}
-      <tr>
+      {% set returns_count = returns_count_by_doc.get(d.id, 0) %}
+      {% set has_mismatch = d.id in mismatch_doc_ids %}
+      {% set total_qty = total_qty_by_doc.get(d.id, 0) %}
+      <tr class="{{ 'table-danger' if returns_count else ('table-warning' if has_mismatch else '') }}">
         <td>{{ d.number }}</td>
         <td>{{ (d.created_at|msk).strftime('%d.%m.%Y %H:%M') }}</td>
         <td>{{ d.warehouse.name }}</td>
         <td>{{ d.supplier or '' }}</td>
         <td>{{ d.order_number or '' }}</td>
         <td>{{ d.created_by.display_name() if d.created_by else '' }}</td>
-        <td><span class="badge badge-status-{{ d.status }}">{{ status_labels.get(d.status, d.status) }}</span></td>
+        <td>
+          {% if d.is_from_invoice_import() %}
+          <span class="status-chips" role="group" aria-label="Статус приемки">
+            <span class="status-chip status-chip-draft status-chip-reached"
+                  title="Черновик: {{ (d.created_at|msk).strftime('%d.%m.%Y %H:%M') }}">Ч</span>
+            <span class="status-chip status-chip-recounting{{ ' status-chip-reached' if d.recounting_started_at else '' }}"
+                  title="Пересчет: {{ (d.recounting_started_at|msk).strftime('%d.%m.%Y %H:%M') if d.recounting_started_at else 'еще не наступил' }}">П</span>
+            <span class="status-chip status-chip-sorting{{ ' status-chip-reached' if d.sorting_started_at else '' }}"
+                  title="Разбраковка: {{ (d.sorting_started_at|msk).strftime('%d.%m.%Y %H:%M') if d.sorting_started_at else 'еще не наступила' }}">Р</span>
+            <span class="status-chip status-chip-completed{{ ' status-chip-reached' if d.completed_at else '' }}"
+                  title="Завершено: {{ (d.completed_at|msk).strftime('%d.%m.%Y %H:%M') if d.completed_at else 'еще не наступило' }}">З</span>
+          </span>
+          {% else %}
+          <span class="status-chips" role="group" aria-label="Статус приемки">
+            <span class="status-chip status-chip-wide status-chip-draft status-chip-reached"
+                  title="Приемка: {{ (d.created_at|msk).strftime('%d.%m.%Y %H:%M') }}">Пр</span>
+            <span class="status-chip status-chip-completed{{ ' status-chip-reached' if d.completed_at else '' }}"
+                  title="Завершено: {{ (d.completed_at|msk).strftime('%d.%m.%Y %H:%M') if d.completed_at else 'еще не наступило' }}">З</span>
+          </span>
+          {% endif %}
+          {% if has_mismatch %}<span class="text-danger" title="Есть расхождение с накладной">⚠</span>{% endif %}
+        </td>
+        <td>{{ total_qty | int if total_qty == total_qty | int else total_qty | round(3) }}</td>
+        <td>{% if returns_count %}<span class="badge bg-danger">{{ returns_count }}</span>{% else %}—{% endif %}</td>
+        <td class="text-center">
+          {% if d.is_from_invoice_import() %}
+          <button type="button" class="btn btn-sm btn-link p-0 toggle-flag-btn" style="font-size:1.15rem; line-height:1; text-decoration:none;"
+                data-url="{{ url_for('receiving.toggle_checked_in_1c', doc_id=d.id) }}"
+                data-on-icon="✅" data-off-icon="☐"
+                data-on-title-prefix="Проверено в 1С "
+                data-off-title="Отметить: проверено в 1С"
+                title="{{ 'Проверено в 1С ' + (d.checked_in_1c_at|msk).strftime('%d.%m.%Y %H:%M') if d.checked_in_1c_at else 'Отметить: проверено в 1С' }}"
+                >{{ '✅' if d.checked_in_1c_at else '☐' }}</button>
+          {% else %}
+          <span class="text-muted">—</span>
+          {% endif %}
+        </td>
         <td>
           <a href="{{ url_for('receiving.detail', doc_id=d.id) }}">Открыть</a>
           {% if d.supplier_id %}· <a href="{{ url_for('receiving.confirm_invoice', doc_id=d.id) }}">📱 По накладной</a>{% endif %}
@@ -43,7 +92,7 @@
         </td>
       </tr>
     {% else %}
-      <tr><td colspan="8" class="text-muted">Документов еще нет</td></tr>
+      <tr><td colspan="11" class="text-muted">Документов еще нет</td></tr>
     {% endfor %}
     </tbody>
   </table>
@@ -53,13 +102,47 @@
        загруженной накладной — быстрая ссылка на мобильную сверку. -->
   <div class="list-group d-md-none">
     {% for d in documents %}
-      <div class="list-group-item py-2 px-2">
+      {% set returns_count = returns_count_by_doc.get(d.id, 0) %}
+      {% set has_mismatch = d.id in mismatch_doc_ids %}
+      {% set total_qty = total_qty_by_doc.get(d.id, 0) %}
+      <div class="list-group-item py-2 px-2 receiving-list-item {{ 'list-group-item-danger' if returns_count else ('list-group-item-warning' if has_mismatch else '') }}">
         <div class="d-flex justify-content-between align-items-center gap-2">
           <a href="{{ url_for('receiving.detail', doc_id=d.id) }}" class="fw-bold text-decoration-none">{{ d.number }}</a>
-          <span class="badge badge-status-{{ d.status }}">{{ status_labels.get(d.status, d.status) }}</span>
+          {% if d.is_from_invoice_import() %}
+          <span class="status-chips" role="group" aria-label="Статус приемки">
+            <span class="status-chip status-chip-draft status-chip-reached"
+                  title="Черновик: {{ (d.created_at|msk).strftime('%d.%m.%Y %H:%M') }}">Ч</span>
+            <span class="status-chip status-chip-recounting{{ ' status-chip-reached' if d.recounting_started_at else '' }}"
+                  title="Пересчет: {{ (d.recounting_started_at|msk).strftime('%d.%m.%Y %H:%M') if d.recounting_started_at else 'еще не наступил' }}">П</span>
+            <span class="status-chip status-chip-sorting{{ ' status-chip-reached' if d.sorting_started_at else '' }}"
+                  title="Разбраковка: {{ (d.sorting_started_at|msk).strftime('%d.%m.%Y %H:%M') if d.sorting_started_at else 'еще не наступила' }}">Р</span>
+            <span class="status-chip status-chip-completed{{ ' status-chip-reached' if d.completed_at else '' }}"
+                  title="Завершено: {{ (d.completed_at|msk).strftime('%d.%m.%Y %H:%M') if d.completed_at else 'еще не наступило' }}">З</span>
+          </span>
+          {% else %}
+          <span class="status-chips" role="group" aria-label="Статус приемки">
+            <span class="status-chip status-chip-wide status-chip-draft status-chip-reached"
+                  title="Приемка: {{ (d.created_at|msk).strftime('%d.%m.%Y %H:%M') }}">Пр</span>
+            <span class="status-chip status-chip-completed{{ ' status-chip-reached' if d.completed_at else '' }}"
+                  title="Завершено: {{ (d.completed_at|msk).strftime('%d.%m.%Y %H:%M') if d.completed_at else 'еще не наступило' }}">З</span>
+          </span>
+          {% endif %}
         </div>
-        <div class="small text-muted">{{ d.warehouse.name }}{% if d.supplier %} · {{ d.supplier }}{% endif %}{% if d.order_number %} · № заявки: {{ d.order_number }}{% endif %}</div>
-        <div class="small text-muted">{{ (d.created_at|msk).strftime('%d.%m.%Y') }}</div>
+        <div class="small text-muted">{{ d.warehouse.name }}{% if d.supplier %} · {{ d.supplier }}{% endif %}{% if d.order_number %} · № заказа: {{ d.order_number }}{% endif %}</div>
+        <div class="small text-muted">{{ (d.created_at|msk).strftime('%d.%m.%Y') }}{% if d.created_by %} · Автор: {{ d.created_by.display_name() }}{% endif %} · Кол-во: {{ total_qty | int if total_qty == total_qty | int else total_qty | round(3) }}</div>
+        {% if returns_count %}<div class="small text-danger">↩ Возвратов: {{ returns_count }}</div>{% endif %}
+        {% if has_mismatch %}<div class="small text-danger">⚠ Есть расхождение с накладной</div>{% endif %}
+        {% if d.is_from_invoice_import() %}
+        <div class="small">
+          <button type="button" class="btn btn-sm btn-link p-0 toggle-flag-btn" style="text-decoration:none;"
+                data-url="{{ url_for('receiving.toggle_checked_in_1c', doc_id=d.id) }}"
+                data-on-icon="✅ Проверено в 1С" data-off-icon="☐ Проверено в 1С"
+                data-on-title-prefix="Проверено в 1С "
+                data-off-title="Отметить: проверено в 1С"
+                title="{{ 'Проверено в 1С ' + (d.checked_in_1c_at|msk).strftime('%d.%m.%Y %H:%M') if d.checked_in_1c_at else 'Отметить: проверено в 1С' }}"
+                >{{ '✅' if d.checked_in_1c_at else '☐' }} Проверено в 1С</button>
+        </div>
+        {% endif %}
         {% if d.supplier_id %}
           <a href="{{ url_for('receiving.confirm_invoice', doc_id=d.id) }}" class="small">📱 По накладной</a>
         {% endif %}
@@ -72,4 +155,26 @@
     {% endfor %}
   </div>
 </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Галочка "Проверено в 1С" — просто отметка для контроля, не влияет на
+  // сам документ (см. receiving.toggle_checked_in_1c), поэтому переключаем
+  // ее через fetch() без перезагрузки страницы.
+  document.querySelectorAll(".toggle-flag-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      btn.disabled = true;
+      fetch(btn.dataset.url, { method: "POST" })
+        .then((r) => r.json())
+        .then((data) => {
+          if (!data.ok) return;
+          btn.textContent = data.checked ? btn.dataset.onIcon : btn.dataset.offIcon;
+          btn.title = data.checked ? btn.dataset.onTitlePrefix + data.at : btn.dataset.offTitle;
+        })
+        .finally(() => { btn.disabled = false; });
+    });
+  });
+</script>
 {% endblock %}

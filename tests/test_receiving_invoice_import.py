@@ -532,6 +532,40 @@ def test_add_unlisted_item_appears_on_confirm_invoice_page_without_expected_qty(
     assert "Незаявленный товар" in resp.get_data(as_text=True)
 
 
+def test_confirm_invoice_page_highlights_mismatch_with_expected_qty(db, client_logged_in):
+    """Если фактически введенное количество разошлось с тем, что заявлено в
+    накладной (expected_qty), сверка должна визуально подсвечивать это —
+    красным полем ввода и подписью "По накладной", плюс показывать саму
+    величину расхождения (см. confirm_invoice.html)."""
+    warehouse = _make_warehouse()
+    item = Nomenclature(sku="НФ-00003575", barcode="8880000011", name=DEFAULT_ROW_NAME, unit="шт")
+    db.session.add(item)
+    db.session.commit()
+    client_logged_in.post(
+        "/receiving/import-invoice",
+        data={"warehouse_id": warehouse.id, "file": (_build_invoice_xlsx(), "invoice.xlsx")},
+        content_type="multipart/form-data",
+    )
+    doc = ReceivingDocument.query.filter_by(number="1706").first()
+    line = ReceivingLine.query.filter_by(document_id=doc.id, nomenclature_id=item.id).first()
+    assert line.expected_qty == 80
+
+    # Пока факт совпадает с накладной — подсветки на самом поле быть не
+    # должно (JS-код на странице упоминает "border-danger"/"⚠" всегда —
+    # ищем именно применение класса/значения расхождения, а не сам код).
+    html = client_logged_in.get(f"/receiving/{doc.id}/confirm").get_data(as_text=True)
+    assert "qty-input border-danger" not in html
+    assert "text-danger fw-semibold" not in html
+    assert "⚠ -5" not in html
+
+    client_logged_in.post(f"/receiving/{doc.id}/lines/{line.id}/confirm", json={"qty": 75, "confirmed": True})
+
+    html = client_logged_in.get(f"/receiving/{doc.id}/confirm").get_data(as_text=True)
+    assert "qty-input border-danger" in html
+    assert "text-danger fw-semibold" in html
+    assert "⚠ -5" in html
+
+
 def test_upload_matches_by_barcode_when_available_even_if_name_differs(db, client_logged_in):
     """1С «Код» — внутренний артикул поставщика, а не sku в номенклатуре, и
     может не совпадать вообще ни с чем. Если в файле есть штрихкод, он

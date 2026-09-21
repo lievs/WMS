@@ -1,16 +1,25 @@
 {% extends "base.html" %}
 {% block title %}Накладная {{ doc.number }}{% endblock %}
 {% block content %}
-{% set status_labels = {'draft': 'Черновик', 'recounting': 'На пересчете', 'sorting': 'На разбраковке', 'completed': 'Завершена'} %}
 {% set can_edit_defect = doc.status == 'sorting' and (doc.is_from_invoice_import() or current_user.is_admin) %}
 <p><a href="{{ url_for('receiving.list_documents') }}">&larr; Приемка</a></p>
 
 <h4 class="mb-1">Накладная № {{ doc.number }}</h4>
 <div class="text-muted mb-3">
   {% if doc.supplier %}{{ doc.supplier }} · {% endif %}{{ doc.warehouse.name }}
-  {% if doc.order_number %} · № заявки: {{ doc.order_number }}{% endif %}
+  {% if doc.order_number %} · № заказа: {{ doc.order_number }}{% endif %}
   {% if doc.created_by %} · Автор: {{ doc.created_by.display_name() }}{% endif %}
-  · <span class="badge badge-status-{{ doc.status }}">{{ status_labels.get(doc.status, doc.status) }}</span>
+  ·
+  <span class="status-chips" role="group" aria-label="Статус приемки">
+    <span class="status-chip status-chip-draft status-chip-reached"
+          title="Черновик: {{ (doc.created_at|msk).strftime('%d.%m.%Y %H:%M') }}">Ч</span>
+    <span class="status-chip status-chip-recounting{{ ' status-chip-reached' if doc.recounting_started_at else '' }}"
+          title="Пересчет: {{ (doc.recounting_started_at|msk).strftime('%d.%m.%Y %H:%M') if doc.recounting_started_at else 'еще не наступил' }}">П</span>
+    <span class="status-chip status-chip-sorting{{ ' status-chip-reached' if doc.sorting_started_at else '' }}"
+          title="Разбраковка: {{ (doc.sorting_started_at|msk).strftime('%d.%m.%Y %H:%M') if doc.sorting_started_at else 'еще не наступила' }}">Р</span>
+    <span class="status-chip status-chip-completed{{ ' status-chip-reached' if doc.completed_at else '' }}"
+          title="Завершено: {{ (doc.completed_at|msk).strftime('%d.%m.%Y %H:%M') if doc.completed_at else 'еще не наступило' }}">З</span>
+  </span>
   {% if doc.invoice_file_data %} · <a href="{{ url_for('receiving.download_invoice_file', doc_id=doc.id) }}">📄 Скачать накладную</a>{% endif %}
 </div>
 
@@ -33,13 +42,17 @@
     <button type="submit" class="btn btn-success btn-sm">🔍 Отправить на разбраковку</button>
   </form>
   {% elif doc.status == 'sorting' %}
-  <form method="post" action="{{ url_for('receiving.complete', doc_id=doc.id) }}"
-        onsubmit="return confirm('Завершить приемку? Брак и недостача (если кол-во на пересчете оказалось меньше, чем по накладной) уйдут отдельными возвратами поставщику, остальное — в неразмещенный остаток.');">
+  <form id="sortingCompleteForm" method="post" action="{{ url_for('receiving.complete', doc_id=doc.id) }}"
+        onsubmit="return confirm('Завершить приемку? В остаток попадет только фактически принятое годное количество. Выделенный брак уйдет отдельным возвратом поставщику, а недопоставка не будет зачислена на склад.');">
     <input type="hidden" name="next" value="confirm">
     <button type="submit" class="btn btn-success btn-sm">✅ Завершить приемку</button>
   </form>
   {% endif %}
 </div>
+
+{% if doc.status == 'sorting' and can_edit_defect %}
+<p class="text-muted small mb-2">Впишите брак по всем нужным позициям и нажмите «Завершить приемку» один раз — страница не перезагружается после каждой строки. «✓ Готово» у отдельной позиции тоже подхватит вписанный по ней брак.</p>
+{% endif %}
 
 {% if doc.status == 'draft' %}
 <div class="mb-3">
@@ -49,8 +62,9 @@
   <div class="collapse mt-2" id="addUnlistedForm">
     <div class="card card-body p-2">
       <div class="text-muted small mb-2">Если привезли товар, которого нет в накладной</div>
-      <form method="post" action="{{ url_for('receiving.add_line', doc_id=doc.id) }}" class="d-flex flex-column gap-2">
+      <form method="post" action="{{ url_for('receiving.add_line', doc_id=doc.id) }}" class="d-flex flex-column gap-2" data-single-submit>
         <input type="hidden" name="next" value="confirm">
+        <input type="hidden" name="request_token" value="{{ add_request_token }}">
         <div class="autocomplete-box" data-autocomplete-nomenclature>
           <input type="text" class="form-control ac-input" placeholder="Артикул, наименование или штрихкод..." autocomplete="off">
           <input type="hidden" class="ac-value" name="nomenclature_id" required>
@@ -68,19 +82,24 @@
 
 <div class="list-group">
 {% for line in lines %}
+  {% set eq = line.expected_qty %}
+  {% set mismatch = eq is not none and line.qty != eq %}
   <div class="list-group-item py-2 px-2"
-       data-confirm-url="{{ url_for('receiving.confirm_line', doc_id=doc.id, line_id=line.id) }}">
+       data-confirm-url="{{ url_for('receiving.confirm_line', doc_id=doc.id, line_id=line.id) }}"
+       data-expected="{{ eq if eq is not none else '' }}">
     <div class="small" style="word-break: break-word;">{{ line.nomenclature.name }}</div>
     <div class="d-flex align-items-center justify-content-between gap-2 mt-1">
-      <div class="text-muted small text-truncate">
-        {% if line.expected_qty is not none %}
-          {% set eq = line.expected_qty %}
+      <div class="small text-truncate{{ ' text-danger fw-semibold' if mismatch else ' text-muted' }}" data-expected-label>
+        {% if eq is not none %}
           По накладной: {{ eq | int if eq == eq | int else eq | round(3) }} {{ line.nomenclature.unit }}
+          <span class="{{ '' if mismatch else 'd-none' }}" data-diff-badge>
+            ⚠ {{ '+' if line.qty > eq else '' }}{{ ((line.qty - eq) | int) if (line.qty - eq) == (line.qty - eq) | int else (line.qty - eq) | round(3) }}
+          </span>
         {% endif %}
       </div>
       <div class="d-flex align-items-center gap-2 flex-shrink-0">
         {% set q = line.qty %}
-        <input type="number" inputmode="decimal" step="0.001" min="0" class="form-control form-control-sm qty-input"
+        <input type="number" inputmode="decimal" step="0.001" min="0" class="form-control form-control-sm qty-input{{ ' border-danger' if mismatch else '' }}"
                style="width:5.5em" value="{{ q | int if q == q | int else q | round(3) }}"
                {% if doc.status not in ('draft', 'recounting') %}disabled{% endif %}>
         <div class="form-check form-switch mb-0">
@@ -93,16 +112,21 @@
     <div class="d-flex align-items-center justify-content-end gap-2 mt-1">
       {% if line.box_id %}
         <span class="text-muted small">упаковано в короб — брак не подлежит</span>
+      {% elif line.line_completed_at %}
+        <span class="badge bg-success">Готово</span>
       {% elif can_edit_defect %}
-        <form method="post" action="{{ url_for('receiving.update_defect', doc_id=doc.id, line_id=line.id) }}" class="d-flex align-items-center gap-1">
-          <input type="hidden" name="next" value="confirm">
+        <div class="d-flex align-items-center gap-1">
           <span class="text-muted small">Брак:</span>
-          <input type="number" name="defect_qty" inputmode="decimal" step="0.001" min="0" max="{{ line.qty }}"
+          <input type="number" name="defect_qty_{{ line.id }}" form="sortingCompleteForm" inputmode="decimal" step="0.001" min="0" max="{{ line.qty }}"
                  value="{{ line.defect_qty }}" class="form-control form-control-sm" style="width:4.5em">
-          <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>
-        </form>
+        </div>
       {% else %}
         <span class="text-muted small">Брак: {{ line.defect_qty }}</span>
+      {% endif %}
+      {% if not line.box_id and not line.line_completed_at and can_edit_defect %}
+        <button type="submit" form="sortingCompleteForm" formaction="{{ url_for('receiving.complete_line', doc_id=doc.id, line_id=line.id) }}"
+                class="btn btn-sm btn-outline-success"
+                onclick="return confirm('Завершить строку «{{ line.nomenclature.name }}»? Отменить нельзя.');">✓ Готово</button>
       {% endif %}
     </div>
     {% elif doc.status == 'completed' and line.defect_qty %}
@@ -123,6 +147,32 @@
     const confirmUrl = row.dataset.confirmUrl;
     const qtyInput = row.querySelector(".qty-input");
     const checkbox = row.querySelector(".confirm-checkbox");
+    const expectedLabel = row.querySelector("[data-expected-label]");
+    const diffBadge = row.querySelector("[data-diff-badge]");
+
+    // Подсветка расхождения "по накладной" vs фактически введенного —
+    // сразу по мере ввода, не дожидаясь сохранения (см. save() ниже).
+    function updateMismatch() {
+      if (!qtyInput || row.dataset.expected === "") return;
+      const expected = parseFloat(row.dataset.expected);
+      const actual = parseFloat(qtyInput.value);
+      const mismatch = !Number.isNaN(actual) && actual !== expected;
+      qtyInput.classList.toggle("border-danger", mismatch);
+      if (expectedLabel) {
+        expectedLabel.classList.toggle("text-danger", mismatch);
+        expectedLabel.classList.toggle("fw-semibold", mismatch);
+        expectedLabel.classList.toggle("text-muted", !mismatch);
+      }
+      if (diffBadge) {
+        if (mismatch) {
+          const diff = actual - expected;
+          diffBadge.textContent = "⚠ " + (diff > 0 ? "+" : "") + (Number.isInteger(diff) ? diff : diff.toFixed(3));
+          diffBadge.classList.remove("d-none");
+        } else {
+          diffBadge.classList.add("d-none");
+        }
+      }
+    }
 
     function save() {
       fetch(confirmUrl, {
@@ -139,6 +189,7 @@
         });
     }
 
+    if (qtyInput) qtyInput.addEventListener("input", updateMismatch);
     if (qtyInput) qtyInput.addEventListener("change", save);
     if (checkbox) checkbox.addEventListener("change", save);
   });

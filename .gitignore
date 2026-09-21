@@ -6,6 +6,7 @@ venv/
 instance/*.db
 instance/*.db-shm
 instance/*.db-wal
+instance/*.json
 *.db
 *.db-shm
 *.db-wal

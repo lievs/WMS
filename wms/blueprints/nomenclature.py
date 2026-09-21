@@ -125,6 +125,56 @@ def locate():
 NOMENCLATURE_PAGE_SIZE = 100
 
 
+# Только эти два физических склада — Основной и Склад №2 (Шоссейная 167).
+# Остальные склады в системе — города маркетплейсов (Ozon/WB), это уже
+# конкретная отгрузка, а не остаток "сколько у нас есть на складе"
+# (см. shipment_plan.py, где остаток по ним считается отдельно и иначе).
+_STOCK_WAREHOUSE_NAMES = ("основной", "основной склад", "склад №2 (шоссейная 167)")
+
+
+def _stock_warehouses():
+    return (
+        Warehouse.query.filter(
+            Warehouse.is_active.is_(True),
+            db.func.lower(db.func.trim(Warehouse.name)).in_(_STOCK_WAREHOUSE_NAMES),
+        )
+        .order_by(Warehouse.code)
+        .all()
+    )
+
+
+def _stock_by_item_and_warehouse(item_ids=None, warehouse_ids=None):
+    """{(nomenclature_id, warehouse_id): кол-во} — сумма упакованного в
+    короба и неразмещенного остатка, разложенная по складу. item_ids=None —
+    по всему каталогу сразу (см. export_all), иначе только по перечисленным
+    (список/страница — не тянуть остаток по всему каталогу лишний раз).
+    warehouse_ids=None — по всем складам без ограничения; для остатка в
+    номенклатуре и его выгрузки вызывающий код сам передает id складов из
+    _stock_warehouses(), чтобы не смешивать физический остаток с городами
+    маркетплейсов."""
+    result = {}
+    box_query = (
+        db.session.query(BoxItem.nomenclature_id, Box.warehouse_id, db.func.sum(BoxItem.qty))
+        .join(Box, BoxItem.box_id == Box.id)
+    )
+    unplaced_query = db.session.query(
+        UnplacedStock.nomenclature_id, UnplacedStock.warehouse_id, db.func.sum(UnplacedStock.qty)
+    ).filter(UnplacedStock.qty > 0)
+    if item_ids is not None:
+        box_query = box_query.filter(BoxItem.nomenclature_id.in_(item_ids))
+        unplaced_query = unplaced_query.filter(UnplacedStock.nomenclature_id.in_(item_ids))
+    if warehouse_ids is not None:
+        box_query = box_query.filter(Box.warehouse_id.in_(warehouse_ids))
+        unplaced_query = unplaced_query.filter(UnplacedStock.warehouse_id.in_(warehouse_ids))
+    for nid, wid, qty in box_query.group_by(BoxItem.nomenclature_id, Box.warehouse_id).all():
+        result[(nid, wid)] = result.get((nid, wid), 0) + qty
+    for nid, wid, qty in unplaced_query.group_by(
+        UnplacedStock.nomenclature_id, UnplacedStock.warehouse_id
+    ).all():
+        result[(nid, wid)] = result.get((nid, wid), 0) + qty
+    return result
+
+
 @bp.route("/")
 def list_nomenclature():
     """Каталог может разрастись до тысяч позиций (реальный ассортимент
@@ -152,12 +202,27 @@ def list_nomenclature():
         page=page, per_page=NOMENCLATURE_PAGE_SIZE, error_out=False
     )
     categories = ProductCategory.query.order_by(ProductCategory.name).all()
+
+    # Остаток показываем отдельной колонкой на каждый физический склад
+    # (Основной, Склад №2 (Шоссейная 167)) — считаем только для позиций
+    # текущей страницы, чтобы не тянуть остаток по всему каталогу на
+    # каждую загрузку страницы.
+    stock_warehouses = _stock_warehouses()
+    item_ids = [item.id for item in pagination.items]
+    stock_by_item_warehouse = (
+        _stock_by_item_and_warehouse(item_ids, [wh.id for wh in stock_warehouses])
+        if item_ids
+        else {}
+    )
+
     return render_template(
         "nomenclature/list.html",
         items=pagination.items,
         pagination=pagination,
         q=q,
         categories=categories,
+        stock_warehouses=stock_warehouses,
+        stock_by_item_warehouse=stock_by_item_warehouse,
     )
 
 
@@ -295,8 +360,22 @@ def download_template():
 
 @bp.route("/export.xlsx")
 def export_all():
+    """?warehouse_id= — считать остаток только по этому складу (должен
+    быть одним из _stock_warehouses()); без параметра — суммарно по
+    Основному и Складу №2 (Шоссейная 167) вместе, как и в списке."""
     items = Nomenclature.query.order_by(Nomenclature.name).all()
-    data = export_nomenclature_to_excel(items)
+    stock_warehouses = _stock_warehouses()
+    warehouse_id = request.args.get("warehouse_id", type=int)
+    selected_ids = (
+        [warehouse_id]
+        if warehouse_id and warehouse_id in {wh.id for wh in stock_warehouses}
+        else [wh.id for wh in stock_warehouses]
+    )
+    stock_by_item_warehouse = _stock_by_item_and_warehouse(warehouse_ids=selected_ids)
+    stock_by_item = {}
+    for (nid, _wid), qty in stock_by_item_warehouse.items():
+        stock_by_item[nid] = stock_by_item.get(nid, 0) + qty
+    data = export_nomenclature_to_excel(items, stock_by_item)
     fname = f"nomenclature_{timestamp_for_filename()}.xlsx"
     return Response(
         data,

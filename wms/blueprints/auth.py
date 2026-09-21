@@ -1,6 +1,6 @@
 import secrets
 
-from flask import Blueprint, flash, redirect, render_template, request, url_for
+from flask import Blueprint, flash, redirect, render_template, request, session, url_for
 from flask_login import current_user, login_required, login_user, logout_user
 
 from ..extensions import db
@@ -26,6 +26,7 @@ def login():
         return render_template("auth/login.html", username=username)
 
     login_user(user, remember=True)
+    session["session_version"] = user.session_version or 0
     next_url = request.args.get("next")
     return redirect(next_url or url_for("main.index"))
 
@@ -60,19 +61,11 @@ def users():
     all_users = User.query.order_by(User.username).all()
     warehouses = Warehouse.query.order_by(Warehouse.code).all()
 
-    # Склад 1С настраивается отдельно на каждый склад-город маркетплейса
-    # (не по городу целиком) — одна и та же площадка одного города может
-    # возить на разные склады 1С в зависимости от маркетплейса (например,
-    # ВБ Краснодар едет на СЦ, а ОЗОН Краснодар — на фулфилмент), см.
-    # warehouses.update_fulfillment_1c_name.
-    fulfillment_warehouses = [wh for wh in warehouses if wh.marketplace is not None]
-
     return render_template(
         "auth/users.html",
         users=all_users,
         sections=SECTIONS,
         warehouses=warehouses,
-        fulfillment_warehouses=fulfillment_warehouses,
         shipping_label_sender=get_shipping_label_sender_override(),
     )
 
@@ -114,6 +107,33 @@ def create_user():
     flash(
         f"Пользователь «{username}» создан. Временный пароль: {temp_password} "
         f"— сообщите его пользователю, он сможет сменить пароль после входа.",
+        "success",
+    )
+    return redirect(url_for("auth.users"))
+
+
+@bp.route("/users/<int:user_id>/toggle-admin", methods=["POST"])
+@login_required
+def toggle_admin(user_id):
+    """Права администратора (полный доступ ко всем разделам и функциям
+    независимо от role/allowed_sections, см. User.is_admin) — раньше
+    ставились только при создании пользователя (чекбокс в форме выше),
+    поменять их существующему пользователю было нельзя вообще. Нельзя
+    менять собственные права — этим гарантируется, что администратор,
+    выполняющий действие, сам остается администратором, то есть хотя бы
+    один администратор в системе есть всегда."""
+    if not _require_admin():
+        return redirect(url_for("main.index"))
+
+    user = User.query.get_or_404(user_id)
+    if user.id == current_user.id:
+        flash("Нельзя изменить права администратора у самого себя — попросите другого администратора", "danger")
+        return redirect(url_for("auth.users"))
+
+    user.is_admin = not user.is_admin
+    db.session.commit()
+    flash(
+        f"Права администратора для «{user.username}» {'выданы' if user.is_admin else 'сняты'}",
         "success",
     )
     return redirect(url_for("auth.users"))
@@ -184,6 +204,10 @@ def update_sections(user_id):
     # редактирование номенклатуры и при "полном доступе ко всем разделам"
     # (просмотр номенклатуры при этом остается).
     user.nomenclature_edit_allowed = request.form.get("nomenclature_edit") == "on"
+    user.warehouse_mapping_allowed = request.form.get("warehouse_mapping") == "on"
+    user.invoice_receiving_view_allowed = request.form.get("invoice_receiving_view") == "on"
+    user.movement_view_allowed = request.form.get("movement_view") == "on"
+    user.movement_complete_allowed = request.form.get("movement_complete") == "on"
     db.session.commit()
     flash(f"Доступ к разделам для «{user.username}» обновлен", "success")
     return redirect(url_for("auth.users"))
@@ -216,6 +240,98 @@ def reset_password(user_id):
     user.set_password(temp_password)
     db.session.commit()
     flash(f"Новый временный пароль для «{user.username}»: {temp_password}", "success")
+    return redirect(url_for("auth.users"))
+
+
+@bp.route("/users/<int:user_id>/set-password", methods=["POST"])
+@login_required
+def set_password(user_id):
+    """В отличие от reset_password (случайный временный пароль), здесь
+    администратор задает пароль сам — например, чтобы сразу сообщить
+    пользователю знакомый ему пароль."""
+    if not _require_admin():
+        return redirect(url_for("main.index"))
+
+    user = User.query.get_or_404(user_id)
+    new_password = request.form.get("password", "")
+    if len(new_password) < 4:
+        flash("Пароль слишком короткий (минимум 4 символа)", "danger")
+        return redirect(url_for("auth.users"))
+
+    user.set_password(new_password)
+    db.session.commit()
+    flash(f"Пароль для «{user.username}» изменен", "success")
+    return redirect(url_for("auth.users"))
+
+
+@bp.route("/users/<int:user_id>/username", methods=["POST"])
+@login_required
+def update_username(user_id):
+    if not _require_admin():
+        return redirect(url_for("main.index"))
+
+    user = User.query.get_or_404(user_id)
+    new_username = request.form.get("username", "").strip()
+    if not new_username:
+        flash("Укажите логин", "danger")
+        return redirect(url_for("auth.users"))
+
+    if User.query.filter(User.username == new_username, User.id != user.id).first():
+        flash(f"Логин «{new_username}» уже занят", "danger")
+        return redirect(url_for("auth.users"))
+
+    old_username = user.username
+    user.username = new_username
+    db.session.commit()
+    flash(f"Логин «{old_username}» изменен на «{new_username}»", "success")
+    return redirect(url_for("auth.users"))
+
+
+@bp.route("/users/<int:user_id>/delete", methods=["POST"])
+@login_required
+def delete_user(user_id):
+    """Удаляет пользователя целиком (не путать с toggle_user — тем
+    отключают вход, оставляя историю документов при авторе). В документах,
+    где этот пользователь был автором, поле "Автор" после удаления просто
+    станет пустым — сами документы никуда не деваются (created_by_id везде
+    nullable и во всех шаблонах отображается через "{% if doc.created_by %}",
+    без него не отображается)."""
+    if not _require_admin():
+        return redirect(url_for("main.index"))
+
+    user = User.query.get_or_404(user_id)
+    if user.id == current_user.id:
+        flash("Нельзя удалить самого себя", "danger")
+        return redirect(url_for("auth.users"))
+
+    username = user.username
+    db.session.delete(user)
+    db.session.commit()
+    flash(f"Пользователь «{username}» удален", "success")
+    return redirect(url_for("auth.users"))
+
+
+@bp.route("/users/<int:user_id>/revoke-sessions", methods=["POST"])
+@login_required
+def revoke_sessions(user_id):
+    """Завершает ранее выданные сессии пользователя.
+
+    Для самого администратора сохраняем текущий вход, поэтому кнопка на его
+    строке действительно завершает сессии только на других устройствах.
+    Для другого пользователя завершаются все его текущие входы.
+    """
+    if not _require_admin():
+        return redirect(url_for("main.index"))
+
+    user = User.query.get_or_404(user_id)
+    user.session_version = (user.session_version or 0) + 1
+    db.session.commit()
+
+    if user.id == current_user.id:
+        session["session_version"] = user.session_version
+        flash("Сессии администратора на других устройствах завершены", "success")
+    else:
+        flash(f"Все активные сессии пользователя «{user.username}» завершены", "success")
     return redirect(url_for("auth.users"))
 
 

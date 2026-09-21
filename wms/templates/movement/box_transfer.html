@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Перенос между коробами{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('movement.list_documents') }}">&larr; Перемещения</a></p>
+<h3 class="mb-4">Перенос из короба в короб</h3>
+
+<div class="card p-3 mb-4">
+  <h5>Исходный короб</h5>
+  <form method="get" action="{{ url_for('movement.box_transfer') }}" class="d-flex gap-2" style="max-width:560px">
+    <input type="text" name="source_box_number" id="sourceBoxInput" class="form-control form-control-lg"
+           value="{{ source_box_number }}" placeholder="Отсканируйте или введите номер" required autofocus>
+    <button type="button" class="btn btn-outline-primary" data-camera-scan-target="#sourceBoxInput" title="Сканировать камерой">📷</button>
+    <button type="submit" class="btn btn-primary">Показать</button>
+  </form>
+  {% if source_not_found %}<div class="alert alert-danger mt-3 mb-0">Короб «{{ source_box_number }}» не найден.</div>{% endif %}
+</div>
+
+{% if source_box %}
+<div class="card p-3">
+  <h5>{{ source_box.box_number }}</h5>
+  <div class="text-muted small mb-3">Склад: {{ source_box.warehouse.name }}{% if source_box.cell %} · Ячейка: {{ source_box.cell.code }}{% endif %}</div>
+  <table class="table table-sm align-middle">
+    <thead><tr><th>Товар</th><th>В коробе</th><th>Короб-получатель</th><th>Перенести</th><th></th></tr></thead>
+    <tbody>
+    {% for it in items %}
+      <form id="transferItem{{ it.id }}" method="post" action="{{ url_for('movement.transfer_box_item', item_id=it.id) }}" hidden>
+        <input type="hidden" name="source_box_id" value="{{ source_box.id }}">
+      </form>
+      <tr>
+        <td>{{ it.nomenclature.name }} <span class="text-muted">({{ it.nomenclature.sku }})</span></td>
+        <td>{{ it.qty }} {{ it.nomenclature.unit }}</td>
+        <td>
+          <div class="d-flex gap-1">
+            <input form="transferItem{{ it.id }}" type="text" name="target_box_number" id="targetBox{{ it.id }}" class="form-control" placeholder="Номер короба" required>
+            <button type="button" class="btn btn-outline-primary" data-camera-scan-target="#targetBox{{ it.id }}" title="Сканировать камерой">📷</button>
+          </div>
+        </td>
+        <td><input form="transferItem{{ it.id }}" type="number" name="qty" step="0.001" min="0.001" max="{{ it.qty }}" value="{{ it.qty }}" class="form-control" style="max-width:110px" required></td>
+        <td><button form="transferItem{{ it.id }}" type="submit" class="btn btn-primary">Перенести</button></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="text-muted">Короб пуст</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}
