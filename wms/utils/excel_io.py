@@ -467,6 +467,77 @@ INVENTORY_HEADERS = [
 ]
 
 
+BOXES_SHEET_HEADERS = [
+    "Номер короба",
+    "Статус",
+    "Место",
+    "Позиций",
+    "Штук всего",
+    "Создан",
+]
+
+_EXCEL_SHEET_NAME_FORBIDDEN = set('[]:*?/\\')
+
+
+def _safe_sheet_name(name, used_names):
+    """Имя листа Excel не может быть длиннее 31 символа и не может
+    содержать [ ] : * ? / \\ (см. чат — название склада может быть длинным
+    или содержать что угодно) — обрезаем и вычищаем запрещенные символы,
+    а при совпадении после обрезки добавляем счетчик, чтобы не потерять
+    один из складов молча (openpyxl иначе просто откажется создать лист
+    с повторным именем)."""
+    cleaned = "".join(ch for ch in (name or "Склад") if ch not in _EXCEL_SHEET_NAME_FORBIDDEN).strip()
+    cleaned = cleaned[:31] or "Склад"
+    candidate = cleaned
+    suffix = 2
+    while candidate.lower() in used_names:
+        tail = f" ({suffix})"
+        candidate = cleaned[: 31 - len(tail)] + tail
+        suffix += 1
+    used_names.add(candidate.lower())
+    return candidate
+
+
+def export_boxes_to_excel(boxes) -> bytes:
+    """Список непустых коробов, разбитых по складам (см. чат) — отдельный
+    лист на каждый склад-отправитель коробов, чтобы сразу видеть остаток
+    по конкретному складу, не листая общий список. boxes — уже
+    отфильтрованные непустые короба (см. boxes.export_boxes), в любом
+    порядке; здесь только группируются по складу и сортируются внутри
+    склада по номеру."""
+    boxes_by_warehouse = {}
+    for box in boxes:
+        boxes_by_warehouse.setdefault(box.warehouse, []).append(box)
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    used_sheet_names = set()
+    status_map = {"open": "Открыт", "stored": "Расставлен"}
+
+    for warehouse in sorted(boxes_by_warehouse.keys(), key=lambda wh: wh.code if wh else ""):
+        ws = wb.create_sheet(_safe_sheet_name(warehouse.name if warehouse else "Без склада", used_sheet_names))
+        _style_header(ws, BOXES_SHEET_HEADERS)
+        for box in sorted(boxes_by_warehouse[warehouse], key=lambda b: b.box_number):
+            ws.append(
+                [
+                    box.box_number,
+                    status_map.get(box.status, box.status),
+                    box.location_label() or "",
+                    box.items.count(),
+                    box.total_qty(),
+                    box.created_at.strftime("%Y-%m-%d %H:%M") if box.created_at else "",
+                ]
+            )
+
+    if not wb.sheetnames:
+        ws = wb.create_sheet("Короба")
+        _style_header(ws, BOXES_SHEET_HEADERS)
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
 def export_inventory_to_excel(documents) -> bytes:
     wb = Workbook()
     ws = wb.active

@@ -1,8 +1,10 @@
-from flask import Blueprint, flash, redirect, render_template, request, url_for
+from flask import Blueprint, Response, flash, redirect, render_template, request, url_for
 from flask_login import current_user
 
 from ..extensions import db
 from ..models import Box, BoxItem, Nomenclature, Warehouse
+from ..utils.excel_io import export_boxes_to_excel, timestamp_for_filename
+from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 from .movement import flag_movement_dirty_for_box
 
@@ -47,6 +49,31 @@ def list_boxes():
         warehouse_id=warehouse_id,
         query_text=query_text,
         item_counts=item_counts,
+    )
+
+
+@bp.route("/export.xlsx")
+def export_boxes():
+    """Список непустых коробов, разбитых по складам — отдельный лист на
+    каждый склад (см. чат). В отличие от list_boxes() здесь нет лимита в
+    500 строк и не учитывается текстовый поиск по номеру (это полная
+    выгрузка остатка, а не то, что физически видно на экране) — только
+    фильтр по складу, если он выбран в списке."""
+    warehouse_id = request.args.get("warehouse_id", type=int)
+
+    non_empty_box_ids_query = db.session.query(BoxItem.box_id).join(Box, BoxItem.box_id == Box.id).distinct()
+    if warehouse_id:
+        non_empty_box_ids_query = non_empty_box_ids_query.filter(Box.warehouse_id == warehouse_id)
+    box_ids = [row[0] for row in non_empty_box_ids_query.all()]
+
+    boxes = Box.query.filter(Box.id.in_(box_ids)).all() if box_ids else []
+
+    data = export_boxes_to_excel(boxes)
+    fname = f"boxes_{timestamp_for_filename()}.xlsx"
+    return Response(
+        data,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": content_disposition(fname)},
     )
 
 

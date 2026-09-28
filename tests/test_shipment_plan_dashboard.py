@@ -687,3 +687,172 @@ def test_picking_list_has_collapse_all_groups_toggle(db, client_logged_in):
 
     assert 'data-picking-collapse-all="picking"' in html
     assert "Свернуть все группы" in html
+
+
+def test_ready_to_ship_box_count_deduplicates_mixed_box_within_group(db, client_logged_in):
+    """Один физический короб с двумя размерами одной модели+цвета должен
+    посчитаться как ОДИН короб при сворачивании в группу "Цвет" — а не как
+    два (по разу на каждый размер, см. чат: "проверь насколько правильно
+    он считает кол-во коробов")."""
+    from wms.models import Box, BoxItem, Nomenclature, ShipmentPlan, ShipmentPlanLine, Warehouse
+
+    main = Warehouse(code="WH-BOXCOUNT1", name="Основной склад")
+    city = Warehouse(code="WH-BOXCOUNT2", name="ОЗОН: Город", marketplace="ozon", marketplace_city="Город")
+    db.session.add_all([main, city])
+    db.session.commit()
+
+    item_s = Nomenclature(sku="SKU-BC-S", barcode="7770000601", name="Товар", unit="шт", size="S")
+    item_m = Nomenclature(sku="SKU-BC-M", barcode="7770000602", name="Товар", unit="шт", size="M")
+    db.session.add_all([item_s, item_m])
+    db.session.commit()
+
+    plan = ShipmentPlan(marketplace="ozon")
+    db.session.add(plan)
+    db.session.commit()
+    db.session.add_all(
+        [
+            ShipmentPlanLine(
+                plan_id=plan.id, warehouse_id=city.id, nomenclature_id=item_s.id,
+                barcode=item_s.barcode, article="Модель_цветБокс", size="S", planned_qty=10,
+            ),
+            ShipmentPlanLine(
+                plan_id=plan.id, warehouse_id=city.id, nomenclature_id=item_m.id,
+                barcode=item_m.barcode, article="Модель_цветБокс", size="M", planned_qty=10,
+            ),
+        ]
+    )
+    db.session.commit()
+
+    # Оба размера — В ОДНОМ И ТОМ ЖЕ коробе.
+    box = Box(box_number="BOX-BOXCOUNT-MIX", warehouse_id=main.id, status="open")
+    db.session.add(box)
+    db.session.commit()
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item_s.id, qty=3))
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item_m.id, qty=4))
+    db.session.commit()
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    color_idx = html.find("Цвет: цветБокс")
+    assert color_idx != -1
+    snippet = html[color_idx : color_idx + 1500]
+    # Суммарно 3+4=7 штук в ОДНОМ коробе — не в двух.
+    assert "(1)" in snippet
+    assert "(2)" not in snippet
+
+
+def test_split_article_model_color_handles_slash_separator(db):
+    """Цвет в артикуле может идти и через '_' (Альма_2горла_бордо), и через
+    '/' (ВзрослаяБазовая/белая, см. чат) — оба варианта должны
+    группироваться как модель+цвет, а не как одна большая "модель" без
+    цвета."""
+    from wms.blueprints.shipment_plan import _split_article_model_color
+
+    assert _split_article_model_color("Альма_2горла_бордо") == ("Альма_2горла", "бордо")
+    assert _split_article_model_color("ВзрослаяБазовая/белая") == ("ВзрослаяБазовая", "белая")
+    assert _split_article_model_color("Горшок") == ("Горшок", "")
+    assert _split_article_model_color("") == ("", "")
+    assert _split_article_model_color(None) == ("", "")
+
+
+def test_picking_groups_merge_slash_separated_colors_under_one_model(db, client_logged_in):
+    """"ВзрослаяБазовая/белая" и "ВзрослаяБазовая/голубой" — один и тот же
+    товар (модель) в разных цветах, должны попасть в ОДНУ группу модели с
+    двумя подгруппами цвета — не в две отдельные "модели" без цвета (см.
+    скриншот в чате)."""
+    from wms.models import Nomenclature, ShipmentPlan, ShipmentPlanLine, Warehouse
+
+    city = Warehouse(code="WH-SLASH1", name="ОЗОН: Город", marketplace="ozon", marketplace_city="Город")
+    db.session.add(city)
+    db.session.commit()
+
+    item_white = Nomenclature(sku="SKU-SLASH-W", barcode="7770000701", name="Товар белый", unit="шт")
+    item_blue = Nomenclature(sku="SKU-SLASH-B", barcode="7770000702", name="Товар голубой", unit="шт")
+    db.session.add_all([item_white, item_blue])
+    db.session.commit()
+
+    plan = ShipmentPlan(marketplace="ozon")
+    db.session.add(plan)
+    db.session.commit()
+    db.session.add_all(
+        [
+            ShipmentPlanLine(
+                plan_id=plan.id, warehouse_id=city.id, nomenclature_id=item_white.id,
+                barcode=item_white.barcode, article="ВзрослаяБазовая/белая", planned_qty=5,
+            ),
+            ShipmentPlanLine(
+                plan_id=plan.id, warehouse_id=city.id, nomenclature_id=item_blue.id,
+                barcode=item_blue.barcode, article="ВзрослаяБазовая/голубой", planned_qty=5,
+            ),
+        ]
+    )
+    db.session.commit()
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    # Ровно ОДИН заголовок-модель "ВзрослаяБазовая" (а не два — по одному
+    # на каждый цвет, как было бы без разбора '/'), с двумя подгруппами
+    # цвета внутри. Полный артикул при этом остается в data-search-text
+    # (нужен для поиска), просто больше не показывается как модель.
+    assert html.count('data-group-level="model" data-group-model="ВзрослаяБазовая"') == 1
+    assert "Цвет: белая" in html
+    assert "Цвет: голубой" in html
+
+
+def test_split_article_model_color_matches_known_color_without_separator(db):
+    """Цвет может идти слитно, без какого-либо разделителя ("К-тSmileбелый")
+    — распознается по словарю известных цветов (см. чат), включая
+    сокращения/усечения ("бор" вместо "бордо", "олив" вместо "оливковый")."""
+    from wms.blueprints.shipment_plan import _split_article_model_color
+
+    assert _split_article_model_color("К-тSmileбелый") == ("К-тSmile", "белый")
+    assert _split_article_model_color("К-тSmileголубой") == ("К-тSmile", "голубой")
+    assert _split_article_model_color("К-тSmileкорич") == ("К-тSmile", "коричневый")
+    assert _split_article_model_color("К-тSmileярко-оранжевый") == ("К-тSmile", "оранжевый")
+    assert _split_article_model_color("К-тНатали01бордо") == ("К-тНатали01", "бордовый")
+    assert _split_article_model_color("К-тНатали01горчичный") == ("К-тНатали01", "горчичный")
+    # Товар без узнаваемого цвета остается моделью без цвета, как раньше.
+    assert _split_article_model_color("К-тSmТыковка") == ("К-тSmТыковка", "")
+    assert _split_article_model_color("докер") == ("докер", "")
+    # '_'-разделитель по-прежнему в приоритете над словарем цветов.
+    assert _split_article_model_color("джемпер_жен_молочный_в_беж") == ("джемпер_жен_молочный_в", "беж")
+    assert _split_article_model_color("джемпер_жен_молочный_в_бодро") == ("джемпер_жен_молочный_в", "бодро")
+
+
+def test_picking_groups_merge_no_separator_colors_under_one_model(db, client_logged_in):
+    """"К-тSmileбелый" и "К-тSmileголубой" — один и тот же товар в разных
+    цветах без какого-либо разделителя, должны объединиться в одну группу
+    модели "К-тSmile" с двумя подгруппами цвета."""
+    from wms.models import Nomenclature, ShipmentPlan, ShipmentPlanLine, Warehouse
+
+    city = Warehouse(code="WH-NOSEP1", name="ОЗОН: Город", marketplace="ozon", marketplace_city="Город")
+    db.session.add(city)
+    db.session.commit()
+
+    item_white = Nomenclature(sku="SKU-NOSEP-W", barcode="7770000801", name="Товар белый", unit="шт")
+    item_blue = Nomenclature(sku="SKU-NOSEP-B", barcode="7770000802", name="Товар голубой", unit="шт")
+    db.session.add_all([item_white, item_blue])
+    db.session.commit()
+
+    plan = ShipmentPlan(marketplace="ozon")
+    db.session.add(plan)
+    db.session.commit()
+    db.session.add_all(
+        [
+            ShipmentPlanLine(
+                plan_id=plan.id, warehouse_id=city.id, nomenclature_id=item_white.id,
+                barcode=item_white.barcode, article="К-тSmileбелый", planned_qty=5,
+            ),
+            ShipmentPlanLine(
+                plan_id=plan.id, warehouse_id=city.id, nomenclature_id=item_blue.id,
+                barcode=item_blue.barcode, article="К-тSmileголубой", planned_qty=5,
+            ),
+        ]
+    )
+    db.session.commit()
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    assert html.count('data-group-level="model" data-group-model="К-тSmile"') == 1
+    assert "Цвет: белый" in html
+    assert "Цвет: голубой" in html

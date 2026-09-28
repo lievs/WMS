@@ -669,43 +669,120 @@ def _stock_by_nomenclature(warehouse_ids):
 
 
 def _ready_to_ship_by_warehouse_and_nomenclature(warehouse_ids):
-    """{(warehouse_id, nomenclature_id): {"qty": сумма, "boxes": число коробов}}
+    """{(warehouse_id, nomenclature_id): {"qty": сумма, "box_ids": set(id коробов)}}
     — то же "готово к отгрузке" (упаковано в короб), что и в
     _stock_by_nomenclature, но не суммарно по всем складам-отправителям
-    сразу, а отдельно по каждому складу, плюс число коробов — чтобы в
-    таблице плана отгрузок показать, где именно лежит остаток и в скольких
-    коробах (см. чат: колонка "Готово к отгрузке" разбивается на Основной
-    склад / Склад №2)."""
+    сразу, а отдельно по каждому складу, плюс сами ID коробов (а не готовое
+    число) — чтобы в таблице плана отгрузок показать, где именно лежит
+    остаток и в скольких коробах (см. чат: колонка "Готово к отгрузке"
+    разбивается на Основной склад / Склад №2).
+
+    Именно набор ID, а не COUNT(DISTINCT) агрегатом — короб с несколькими
+    размерами/цветами одной модели должен посчитаться ОДИН раз при
+    сворачивании строк в группу (см. _group_picking_list), а не по разу на
+    каждый размер: короба с разным содержимым — обычное дело (BoxItem
+    допускает несколько позиций на один box_id), простое суммирование
+    готовых чисел по позициям завысило бы итог группы/шапки."""
     if not warehouse_ids:
         return {}
     rows = (
         db.session.query(
             Box.warehouse_id,
             BoxItem.nomenclature_id,
+            BoxItem.box_id,
             func.sum(BoxItem.qty),
-            func.count(func.distinct(Box.id)),
         )
-        .join(BoxItem, BoxItem.box_id == Box.id)
+        .join(Box, BoxItem.box_id == Box.id)
         .filter(Box.warehouse_id.in_(warehouse_ids))
-        .group_by(Box.warehouse_id, BoxItem.nomenclature_id)
+        .group_by(Box.warehouse_id, BoxItem.nomenclature_id, BoxItem.box_id)
         .all()
     )
-    return {
-        (warehouse_id, nomenclature_id): {"qty": qty or 0, "boxes": boxes or 0}
-        for warehouse_id, nomenclature_id, qty, boxes in rows
-    }
+    result = {}
+    for warehouse_id, nomenclature_id, box_id, qty in rows:
+        entry = result.setdefault((warehouse_id, nomenclature_id), {"qty": 0, "box_ids": set()})
+        entry["qty"] += qty or 0
+        entry["box_ids"].add(box_id)
+    return result
+
+
+# Известные цвета и их сокращения/варианты написания (см. чат) —
+# нужны, чтобы разобрать цвет, слитно приписанный к названию модели без
+# разделителя ("К-тSmileбелый") или сокращенный/усеченный ("бор" вместо
+# "бордо", "олив" вместо "оливковый"). Список собран по значениям,
+# реально встречающимся в артикулах плана — не исчерпывающий; то, что не
+# удалось опознать, остается частью модели без цвета, как и раньше
+# (безопасное поведение при промахе). Ключ — канонический цвет, под ним
+# группируются все его варианты написания.
+_COLOR_VARIANTS = {
+    "бежевый": ("бежевый", "беж"),
+    "белый": ("белый", "белая", "бел"),
+    "бордовый": ("бордовый", "бордовая", "бордо", "бодро", "бор"),
+    "голубой": ("голубой", "голубая", "гол"),
+    "горчичный": ("горчичный", "горчичная", "горч"),
+    "графит": ("графит", "графитовый"),
+    "зеленый": ("зеленый", "зелёный", "зеленая", "зелёная", "зел"),
+    "коричневый": ("коричневый", "коричневая", "корич", "кор"),
+    "кофейный": ("кофейный", "кофейная", "кофе"),
+    "красный": ("красный", "красная", "красн"),
+    "лимонный": ("лимонный", "лимонная", "лимон"),
+    "малиновый": ("малиновый", "малиновая", "малина"),
+    "молочный": ("молочный", "молочная", "молоко"),
+    "оливковый": ("оливковый", "оливковая", "оливка", "олив"),
+    "оранжевый": ("ярко-оранжевый", "оранжевый", "оранжевая", "оранж"),
+    "розовый": ("розовый", "розовая", "роз"),
+    "серый": ("серый", "серая", "сер"),
+    "терракот": ("терракотовый", "терракот"),
+    "фиолетовый": ("фиолетовый", "фиолетовая", "фиолет"),
+    "хаки": ("хаки",),
+    "черный": ("черный", "чёрный", "черная", "чёрная", "черн"),
+    "шоколад": ("шоколадный", "шоколад"),
+}
+
+# Все варианты вперемешку, длинные — первыми: иначе короткое "бел" могло
+# бы совпасть раньше, чем полное "белый", и отрезать лишнее.
+_COLOR_SUFFIXES = sorted(
+    ((variant, canonical) for canonical, variants in _COLOR_VARIANTS.items() for variant in variants),
+    key=lambda pair: len(pair[0]),
+    reverse=True,
+)
+
+
+def _match_color_suffix(text):
+    """Если строка заканчивается известным цветом или его сокращением без
+    какого-либо разделителя (см. _COLOR_VARIANTS) — возвращает (модель,
+    цвет), иначе None. Само совпадение регистронезависимое, но в модель
+    попадает исходный текст без изменений."""
+    lowered = text.lower()
+    for variant, canonical in _COLOR_SUFFIXES:
+        if len(text) > len(variant) and lowered.endswith(variant):
+            return text[: len(text) - len(variant)], canonical
+    return None
 
 
 def _split_article_model_color(article):
-    """Разбирает артикул вида "Альма_2горла_бордо" на модель
-    ("Альма_2горла") и цвет ("бордо") — цвет всегда последний '_'-сегмент
-    артикула (см. чат). Артикул без '_' считается моделью без цвета —
-    остается как есть, цвет пустой."""
+    """Разбирает артикул на модель и цвет для группировки на дашборде (см.
+    чат). Порядок попыток:
+    1. '/' — однозначный разделитель цвета: "ВзрослаяБазовая/белая" →
+       модель "ВзрослаяБазовая", цвет "белая".
+    2. '_' — цвет всегда последний сегмент: "Альма_2горла_бордо" → модель
+       "Альма_2горла", цвет "бордо". Приоритет у '/' над '_', если
+       встретились оба — '/' используется только как разделитель цвета,
+       тогда как '_' может быть частью самого названия модели.
+    3. Без разделителя — по словарю известных цветов и их сокращений
+       (см. _match_color_suffix): "К-тSmileбелый" → модель "К-тSmile",
+       цвет "белый".
+    Ничего не подошло — считается моделью без цвета, как есть."""
     text = (article or "").strip()
-    if "_" not in text:
-        return text, ""
-    model, _sep, color = text.rpartition("_")
-    return model, color
+    if "/" in text:
+        model, _sep, color = text.rpartition("/")
+        return model, color
+    if "_" in text:
+        model, _sep, color = text.rpartition("_")
+        return model, color
+    matched = _match_color_suffix(text)
+    if matched:
+        return matched
+    return text, ""
 
 
 def _unplaced_by_nomenclature(warehouse_ids):
@@ -839,8 +916,14 @@ def _group_picking_list(picking_list, sender_warehouses, ozon_cities, wb_cities)
             "total_remaining": 0.0,
             "unplaced": 0.0,
             "ready_to_ship": 0.0,
+            # box_ids — набор, не число: короб с несколькими размерами/
+            # цветами одной модели должен войти в группу ОДИН раз, а не по
+            # разу на каждый размер (см. _ready_to_ship_by_warehouse_and_
+            # nomenclature). В "boxes" (готовое число для шаблона)
+            # превращается только в _finalize_totals, после того как все
+            # позиции группы добавлены.
             "ready_to_ship_by_warehouse": [
-                {"warehouse": wh, "qty": 0.0, "boxes": 0} for wh in sender_warehouses
+                {"warehouse": wh, "qty": 0.0, "box_ids": set(), "boxes": 0} for wh in sender_warehouses
             ],
             "in_transit_total": 0.0,
             "ozon": {city: {"remaining": 0.0, "in_transit": 0.0} for city in ozon_cities},
@@ -855,7 +938,7 @@ def _group_picking_list(picking_list, sender_warehouses, ozon_cities, wb_cities)
         totals["ready_to_ship"] += item["ready_to_ship"]
         for i, entry in enumerate(item["ready_to_ship_by_warehouse"]):
             totals["ready_to_ship_by_warehouse"][i]["qty"] += entry["qty"]
-            totals["ready_to_ship_by_warehouse"][i]["boxes"] += entry["boxes"]
+            totals["ready_to_ship_by_warehouse"][i]["box_ids"] |= entry["box_ids"]
         totals["in_transit_total"] += item["in_transit_total"]
         for city, line in item["ozon"].items():
             totals["ozon"][city]["remaining"] += line.remaining_qty()
@@ -865,6 +948,10 @@ def _group_picking_list(picking_list, sender_warehouses, ozon_cities, wb_cities)
             totals["wb"][city]["in_transit"] += line.in_transit_qty
         if item["no_stock"]:
             totals["no_stock_count"] += 1
+
+    def _finalize_totals(totals):
+        for entry in totals["ready_to_ship_by_warehouse"]:
+            entry["boxes"] = len(entry["box_ids"])
 
     models = {}
     for item in picking_list:
@@ -891,6 +978,8 @@ def _group_picking_list(picking_list, sender_warehouses, ozon_cities, wb_cities)
         ]
         for color_group in model_group["colors"]:
             color_group["products"].sort(key=lambda p: p["size"] or "")
+            _finalize_totals(color_group["totals"])
+        _finalize_totals(model_group["totals"])
         ordered.append(model_group)
     return ordered
 
@@ -1062,17 +1151,23 @@ def _dashboard_context():
                     # То же "готово к отгрузке", но раздельно по каждому
                     # складу-отправителю, с числом коробов — см. чат: в
                     # таблице колонка разбивается на Основной склад / Склад
-                    # №2. Порядок совпадает с sender_warehouses.
+                    # №2. Порядок совпадает с sender_warehouses. box_ids —
+                    # набор ID (не готовое число), чтобы при сворачивании в
+                    # группу (_group_picking_list) один и тот же короб с
+                    # несколькими размерами/цветами этой модели не
+                    # посчитался несколько раз — boxes здесь просто len()
+                    # для отображения самой строки.
                     "ready_to_ship_by_warehouse": [
                         {
                             "warehouse": wh,
                             "qty": ready_by_warehouse.get((wh.id, line.nomenclature_id), {}).get("qty", 0),
-                            "boxes": ready_by_warehouse.get((wh.id, line.nomenclature_id), {}).get("boxes", 0),
+                            "box_ids": ready_by_warehouse.get((wh.id, line.nomenclature_id), {}).get("box_ids", set()),
+                            "boxes": len(ready_by_warehouse.get((wh.id, line.nomenclature_id), {}).get("box_ids", ())),
                         }
                         for wh in sender_warehouses
                     ]
                     if line.nomenclature_id is not None
-                    else [{"warehouse": wh, "qty": 0, "boxes": 0} for wh in sender_warehouses],
+                    else [{"warehouse": wh, "qty": 0, "box_ids": set(), "boxes": 0} for wh in sender_warehouses],
                     "ozon": {},
                     "wb": {},
                     "max_remaining": 0,
@@ -1161,11 +1256,19 @@ def _dashboard_context():
         "total_remaining": sum(p["total_remaining"] for p in picking_list),
         "unplaced": sum(p["unplaced"] for p in picking_list),
         "ready_to_ship": sum(p["ready_to_ship"] for p in picking_list),
+        # boxes — через объединение множеств ID коробов по всем позициям
+        # (не сумма готовых чисел): короб с несколькими товарами внутри
+        # иначе посчитался бы в итоге по разу за каждый (см. чат и
+        # _group_picking_list._add выше — та же причина).
         "ready_to_ship_by_warehouse": [
             {
                 "warehouse": wh,
                 "qty": sum(p["ready_to_ship_by_warehouse"][i]["qty"] for p in picking_list),
-                "boxes": sum(p["ready_to_ship_by_warehouse"][i]["boxes"] for p in picking_list),
+                "boxes": len(
+                    set().union(*(p["ready_to_ship_by_warehouse"][i]["box_ids"] for p in picking_list))
+                )
+                if picking_list
+                else 0,
             }
             for i, wh in enumerate(sender_warehouses)
         ],
