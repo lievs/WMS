@@ -622,3 +622,68 @@ def test_picking_list_ignores_plain_draft_receiving_without_invoice(db, client_l
     idx = html.find("ART-1")
     snippet = html[idx : idx + 3000]
     assert ">9<" not in snippet
+
+
+def test_ready_to_ship_split_only_for_the_two_named_sender_warehouses(db, client_logged_in):
+    """Колонки "Готово к отгрузке" разбиваются только на "Основной склад" и
+    "Склад №2 (Шоссейная 167)" (см. чат) — а не на любой склад-отправитель.
+    Остаток на постороннем складе-отправителе (например, цех/производство)
+    по-прежнему учитывается в общем "Не хватает по плану", но своей
+    колонки не получает."""
+    from wms.models import Box, BoxItem, Nomenclature, ShipmentPlan, ShipmentPlanLine, Warehouse
+
+    main = Warehouse(code="WH-RTS1", name="Основной склад")
+    secondary = Warehouse(code="WH-RTS2", name="Склад №2 (Шоссейная 167)")
+    other = Warehouse(code="WH-RTS3", name="Цех раскроя")
+    city = Warehouse(code="WH-RTS4", name="ОЗОН: Город", marketplace="ozon", marketplace_city="Город")
+    db.session.add_all([main, secondary, other, city])
+    db.session.commit()
+
+    item = Nomenclature(sku="SKU-RTS1", barcode="7770000555", name="Товар", unit="шт")
+    db.session.add(item)
+    db.session.commit()
+
+    plan = ShipmentPlan(marketplace="ozon")
+    db.session.add(plan)
+    db.session.commit()
+    db.session.add(
+        ShipmentPlanLine(
+            plan_id=plan.id,
+            warehouse_id=city.id,
+            nomenclature_id=item.id,
+            barcode=item.barcode,
+            article="ART-RTS",
+            planned_qty=30,
+        )
+    )
+    db.session.commit()
+
+    for wh, box_number, qty in ((main, "BOX-RTS-MAIN", 4), (secondary, "BOX-RTS-SEC", 5), (other, "BOX-RTS-OTHER", 6)):
+        box = Box(box_number=box_number, warehouse_id=wh.id, status="open")
+        db.session.add(box)
+        db.session.commit()
+        db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=qty))
+        db.session.commit()
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    assert "Основной склад" in html
+    assert "Склад №2 (Шоссейная 167)" in html
+    assert "Цех раскроя" not in html
+
+    idx = html.find("ART-RTS")
+    snippet = html[idx : idx + 3000]
+    assert ">4<" in snippet
+    assert ">5<" in snippet
+
+
+def test_picking_list_has_collapse_all_groups_toggle(db, client_logged_in):
+    """Общий переключатель "Свернуть все группы" (см. чат) — форсирует
+    состояние всех заголовков модель/цвет сразу, не только того, по
+    которому кликнули."""
+    _setup(planned_qty=30)
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    assert 'data-picking-collapse-all="picking"' in html
+    assert "Свернуть все группы" in html

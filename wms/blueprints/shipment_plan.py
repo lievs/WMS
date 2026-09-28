@@ -53,6 +53,7 @@ from ..utils.google_sheets import (
     write_distribution_facts,
     write_wms_movement_sheet,
 )
+from .integration_1c import DIRECT_TRANSFER_WAREHOUSE_NAMES
 from .warehouses import (
     consolidate_marketplace_warehouses,
     default_fulfillment_1c_name,
@@ -897,12 +898,18 @@ def _group_picking_list(picking_list, sender_warehouses, ozon_cities, wb_cities)
 def _dashboard_context():
     plans = {p.marketplace: p for p in ShipmentPlan.query.all()}
     sender_ids = _sender_warehouse_ids()
+    # "Готово к отгрузке" разбивается по складам только для этих двух
+    # физических складов (см. чат) — а не для ЛЮБОГО склада-отправителя:
+    # _sender_warehouse_ids() возвращает все склады без маркетплейса,
+    # среди них могут быть и другие (например, производство/цех), которые
+    # в разбивку попадать не должны. Тот же список складов, что и для
+    # прямых перемещений в 1С (см. integration_1c.DIRECT_TRANSFER_WAREHOUSE_NAMES).
     # Упорядочены по названию — "Основной склад" раньше "Склад №2..." по
-    # алфавиту, тот же порядок, что и везде в системе (см. чат).
+    # алфавиту, тот же порядок, что и везде в системе.
     sender_warehouses = (
-        Warehouse.query.filter(Warehouse.id.in_(sender_ids)).order_by(Warehouse.name).all()
-        if sender_ids
-        else []
+        Warehouse.query.filter(Warehouse.name.in_(DIRECT_TRANSFER_WAREHOUSE_NAMES))
+        .order_by(Warehouse.name)
+        .all()
     )
     stock = _stock_by_nomenclature(sender_ids)
     unplaced_stock = _unplaced_by_nomenclature(sender_ids)

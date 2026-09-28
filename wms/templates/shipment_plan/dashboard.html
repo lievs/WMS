@@ -149,6 +149,10 @@
     <h5 class="mb-0">Что нужно отправить <span class="text-muted small">(осталось по плану, {{ picking_list|length }} поз., ОЗОН и ВБ вместе)</span></h5>
     <div class="d-flex align-items-center gap-2 flex-wrap">
       <div class="form-check mb-0">
+        <input type="checkbox" class="form-check-input" id="picking-collapse-all" data-picking-collapse-all="picking">
+        <label class="form-check-label" for="picking-collapse-all">Свернуть все группы</label>
+      </div>
+      <div class="form-check mb-0">
         <input type="checkbox" class="form-check-input" id="picking-priority-only" data-picking-priority-only="picking">
         <label class="form-check-label" for="picking-priority-only">Приоритетные товары</label>
       </div>
@@ -339,13 +343,25 @@
   // сворачивание/разворот группы (кнопка ▾) игнорируется, пока активен
   // поиск или галочка "Приоритетные", чтобы найденное не пряталось в
   // свернутой группе.
-  document.querySelectorAll("[data-picking-search], [data-picking-priority-only]").forEach(function (control) {
-    var key = control.dataset.pickingSearch || control.dataset.pickingPriorityOnly;
+  document.querySelectorAll("[data-picking-search], [data-picking-priority-only], [data-picking-collapse-all]").forEach(function (control) {
+    var key = control.dataset.pickingSearch || control.dataset.pickingPriorityOnly || control.dataset.pickingCollapseAll;
     var table = document.getElementById("picking-" + key);
     if (!table) return;
     var scope = table.closest(".card");
     var searchInput = scope.querySelector("[data-picking-search='" + key + "']");
     var priorityCheckbox = scope.querySelector("[data-picking-priority-only='" + key + "']");
+    var collapseAllCheckbox = scope.querySelector("[data-picking-collapse-all='" + key + "']");
+
+    // Общий переключатель "Свернуть все группы" (см. чат) — форсирует
+    // состояние ▾/▸ сразу на всех заголовках модель/цвет, а не только на
+    // том, по которому кликнули (см. click-обработчик ниже).
+    function setAllGroupsCollapsed(collapsed) {
+      table.querySelectorAll(".picking-group-row").forEach(function (row) {
+        row.classList.toggle("picking-group-collapsed", collapsed);
+        var toggle = row.querySelector("[data-toggle-group]");
+        if (toggle) toggle.textContent = collapsed ? "▸" : "▾";
+      });
+    }
 
     function applyFilters() {
       var q = (searchInput && searchInput.value.trim().toLowerCase()) || "";
@@ -394,16 +410,32 @@
 
     control.addEventListener(control.type === "checkbox" ? "change" : "input", applyFilters);
 
+    if (control === collapseAllCheckbox) {
+      collapseAllCheckbox.addEventListener("change", function () {
+        setAllGroupsCollapsed(collapseAllCheckbox.checked);
+        applyFilters();
+      });
+    }
+
     // Клик по ▾/▸ у заголовка группы сворачивает/разворачивает её —
     // применяется через тот же applyFilters, чтобы учесть текущий фильтр.
-    table.addEventListener("click", function (e) {
-      var toggle = e.target.closest("[data-toggle-group]");
-      if (!toggle) return;
-      var row = toggle.closest("tr");
-      row.classList.toggle("picking-group-collapsed");
-      toggle.textContent = row.classList.contains("picking-group-collapsed") ? "▸" : "▾";
-      applyFilters();
-    });
+    // На таблицу вешаем только один раз (data-row-toggle-bound) — иначе
+    // при нескольких контролах (поиск + галочка "Приоритетные", у обоих
+    // тот же key "picking") этот forEach выполнился бы дважды и повесил
+    // бы ДВА обработчика клика на одну и ту же таблицу: оба сработали бы
+    // на один клик и взаимно отменили друг друга через classList.toggle,
+    // из-за чего сворачивание визуально не срабатывало.
+    if (!table.dataset.rowToggleBound) {
+      table.dataset.rowToggleBound = "1";
+      table.addEventListener("click", function (e) {
+        var toggle = e.target.closest("[data-toggle-group]");
+        if (!toggle) return;
+        var row = toggle.closest("tr");
+        row.classList.toggle("picking-group-collapsed");
+        toggle.textContent = row.classList.contains("picking-group-collapsed") ? "▸" : "▾";
+        applyFilters();
+      });
+    }
   });
 </script>
 {% endblock %}
