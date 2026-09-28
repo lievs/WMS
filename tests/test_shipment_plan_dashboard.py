@@ -1,7 +1,4 @@
-"""«В пути» в плане — все завершенные перемещения с даты листа.
-
-Заявка на МП и последующая приемка не меняют факт отправки из WMS.
-"""
+"""«В пути» в плане — перемещения, которые транспорт забрал с даты листа."""
 
 import io
 
@@ -66,7 +63,10 @@ def _ship_box(sender, city, item, qty, box_number, client, mark_request=True):
 
     client.post(f"/movement/{doc.id}/complete")
     if mark_request:
+        doc.marketplace_request_number = f"REQ-{box_number}"
+        db.session.commit()
         client.post(f"/movement/{doc.id}/mark-marketplace-request")
+        client.post(f"/movement/{doc.id}/mark-shipped")
     return doc
 
 
@@ -117,7 +117,7 @@ def test_city_in_transit_includes_shipped_sku_missing_from_current_plan(
         qty=824,
         box_number="BOX-UNPLANNED-CITY-TOTAL",
         client=client_logged_in,
-        mark_request=False,
+        mark_request=True,
     )
 
     html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
@@ -144,7 +144,7 @@ def test_picking_list_shows_plan_and_in_transit_separately(db, client_logged_in)
     assert "(10)" in snippet
 
 
-def test_completed_movement_without_marketplace_request_is_in_transit(db, client_logged_in):
+def test_completed_movement_without_transport_pickup_is_not_in_transit(db, client_logged_in):
     sender, city, item = _setup(planned_qty=30)
     _ship_box(
         sender,
@@ -161,7 +161,7 @@ def test_completed_movement_without_marketplace_request_is_in_transit(db, client
     idx = html.find("ART-1")
     snippet = html[idx : idx + 3000]
     assert ">30<" in snippet
-    assert "(10)" in snippet
+    assert "(10)" not in snippet
 
 
 def test_top_summary_shows_in_transit_per_marketplace_and_total(db, client_logged_in):
@@ -291,14 +291,166 @@ def test_excel_export_matches_dashboard_table_and_keeps_transit_separate(db, cli
     sheet = workbook["План отгрузок"]
     assert "A1:A2" in {str(cell_range) for cell_range in sheet.merged_cells.ranges}
     assert sheet["A1"].value == "Артикул"
-    assert sheet["E1"].value == "На разбраковке"
-    assert sheet["H1"].value == "ОЗОН"
-    assert sheet["H2"].value == "Город"
+    assert sheet["E1"].value == "Общий план"
+    assert sheet["F1"].value == "Не хватает по плану"
+    assert sheet["G1"].value == "На разбраковке"
+    assert sheet["J1"].value == "ОЗОН"
+    assert sheet["J2"].value == "Город"
+    assert sheet["K1"].value == "Комментарий закупщиков"
     assert sheet["A3"].value == "Итого (1 поз.)"
-    assert sheet["G3"].value == 10
-    assert sheet["H3"].value == 30
+    assert sheet["E3"].value == 30
+    assert sheet["I3"].value == 10
+    assert sheet["J3"].value == 30
     assert sheet["A4"].value == "ART-1"
-    assert sheet["H4"].value == "30 (10)"
+    assert sheet["J4"].value == "30 (10)"
+
+
+def test_picking_list_shows_total_planned_and_shortfall_columns(db, client_logged_in):
+    """«Общий план» и «Не хватает по плану» — построчно по товару, сумма по
+    всем городам обоих маркетплейсов. «Не хватает» = план минус все, что уже
+    в пути, готово к отгрузке и на разбраковке (не меньше нуля), а не просто
+    остаток плана без учета того, что уже есть на руках."""
+    sender, city, item = _setup(planned_qty=30)
+    _ship_box(sender, city, item, qty=10, box_number="BOX-TOTALS-1", client=client_logged_in)
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    assert "Общий план" in html
+    assert "Не хватает по плану" in html
+    idx = html.find("ART-1")
+    snippet = html[idx : idx + 3000]
+    assert ">30<" in snippet  # Общий план
+    assert ">20<" in snippet  # Не хватает: 30 - 10 в пути
+
+
+def test_shortfall_column_floors_at_zero_when_transit_covers_plan(db, client_logged_in):
+    sender, city, item = _setup(planned_qty=10)
+    _ship_box(sender, city, item, qty=10, box_number="BOX-TOTALS-2", client=client_logged_in)
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    idx = html.find("ART-1")
+    snippet = html[idx : idx + 3000]
+    assert ">10<" in snippet  # Общий план и «в пути» совпадают
+    assert "text-muted\">0<" in snippet  # Не хватает: max(10 - 10, 0) = 0
+
+
+def test_shortfall_column_also_subtracts_ready_to_ship_and_unplaced(db, client_logged_in):
+    """Товар, который уже упакован в короб на складе-отправителе (готово к
+    отгрузке) или принят, но еще не упакован (на разбраковке), тоже
+    закрывает потребность плана — не только то, что уже уехало."""
+    from wms.models import Box, BoxItem, UnplacedStock
+
+    sender, city, item = _setup(planned_qty=30)
+    UnplacedStock.add(sender.id, item.id, 5)  # на разбраковке
+    box = Box(box_number="BOX-TOTALS-READY", warehouse_id=sender.id, status="open")
+    db.session.add(box)
+    db.session.commit()
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=7))  # готово к отгрузке
+    db.session.commit()
+    _ship_box(sender, city, item, qty=10, box_number="BOX-TOTALS-3", client=client_logged_in)
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    idx = html.find("ART-1")
+    snippet = html[idx : idx + 3000]
+    # Не хватает: 30 (план) - 10 (в пути) - 7 (готово к отгрузке) - 5 (на разбраковке) = 8
+    assert ">8<" in snippet
+
+
+def test_picking_list_shows_buyer_comment_column(db, client_logged_in):
+    """Комментарий показан как поле ввода (можно править прямо в WMS), а не
+    просто текстом — со значением из buyer_comment."""
+    sender, city, item = _setup(planned_qty=30)
+    line = ShipmentPlanLine.query.first()
+    line.buyer_comment = "Поставка задерживается на неделю"
+    db.session.commit()
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    assert "Комментарий закупщиков" in html
+    assert 'value="Поставка задерживается на неделю"' in html
+
+
+def test_comment_column_is_positioned_right_after_barcode(db, client_logged_in):
+    sender, city, item = _setup(planned_qty=30)
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    barcode_idx = html.index(">Штрихкод<")
+    comment_idx = html.index("Комментарий закупщиков")
+    total_planned_idx = html.index("Общий план")
+    assert barcode_idx < comment_idx < total_planned_idx
+
+
+def test_update_comment_endpoint_saves_buyer_comment(db, client_logged_in):
+    sender, city, item = _setup(planned_qty=30)
+
+    response = client_logged_in.post(
+        f"/shipment-plan/comment/{item.barcode}",
+        data={"comment": "Уточнить у поставщика"},
+    )
+
+    assert response.status_code == 302
+    line = ShipmentPlanLine.query.first()
+    assert line.buyer_comment == "Уточнить у поставщика"
+
+
+def test_update_comment_endpoint_clears_comment_on_empty_input(db, client_logged_in):
+    sender, city, item = _setup(planned_qty=30)
+    line = ShipmentPlanLine.query.first()
+    line.buyer_comment = "Старый комментарий"
+    db.session.commit()
+
+    client_logged_in.post(f"/shipment-plan/comment/{item.barcode}", data={"comment": "   "})
+
+    line = ShipmentPlanLine.query.first()
+    assert line.buyer_comment is None
+
+
+def test_update_comment_endpoint_updates_all_lines_sharing_barcode(db, client_logged_in):
+    """Один штрихкод может встречаться в нескольких строках плана (разные
+    города и площадки) — комментарий один на товар, должен обновиться сразу
+    во всех, иначе "потеряется" при показе другого направления того же
+    товара."""
+    sender, city, item = _setup(planned_qty=30)
+    other_city = Warehouse(
+        code="WH-D3", name="ВБ: Город2", marketplace="wb", marketplace_city="Город2"
+    )
+    db.session.add(other_city)
+    db.session.commit()
+    wb_plan = ShipmentPlan(marketplace="wb")
+    db.session.add(wb_plan)
+    db.session.commit()
+    db.session.add(
+        ShipmentPlanLine(
+            plan_id=wb_plan.id,
+            warehouse_id=other_city.id,
+            nomenclature_id=item.id,
+            barcode=item.barcode,
+            article="ART-1",
+            planned_qty=10,
+        )
+    )
+    db.session.commit()
+
+    client_logged_in.post(
+        f"/shipment-plan/comment/{item.barcode}", data={"comment": "Общий комментарий"}
+    )
+
+    comments = {
+        line.buyer_comment
+        for line in ShipmentPlanLine.query.filter_by(barcode=item.barcode).all()
+    }
+    assert comments == {"Общий комментарий"}
+
+
+def test_update_comment_endpoint_unknown_barcode_flashes_error(db, client_logged_in):
+    response = client_logged_in.post(
+        "/shipment-plan/comment/0000000000000", data={"comment": "test"}, follow_redirects=True
+    )
+
+    assert "не найден" in response.get_data(as_text=True)
 
 
 def test_picking_list_has_totals_row_summing_columns(db, client_logged_in):

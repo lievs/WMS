@@ -45,8 +45,14 @@ def extract_period_start(sheet_name, today=None):
 _SUBCOLUMN_MARKERS = (
     "остат", "отгруж", "путь", "факт", "план", "%", "gtin", "sku",
     "коробе", "производств", "хватает", "всего", "раскладк", "продаж",
-    "дней", "поставк", "склад", "приорит",
+    "дней", "поставк", "склад", "приорит", "коммент", "примечан", "закупщ",
 )
+
+# Колонка с комментарием закупщиков — расположение в файле заранее не
+# известно (может быть как слева от штрихкода, рядом с артикулом/размером,
+# так и отдельной колонкой правее всех городов), поэтому ищем по всей
+# строке заголовка, а не только с одной стороны.
+_COMMENT_KEYWORDS = ("коммент", "примечан", "закупщ")
 
 _SHEET_ALIASES = {
     "ozon": ("озон",),
@@ -131,6 +137,30 @@ def _find_label_col(ws, header_row, barcode_col, keyword):
     return None
 
 
+def _find_comment_col(ws, header_row, max_col=None):
+    """Колонка с комментарием закупщиков — см. _COMMENT_KEYWORDS."""
+    max_col = max_col or ws.max_column
+    for c in range(1, max_col + 1):
+        v = _norm(ws.cell(row=header_row, column=c).value).lower()
+        if any(keyword in v for keyword in _COMMENT_KEYWORDS):
+            return c
+    return None
+
+
+def _find_priority_col(ws, header_row, max_col=None):
+    """Колонка "Приоритет" — как и комментарий, может стоять где угодно
+    относительно штрихкода (обычно среди служебных колонок правее, см.
+    "приорит" в _SUBCOLUMN_MARKERS — именно поэтому она туда и попала: не
+    спутать со столбцом-городом), поэтому ищем по всей строке заголовка, а
+    не только левее штрихкода, как артикул/размер."""
+    max_col = max_col or ws.max_column
+    for c in range(1, max_col + 1):
+        v = _norm(ws.cell(row=header_row, column=c).value).lower()
+        if "приорит" in v:
+            return c
+    return None
+
+
 def _find_city_columns(ws, header_row, start_col, end_col=None):
     """[(plan_col, city_name, fact_col), ...] — plan_col это первая колонка
     группы города (план по количеству); fact_col — колонка "отгружен / в
@@ -196,6 +226,26 @@ def _to_qty(value):
     return qty if qty > 0 else None
 
 
+def _parse_priority_cell(value):
+    """Значение колонки "Приоритет" — либо целое число (обычно 0/1/2, см.
+    чат), либо код товара-новинки под конкретный маркетплейс: "0w" —
+    новинка только для ВБ, "0o" — новинка только для Ozon (см. чат:
+    "введем еще типы приоритетов"). Возвращает (priority, novelty_marketplace) —
+    заполнена ровно одна часть пары, либо обе None, если ячейка пуста или
+    не распознана."""
+    if value is None or value == "":
+        return None, None
+    text = str(value).strip().lower()
+    if text == "0w":
+        return None, "wb"
+    if text == "0o":
+        return None, "ozon"
+    try:
+        return int(float(value)), None
+    except (TypeError, ValueError):
+        return None, None
+
+
 def _to_fact_qty(value):
     """В отличие от _to_qty, ноль/пусто — это законное "еще не отгружено",
     а не повод пропустить город (в отличие от плана, где qty=0 не создает
@@ -226,6 +276,8 @@ def _parse_one_sheet(ws):
 
     article_col = _find_label_col(ws, header_row, barcode_col, "артикул")
     size_col = _find_label_col(ws, header_row, barcode_col, "размер")
+    comment_col = _find_comment_col(ws, header_row)
+    priority_col = _find_priority_col(ws, header_row)
     city_columns = _find_city_columns(ws, header_row, barcode_col + 1)
 
     cities = [name for _, name, _ in city_columns]
@@ -238,6 +290,12 @@ def _parse_one_sheet(ws):
 
         article = _norm(ws.cell(row=r, column=article_col).value) if article_col else ""
         size = _norm(ws.cell(row=r, column=size_col).value) if size_col else ""
+        comment = _norm(ws.cell(row=r, column=comment_col).value) if comment_col else ""
+        priority, novelty_marketplace = (
+            _parse_priority_cell(ws.cell(row=r, column=priority_col).value)
+            if priority_col
+            else (None, None)
+        )
 
         for col, city, fact_col in city_columns:
             qty = _to_qty(ws.cell(row=r, column=col).value)
@@ -252,7 +310,11 @@ def _parse_one_sheet(ws):
             # плана на конкретной паре товар-город) это тоже теряло часть
             # уже отгруженного. remaining_qty() и так не уходит в минус,
             # поэтому обрезать факт не нужно — тянем оба значения как есть.
-            if qty is None and fact <= 0:
+            # Товар-новинка (0w/0o) обычно приходит с пустым планом по ВСЕМ
+            # городам сразу (плана по нему еще просто нет) — не пропускаем
+            # такую строку, иначе сам код приоритета терялся бы (см. чат:
+            # "если по товару нет плана то смотрим на приоритет").
+            if qty is None and fact <= 0 and novelty_marketplace is None:
                 continue
             rows.append(
                 {
@@ -262,6 +324,9 @@ def _parse_one_sheet(ws):
                     "city": city,
                     "qty": qty or 0.0,
                     "fact": fact,
+                    "comment": comment,
+                    "priority": priority,
+                    "novelty_marketplace": novelty_marketplace,
                     "_source_row": r,
                 }
             )
@@ -412,6 +477,8 @@ def _parse_combined_marketplace_sheet(ws, marketplace):
 
     article_col = _find_label_col(ws, header_row, barcode_col, "артикул")
     size_col = _find_label_col(ws, header_row, barcode_col, "размер")
+    comment_col = _find_comment_col(ws, header_row, end_col)
+    priority_col = _find_priority_col(ws, header_row, end_col)
     city_columns = _find_city_columns(ws, header_row, start_col, end_col)
 
     cities = [name for _, name, _ in city_columns]
@@ -424,11 +491,19 @@ def _parse_combined_marketplace_sheet(ws, marketplace):
 
         article = _norm(ws.cell(row=r, column=article_col).value) if article_col else ""
         size = _norm(ws.cell(row=r, column=size_col).value) if size_col else ""
+        comment = _norm(ws.cell(row=r, column=comment_col).value) if comment_col else ""
+        priority, novelty_marketplace = (
+            _parse_priority_cell(ws.cell(row=r, column=priority_col).value)
+            if priority_col
+            else (None, None)
+        )
 
         for col, city, fact_col in city_columns:
             qty = _to_qty(ws.cell(row=r, column=col).value)
             fact = _to_fact_qty(ws.cell(row=r, column=fact_col).value) if fact_col else 0.0
-            if qty is None and fact <= 0:
+            # См. _parse_one_sheet — товар-новинка (0w/0o) не пропускаем,
+            # даже если план по всем городам пуст.
+            if qty is None and fact <= 0 and novelty_marketplace is None:
                 continue
             rows.append(
                 {
@@ -438,6 +513,9 @@ def _parse_combined_marketplace_sheet(ws, marketplace):
                     "city": city,
                     "qty": qty or 0.0,
                     "fact": fact,
+                    "comment": comment,
+                    "priority": priority,
+                    "novelty_marketplace": novelty_marketplace,
                 }
             )
 

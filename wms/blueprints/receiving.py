@@ -14,7 +14,7 @@ from flask import (
     url_for,
 )
 from flask_login import current_user
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 
 from ..extensions import db
@@ -28,6 +28,7 @@ from ..models import (
     SupplierReturn,
     UnplacedStock,
     UnplacedStockLot,
+    User,
     Warehouse,
 )
 from ..utils.document_access import get_owned_or_404
@@ -121,6 +122,41 @@ def _next_redirect(doc_id):
     return redirect(url_for("receiving.detail", doc_id=doc_id))
 
 
+def _receiving_search_token_condition(token):
+    """Условие для ОДНОГО слова поискового запроса — совпадение в любом из
+    полей (номер, поставщик — как свободный текст, так и из справочника,
+    № заказа, склад, автор). Несколько слов объединяются через И (см.
+    _apply_receiving_search) — как в поиске по перемещениям (см. чат и
+    movement._movement_search_token_condition)."""
+    like = f"%{token}%"
+    return or_(
+        ReceivingDocument.number.ilike(like),
+        ReceivingDocument.supplier.ilike(like),
+        ReceivingDocument.order_number.ilike(like),
+        ReceivingDocument.supplier_ref.has(
+            or_(Supplier.name.ilike(like), Supplier.inn.ilike(like))
+        ),
+        ReceivingDocument.warehouse.has(Warehouse.name.ilike(like)),
+        ReceivingDocument.created_by.has(
+            or_(User.username.ilike(like), User.full_name.ilike(like))
+        ),
+    )
+
+
+def _apply_receiving_search(query):
+    """Фильтрует запрос по поисковой строке q — разбивается по пробелам,
+    документ должен совпасть по КАЖДОМУ слову (не обязательно в одном и
+    том же поле, см. _receiving_search_token_condition), как поиск по
+    перемещениям (см. чат)."""
+    q = request.args.get("q", "").strip()
+    if not q:
+        return query
+    tokens = q.split()
+    return query.filter(
+        and_(*(_receiving_search_token_condition(token) for token in tokens))
+    )
+
+
 @bp.route("/")
 def list_documents():
     # "Приемка по накладной" — документы, созданные загрузкой файла
@@ -129,7 +165,7 @@ def list_documents():
     # от ручного создания, где поставщик — просто свободный текст.
     unfinished_only = request.args.get("unfinished") == "on"
     invoice_only = request.args.get("invoice_only") == "on"
-    supplier_q = request.args.get("supplier", "").strip()
+    q = request.args.get("q", "").strip()
     warehouse_id = request.args.get("warehouse_id", type=int)
 
     query = _visible_receiving_query()
@@ -137,8 +173,7 @@ def list_documents():
         query = query.filter(ReceivingDocument.status != "completed")
     if invoice_only:
         query = query.filter(ReceivingDocument.supplier_id.isnot(None))
-    if supplier_q:
-        query = query.filter(ReceivingDocument.supplier.ilike(f"%{supplier_q}%"))
+    query = _apply_receiving_search(query)
     if warehouse_id:
         query = query.filter(ReceivingDocument.warehouse_id == warehouse_id)
 
@@ -183,7 +218,7 @@ def list_documents():
         documents=documents,
         unfinished_only=unfinished_only,
         invoice_only=invoice_only,
-        supplier_q=supplier_q,
+        q=q,
         warehouse_id=warehouse_id,
         warehouses=_receiving_warehouses(),
         returns_count_by_doc=returns_count_by_doc,
@@ -449,6 +484,10 @@ def confirm_line(doc_id, line_id):
         return jsonify({"ok": False, "error": "Количество не может быть отрицательным"}), 400
 
     if line.box_id:
+        try:
+            _check_box_qty_limit(line.box, qty - line.qty)
+        except BoxQtyLimitExceeded as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
         box_item = BoxItem.query.filter_by(box_id=line.box_id, nomenclature_id=line.nomenclature_id).first()
         if box_item:
             box_item.qty += qty - line.qty
@@ -536,6 +575,45 @@ def _add_or_increment_line(doc, nomenclature, qty, request_token=None):
     return _commit_receiving_add(line, request_token)
 
 
+# Физический лимит на короб — не может лежать больше 300 шт суммарно,
+# независимо от вида товара (см. чат: "запрет на ввод кол-ва в коробе
+# больше 300 шт"). В отличие от _box_category_warning (мягкое
+# предупреждение по одному виду) — это жесткий запрет по всему коробу.
+BOX_QTY_LIMIT = 300
+
+
+def _box_total_qty(box_id):
+    return (
+        db.session.query(func.sum(BoxItem.qty))
+        .filter(BoxItem.box_id == box_id)
+        .scalar()
+    ) or 0
+
+
+def _box_qty_limit_message(box, attempted_total):
+    return (
+        f"В коробе {box.box_number} максимум {BOX_QTY_LIMIT:g} шт — "
+        f"стало бы {attempted_total:g} шт"
+    )
+
+
+class BoxQtyLimitExceeded(Exception):
+    """Суммарное количество товара в коробе после изменения превысило бы
+    BOX_QTY_LIMIT. box/attempted_total — чтобы вызывающий код сам решил,
+    как сообщить об этом (flash или JSON-ошибка)."""
+
+    def __init__(self, box, attempted_total):
+        self.box = box
+        self.attempted_total = attempted_total
+        super().__init__(_box_qty_limit_message(box, attempted_total))
+
+
+def _check_box_qty_limit(box, delta):
+    attempted = _box_total_qty(box.id) + delta
+    if attempted > BOX_QTY_LIMIT:
+        raise BoxQtyLimitExceeded(box, attempted)
+
+
 def _box_category_warning(box, item):
     """Если суммарное количество товара ВИДА item в этом коробе превысило
     порог, заданный у вида (см. ProductCategory.box_qty_warning, настройка —
@@ -570,6 +648,8 @@ def _receive_item_into_box(doc, box, item, qty, request_token=None):
     existing = _existing_add_request(request_token)
     if existing:
         return existing, None, True
+
+    _check_box_qty_limit(box, qty)
 
     dedup_qty = min(qty, UnplacedStock.available(doc.warehouse_id, item.id))
     if dedup_qty > 0:
@@ -656,7 +736,10 @@ def add_line_to_box_by_barcode(doc_id, box_id):
     if not item:
         return jsonify({"ok": False, "error": f"Товар со штрихкодом '{barcode}' не найден"}), 404
 
-    line, warning, duplicate = _receive_item_into_box(doc, box, item, qty, request_token)
+    try:
+        line, warning, duplicate = _receive_item_into_box(doc, box, item, qty, request_token)
+    except BoxQtyLimitExceeded as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
     resp = {
         "ok": True,
         "duplicate": duplicate,
@@ -685,7 +768,11 @@ def add_line_to_box(doc_id, box_id):
         return redirect(url_for("receiving.detail", doc_id=doc.id, box=box_id))
 
     request_token = request.form.get("request_token", "")[:64]
-    _line, warning, duplicate = _receive_item_into_box(doc, box, item, qty, request_token)
+    try:
+        _line, warning, duplicate = _receive_item_into_box(doc, box, item, qty, request_token)
+    except BoxQtyLimitExceeded as exc:
+        flash(str(exc), "danger")
+        return redirect(url_for("receiving.detail", doc_id=doc.id, box=box_id))
     if duplicate:
         flash("Повторный запрос распознан — товар второй раз не добавлен", "info")
         return redirect(url_for("receiving.detail", doc_id=doc.id))
@@ -779,6 +866,11 @@ def update_line(doc_id, line_id):
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
     if line.box_id:
+        try:
+            _check_box_qty_limit(line.box, qty - line.qty)
+        except BoxQtyLimitExceeded as exc:
+            flash(str(exc), "danger")
+            return redirect(url_for("receiving.detail", doc_id=doc_id))
         box_item = BoxItem.query.filter_by(box_id=line.box_id, nomenclature_id=line.nomenclature_id).first()
         if box_item:
             box_item.qty += qty - line.qty
@@ -805,6 +897,7 @@ def update_lines_bulk(doc_id):
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
     updated = 0
+    skipped_limit = 0
     for line in doc.lines:
         raw = request.form.get(f"qty_{line.id}")
         if raw is None:
@@ -822,6 +915,11 @@ def update_lines_bulk(doc_id):
             continue
 
         if line.box_id:
+            try:
+                _check_box_qty_limit(line.box, qty - line.qty)
+            except BoxQtyLimitExceeded:
+                skipped_limit += 1
+                continue
             box_item = BoxItem.query.filter_by(
                 box_id=line.box_id, nomenclature_id=line.nomenclature_id
             ).first()
@@ -838,6 +936,11 @@ def update_lines_bulk(doc_id):
         flash(f"Количество обновлено: {updated} поз.", "success")
     else:
         flash("Изменений не найдено", "info")
+    if skipped_limit:
+        flash(
+            f"{skipped_limit} поз. не обновлено — короб не может содержать больше {BOX_QTY_LIMIT:g} шт",
+            "warning",
+        )
     return redirect(url_for("receiving.detail", doc_id=doc_id))
 
 
@@ -1153,6 +1256,15 @@ def complete(doc_id):
         f"нужно только расставить по ячейкам.",
         "success",
     )
+    if doc.return_inventory_id:
+        box = Box.query.get(doc.return_inventory_box_id) if doc.return_inventory_box_id else None
+        return redirect(
+            url_for(
+                "inventory.detail",
+                doc_id=doc.return_inventory_id,
+                resume_box_number=box.box_number if box else "",
+            )
+        )
     return _next_redirect(doc.id)
 
 

@@ -20,7 +20,7 @@
 <body>
 <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
   <div class="container-fluid">
-    <a class="navbar-brand" href="{{ url_for('production.index') if current_user.is_authenticated and current_user.is_production_only() else url_for('main.index') }}">📦 WMS</a>
+    <a class="navbar-brand" href="{{ url_for('production.index') if current_user.is_authenticated and current_user.is_production_only() else url_for('movement.transport_list') if current_user.is_authenticated and current_user.is_logist_only() else url_for('main.index') }}">📦 WMS</a>
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMain">
       <span class="navbar-toggler-icon"></span>
     </button>
@@ -28,6 +28,8 @@
       <ul class="navbar-nav me-auto">
         {% if current_user.is_authenticated and current_user.is_production_only() %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('production.index') }}">Производство</a></li>
+        {% elif current_user.is_authenticated and current_user.is_logist_only() %}
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('movement.transport_list') }}">Ждут транспорта</a></li>
         {% elif current_user.is_authenticated %}
         {% if current_user.has_section_access('nomenclature') %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('nomenclature.list_nomenclature') }}">Номенклатура</a></li>
@@ -55,6 +57,16 @@
         {% endif %}
         {% if current_user.has_section_access('shipment_plan') %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('shipment_plan.dashboard') }}">План отгрузок</a></li>
+        {% endif %}
+        {# Панель руководителя и Заказы на производство временно скрыты из
+           меню (см. чат — "будем доделывать") — их before_request тоже
+           блокирует прямой переход по ссылке, здесь просто убираем пункты
+           меню, чтобы к ним не вело. Вернуть: убрать это условие обратно на
+           can_view_management_dashboard()/is_admin, как было. #}
+        {% if false %}
+        {% if current_user.can_view_management_dashboard() %}
+        <li class="nav-item"><a class="nav-link fw-semibold" href="{{ url_for('management.dashboard') }}">Панель руководителя</a></li>
+        {% endif %}
         {% endif %}
         {% if current_user.is_admin %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('auth.users') }}">Настройки</a></li>

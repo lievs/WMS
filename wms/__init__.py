@@ -55,6 +55,19 @@ def _ensure_columns():
                             )
                         )
                     print("[schema] movement_documents.received_at заполнен для уже завершенных документов")
+                if table.name == "movement_documents" and column.name == "shipped_at":
+                    # Исторические принятые документы точно были переданы
+                    # транспорту. Точное время неизвестно, поэтому для них
+                    # используем завершение сборки как наиболее близкую
+                    # доступную отметку; новые документы фиксируются кнопкой.
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE movement_documents SET shipped_at = completed_at "
+                                "WHERE received_at IS NOT NULL AND shipped_at IS NULL"
+                            )
+                        )
+                    print("[schema] movement_documents.shipped_at заполнен для исторических приемок")
                 if table.name == "warehouses" and column.name == "fulfillment_1c_name":
                     # Известные соответствия "город -> склад 1С" (см.
                     # wms.blueprints.warehouses.FULFILLMENT_1C_DEFAULTS) —
@@ -139,6 +152,24 @@ def _ensure_columns():
                         "[schema] users.movement_view_allowed заполнен "
                         "для уже существующих пользователей"
                     )
+                if table.name == "users" and column.name == "movement_receive_allowed":
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE users SET movement_receive_allowed = movement_complete_allowed "
+                                "WHERE movement_receive_allowed IS NULL"
+                            )
+                        )
+                    print("[schema] users.movement_receive_allowed заполнен для существующих пользователей")
+                if table.name == "users" and column.name == "management_dashboard_allowed":
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE users SET management_dashboard_allowed = 0 "
+                                "WHERE management_dashboard_allowed IS NULL"
+                            )
+                        )
+                    print("[schema] users.management_dashboard_allowed заполнен для существующих пользователей")
             except Exception as exc:  # noqa: BLE001
                 print(f"[schema] Не удалось добавить {table.name}.{column.name}: {exc}")
 
@@ -186,6 +217,30 @@ def _ensure_indexes():
                 )
         except Exception as exc:  # noqa: BLE001
             print(f"[schema] Не удалось создать индекс токенов приемки: {exc}")
+
+    # Один короб не должен попадать в один и тот же документ перемещения
+    # дважды (add_box/route_box_add и так проверяют это перед вставкой, но
+    # два одновременных запроса могут оба пройти проверку раньше, чем
+    # первый успеет закоммититься — см. чат: "экспорт показывает 2220, в
+    # перемещении 2147", ровно такая гонка задвоила короб в документе).
+    # На базе, где дубль уже есть, создание индекса не пройдет — тогда
+    # просто логируем и не падаем, дубль по-прежнему виден и его нужно
+    # почистить вручную.
+    if inspector.has_table("movement_lines"):
+        try:
+            with db.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS "
+                        '"uq_movement_lines_document_box" '
+                        'ON "movement_lines" ("document_id", "box_id")'
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                "[schema] Не удалось создать индекс уникальности короба в "
+                f"перемещении (возможно, в базе уже есть дубли): {exc}"
+            )
 
 
 def _register_sqlite_tuning():
@@ -289,9 +344,11 @@ def create_app(config_class=Config):
     from .blueprints.production import bp as production_bp
     from .blueprints.api import bp as api_bp
     from .blueprints.shipment_plan import bp as shipment_plan_bp
+    from .blueprints.production_orders import bp as production_orders_bp
     from .blueprints.integration_1c import bp as integration_1c_bp
     from .blueprints.onboarding import bp as onboarding_bp
     from .blueprints.marketplace_export import bp as marketplace_export_bp
+    from .blueprints.management import bp as management_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(main_bp)
@@ -307,9 +364,11 @@ def create_app(config_class=Config):
     app.register_blueprint(production_bp, url_prefix="/production")
     app.register_blueprint(api_bp, url_prefix="/api")
     app.register_blueprint(shipment_plan_bp, url_prefix="/shipment-plan")
+    app.register_blueprint(production_orders_bp, url_prefix="/production-orders")
     app.register_blueprint(integration_1c_bp, url_prefix="/integrations/1c")
     app.register_blueprint(onboarding_bp, url_prefix="/onboarding")
     app.register_blueprint(marketplace_export_bp, url_prefix="/marketplace-export")
+    app.register_blueprint(management_bp, url_prefix="/management")
 
     with app.app_context():
         from . import models  # noqa: F401
@@ -331,6 +390,9 @@ def create_app(config_class=Config):
     def require_login():
         from .blueprints.integration_1c import API_1C_PUBLIC_ENDPOINTS
         from .blueprints.shipment_plan import GOOGLE_SHEETS_PUBLIC_ENDPOINTS
+        from .blueprints.production_orders import (
+            GOOGLE_SHEETS_PUBLIC_ENDPOINTS as PRODUCTION_ORDERS_PUBLIC_ENDPOINTS,
+        )
         from .models import User
 
         if request.endpoint is None:
@@ -361,6 +423,7 @@ def create_app(config_class=Config):
             or request.endpoint.startswith("auth.")
             or request.endpoint in API_1C_PUBLIC_ENDPOINTS
             or request.endpoint in GOOGLE_SHEETS_PUBLIC_ENDPOINTS
+            or request.endpoint in PRODUCTION_ORDERS_PUBLIC_ENDPOINTS
         ):
             return None
         if not current_user.is_authenticated:
@@ -375,6 +438,16 @@ def create_app(config_class=Config):
             and not request.endpoint.startswith("onboarding.")
         ):
             return redirect(url_for("production.index"))
+        # Роль "логист" — доступ только к перемещениям, ожидающим транспорт
+        # (movement.transport_list/transport_export_summary), ничего больше
+        # в WMS, см. чат. Эндпоинты этой роли специально названы с общим
+        # префиксом "movement.transport", чтобы не перечислять их по одному.
+        if (
+            current_user.is_logist_only()
+            and not request.endpoint.startswith("movement.transport")
+            and not request.endpoint.startswith("onboarding.")
+        ):
+            return redirect(url_for("movement.transport_list"))
         # Точечное ограничение разделов (см. User.allowed_sections) — тоже
         # проверяем при прямом вводе адреса, не только скрываем пункт меню.
         section = request.endpoint.split(".")[0]

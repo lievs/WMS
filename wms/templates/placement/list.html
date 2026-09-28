@@ -26,11 +26,23 @@
           <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
                   data-bs-placement="bottom" data-bs-content="{{ hint_stock }}" aria-label="Подсказка">?</button>
         </h5>
-        <a class="btn btn-primary btn-sm" href="{{ url_for('placement.new_document') }}">➕ Новое размещение</a>
+        <div class="d-flex gap-2">
+          <a class="btn btn-primary btn-sm" href="{{ url_for('placement.new_document') }}">➕ Новое размещение</a>
+          {% if current_user.is_admin %}
+          <form method="post" action="{{ url_for('placement.clear_unplaced_stock') }}" class="d-flex gap-1"
+                onsubmit="return confirm('Обнулить весь неразмещенный остаток выбранного склада? Это изменит учетные остатки.');">
+            <select name="warehouse_id" class="form-select form-select-sm" required>
+              <option value="">Склад...</option>
+              {% for wh in warehouses %}<option value="{{ wh.id }}">{{ wh.name }}</option>{% endfor %}
+            </select>
+            <button class="btn btn-sm btn-outline-danger" type="submit">Очистить список</button>
+          </form>
+          {% endif %}
+        </div>
       </div>
       <p class="text-muted small d-none d-md-block">{{ hint_stock }}</p>
       <table class="table table-sm table-mobile-compact">
-        <thead><tr><th>Склад</th><th>Штрихкод</th><th>Наименование</th><th>Размер</th><th>Кол-во</th><th>Поступление</th></tr></thead>
+        <thead><tr><th>Склад</th><th>Штрихкод</th><th>Наименование</th><th>Размер</th><th>Начальный остаток</th><th>Размещено</th><th>Кол-во</th><th>Поступление</th></tr></thead>
         <tbody>
         {% for row in stock_rows %}
           <tr>
@@ -38,6 +50,8 @@
             <td>{{ row.nomenclature.barcode }}</td>
             <td>{{ row.nomenclature.name }}</td>
             <td>{{ row.nomenclature.size or '' }}</td>
+            <td>{{ row.initial_qty() if row.initial_qty() is not none else '—' }}</td>
+            <td>{{ row.placed_qty() if row.placed_qty() is not none else '—' }}</td>
             <td>{{ row.qty }} {{ row.nomenclature.unit }}</td>
             <td class="small text-muted">
               {% for lot in row.active_lots() %}
@@ -48,7 +62,7 @@
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="6" class="text-muted">Неразмещенных остатков нет</td></tr>
+          <tr><td colspan="8" class="text-muted">Неразмещенных остатков нет</td></tr>
         {% endfor %}
         </tbody>
       </table>
@@ -94,7 +108,7 @@
             <td>
               <form method="post" action="{{ url_for('placement.place_box_standalone', box_id=box.id) }}" class="d-flex gap-1">
                 <input type="hidden" name="next" value="{{ url_for('placement.list_documents', boxes_page=boxes_pagination.page) }}">
-                <input type="text" name="cell_code" value="{{ suggestion.cell.code if suggestion else '' }}" class="form-control form-control-sm" placeholder="Код ячейки" required style="max-width:140px">
+                <input type="text" name="cell_code" value="{{ suggestion.cell.code if suggestion else '' }}" class="form-control form-control-sm" placeholder="Код ячейки или ряда" required style="max-width:140px">
                 <button type="submit" class="btn btn-sm btn-outline-primary">OK</button>
               </form>
             </td>

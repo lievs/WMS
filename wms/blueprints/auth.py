@@ -81,7 +81,8 @@ def create_user():
     is_admin = request.form.get("is_admin") == "on"
     shift_minutes = request.form.get("shift_minutes", type=int) or 480
     role = request.form.get("role", "warehouse")
-    if role not in ("warehouse", "production"):
+    warehouse_id = request.form.get("warehouse_id", type=int)
+    if role not in ("warehouse", "production", "logist"):
         role = "warehouse"
 
     if not username:
@@ -99,6 +100,7 @@ def create_user():
         is_admin=is_admin,
         shift_minutes=shift_minutes,
         role=role,
+        warehouse_id=warehouse_id,
     )
     user.set_password(temp_password)
     db.session.add(user)
@@ -163,18 +165,19 @@ def update_shift_minutes(user_id):
 @login_required
 def update_role(user_id):
     """Роль ограничивает доступ: "production" видит только сканирование ЧЗ
-    на производстве, ничего больше (проверяется в before_request)."""
+    на производстве, "logist" — только перемещения, ожидающие транспорт,
+    ничего больше (проверяется в before_request)."""
     if not _require_admin():
         return redirect(url_for("main.index"))
 
     user = User.query.get_or_404(user_id)
     role = request.form.get("role", "warehouse")
-    if role not in ("warehouse", "production"):
+    if role not in ("warehouse", "production", "logist"):
         flash("Некорректная роль", "danger")
         return redirect(url_for("auth.users"))
 
-    if user.id == current_user.id and role == "production" and not user.is_admin:
-        flash("Нельзя ограничить самого себя до роли «производство»", "danger")
+    if user.id == current_user.id and role in ("production", "logist") and not user.is_admin:
+        flash("Нельзя ограничить самого себя до этой роли", "danger")
         return redirect(url_for("auth.users"))
 
     user.role = role
@@ -208,8 +211,27 @@ def update_sections(user_id):
     user.invoice_receiving_view_allowed = request.form.get("invoice_receiving_view") == "on"
     user.movement_view_allowed = request.form.get("movement_view") == "on"
     user.movement_complete_allowed = request.form.get("movement_complete") == "on"
+    user.movement_receive_allowed = request.form.get("movement_receive") == "on"
+    user.management_dashboard_allowed = request.form.get("management_dashboard") == "on"
     db.session.commit()
     flash(f"Доступ к разделам для «{user.username}» обновлен", "success")
+    return redirect(url_for("auth.users"))
+
+
+@bp.route("/users/<int:user_id>/warehouse", methods=["POST"])
+@login_required
+def update_warehouse(user_id):
+    """Рабочий склад выбирает только администратор, в том числе для себя."""
+    if not _require_admin():
+        return redirect(url_for("main.index"))
+    user = User.query.get_or_404(user_id)
+    warehouse_id = request.form.get("warehouse_id", type=int)
+    if warehouse_id and not Warehouse.query.filter_by(id=warehouse_id, is_active=True).first():
+        flash("Выбранный склад не найден или отключен", "danger")
+        return redirect(url_for("auth.users"))
+    user.warehouse_id = warehouse_id
+    db.session.commit()
+    flash(f"Рабочий склад для «{user.username}» обновлен", "success")
     return redirect(url_for("auth.users"))
 
 

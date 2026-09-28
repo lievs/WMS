@@ -101,6 +101,105 @@ def load_distribution_workbook(app):
     return stream, titles
 
 
+def resolve_sheet_title(app, spreadsheet_id, sheet_gid):
+    """Название листа по его gid (числу после "gid=" в ссылке на таблицу) —
+    надежнее, чем хранить название листа текстом: его могут переименовать,
+    а gid не меняется. Возвращает None, если лист с таким gid не найден."""
+    service = _service(app)
+    metadata = service.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets.properties(sheetId,title)",
+    ).execute()
+    for sheet in metadata.get("sheets", []):
+        if str(sheet["properties"]["sheetId"]) == str(sheet_gid):
+            return sheet["properties"]["title"]
+    return None
+
+
+def list_sheet_titles(app, spreadsheet_id):
+    """Названия всех листов таблицы — для случая, когда заказы разложены по
+    нескольким листам (например, по датам/периодам) и нужно читать их все,
+    а не один конкретный gid (см. production_orders.sync_production_orders)."""
+    service = _service(app)
+    metadata = service.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets.properties(title)",
+    ).execute()
+    return [sheet["properties"]["title"] for sheet in metadata.get("sheets", [])]
+
+
+def _parse_table_values(values):
+    """Сырые значения ячеек листа (список строк-списков, как отдает Sheets
+    API) -> (headers, rows) — первая непустая строка считается заголовком,
+    дальше каждая строка отдается структурой {название_колонки: значение}.
+    Общая часть read_sheet_table/read_sheet_tables."""
+    header_row_idx = None
+    for idx, row in enumerate(values):
+        if any(str(cell).strip() for cell in row):
+            header_row_idx = idx
+            break
+    if header_row_idx is None:
+        return [], []
+    headers = [str(cell).strip() for cell in values[header_row_idx]]
+    rows = []
+    for raw_row in values[header_row_idx + 1 :]:
+        if not any(str(cell).strip() for cell in raw_row if cell is not None):
+            continue
+        row = {}
+        for col_idx, header in enumerate(headers):
+            if not header:
+                continue
+            row[header] = raw_row[col_idx] if col_idx < len(raw_row) else None
+        rows.append(row)
+    return headers, rows
+
+
+def read_sheet_table(app, spreadsheet_id, sheet_title):
+    """Читает один лист как простую таблицу «заголовок + строки». В отличие
+    от load_distribution_workbook (заточен под план отгрузок —
+    многоуровневые заголовки, колонки-города), здесь формат листа заранее
+    не предполагается вообще — только "таблица с шапкой", подходит для
+    любого простого списка (см. production_orders_import). Для НЕСКОЛЬКИХ
+    листов за один раз см. read_sheet_tables — быстрее одним HTTP-запросом,
+    а не по одному на лист."""
+    if not google_sheets_configured(app):
+        raise RuntimeError("Google Таблица не настроена")
+    service = _service(app)
+    response = service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=_a1_sheet(sheet_title),
+        valueRenderOption="UNFORMATTED_VALUE",
+        dateTimeRenderOption="FORMATTED_STRING",
+    ).execute()
+    return _parse_table_values(response.get("values", []))
+
+
+def read_sheet_tables(app, spreadsheet_id, sheet_titles):
+    """Читает НЕСКОЛЬКО листов ОДНИМ HTTP-запросом (batchGet) — важно, когда
+    листов много (см. production_orders.py — режим "читать все листы
+    таблицы"): по одному запросу на каждый лист синхронизация может не
+    уложиться в таймаут веб-сервера. Возвращает {название_листа:
+    (headers, rows)}; лист, для которого Sheets API не вернул диапазон
+    (например, был удален между list_sheet_titles и этим вызовом), в
+    результате просто отсутствует."""
+    if not google_sheets_configured(app):
+        raise RuntimeError("Google Таблица не настроена")
+    if not sheet_titles:
+        return {}
+    service = _service(app)
+    response = service.spreadsheets().values().batchGet(
+        spreadsheetId=spreadsheet_id,
+        ranges=[_a1_sheet(title) for title in sheet_titles],
+        majorDimension="ROWS",
+        valueRenderOption="UNFORMATTED_VALUE",
+        dateTimeRenderOption="FORMATTED_STRING",
+    ).execute()
+    result = {}
+    for title, value_range in zip(sheet_titles, response.get("valueRanges", [])):
+        result[title] = _parse_table_values(value_range.get("values", []))
+    return result
+
+
 def movement_wms_totals(period_start=None):
     totals = defaultdict(
         lambda: {
@@ -112,12 +211,16 @@ def movement_wms_totals(period_start=None):
             "nomenclature": None,
         }
     )
-    documents = MovementDocument.query.filter_by(status="completed").all()
+    documents = MovementDocument.query.filter(
+        MovementDocument.status == "completed",
+        MovementDocument.shipped_at.isnot(None),
+    ).all()
     for document in documents:
-        shipped_at = document.completed_at or document.received_at or document.created_at
+        shipped_at = document.shipped_at
         # Дата листа задает начало нового плана. Считаем все завершенные
-        # перемещения начиная с 00:01 этой даты — независимо от заявки на
-        # МП и последующей приемки на складе назначения.
+        # перемещения, фактически переданные транспорту, начиная с 00:01
+        # этой даты. Завершение сборки и заявка МП сами по себе не являются
+        # отгрузкой.
         if period_start and (
             not shipped_at
             or shipped_at < datetime.combine(period_start, time(0, 1))
@@ -137,6 +240,11 @@ def movement_wms_totals(period_start=None):
         actual = dict(expected)
         if document.received_at is not None:
             for discrepancy in document.discrepancies:
+                # После приемки с недовозом физический остаток короба уже
+                # уменьшен. Для показателя «отправлено/в пути» восстанавливаем
+                # исходное количество из документа расхождения.
+                expected[discrepancy.nomenclature_id] = discrepancy.expected_qty
+                nomenclature_by_id[discrepancy.nomenclature_id] = discrepancy.nomenclature
                 actual[discrepancy.nomenclature_id] = discrepancy.received_qty
 
         for nomenclature_id, expected_qty in expected.items():

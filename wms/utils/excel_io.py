@@ -252,7 +252,8 @@ def export_placement_to_excel(documents) -> bytes:
                     line.qty,
                     line.nomenclature.unit if line.nomenclature else "",
                     line.box.box_number if line.box else "",
-                    line.box.cell.code if (line.box and line.box.cell) else "",
+                    line.box.cell.code if (line.box and line.box.cell)
+                    else (f"ряд {line.box.zone.code}" if (line.box and line.box.zone) else ""),
                 ]
             )
 
@@ -280,7 +281,17 @@ MOVEMENT_HEADERS = [
 
 def export_movement_to_excel(documents) -> bytes:
     """Одна строка на каждый товар в каждом коробе документа перемещения —
-    короб сканируется целиком, но в отчете видно содержимое."""
+    короб сканируется целиком, но в отчете видно содержимое.
+
+    Один и тот же короб не должен попадать в документ дважды (см.
+    movement.add_box/route_box_add — обе проверяют перед добавлением), но
+    на практике это все-таки может случиться при гонке двух одновременных
+    запросов (см. чат — "экспорт этого документа показывает 2220, в
+    перемещении 2147": короб с двумя MovementLine на один и тот же box_id
+    удваивал сумму по строкам, хотя total_item_qty() считает его один раз
+    через SQL SUM с фильтром по множеству box_id, где дубли естественно
+    схлопываются). Поэтому здесь тоже показываем содержимое каждого
+    короба только один раз, даже если строк документа на него несколько."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Перемещения"
@@ -289,7 +300,11 @@ def export_movement_to_excel(documents) -> bytes:
     status_map = {"draft": "Черновик", "completed": "Завершен"}
 
     for doc in documents:
+        seen_box_ids = set()
         for line in doc.lines:
+            if line.box_id in seen_box_ids:
+                continue
+            seen_box_ids.add(line.box_id)
             box_items = list(line.box.items) if line.box else []
             rows = box_items or [None]
             for box_item in rows:
@@ -333,11 +348,31 @@ MOVEMENT_SUMMARY_HEADERS = [
 ]
 
 
+MOVEMENT_DAILY_SHIPMENTS_HEADERS = [
+    "Дата отгрузки",
+    "Кол-во коробов",
+    "Кол-во товара, шт",
+]
+
+
 def export_movement_summary_to_excel(documents) -> bytes:
     """Одна строка на документ перемещения целиком (в отличие от
     export_movement_to_excel, где строка на каждый товар в каждом коробе) —
     только количество коробов и суммарное количество товара, для быстрой
-    сверки объемов без разбора по позициям."""
+    сверки объемов без разбора по позициям.
+
+    "Кол-во в коробах" — total_sent_qty() (текущее количество товара в
+    коробах документа, живые данные) — эти цифры потом сверяют с заявками
+    на самом маркетплейсе, поэтому нужно показывать актуальное состояние, а
+    не замороженный снимок на момент отправки (см. чат).
+
+    Вторая страница — та же выборка документов, сгруппированная по дню
+    отгрузки (Warehouse.shipped_at — когда транспорт физически забрал
+    товар): суммарно коробов и товара за каждый день (документы без
+    отметки об отгрузке в эту сводку не попадают — для них еще нет дня
+    отгрузки). Период для обеих страниц задается на уровне выборки
+    documents (см. movement.export_summary — date_from/date_to по
+    shipped_at)."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Перемещения (сводно)"
@@ -345,6 +380,7 @@ def export_movement_summary_to_excel(documents) -> bytes:
 
     status_map = {"draft": "Черновик", "completed": "Завершен", "merged": "Объединен"}
 
+    daily = {}
     for doc in documents:
         ws.append(
             [
@@ -355,14 +391,27 @@ def export_movement_summary_to_excel(documents) -> bytes:
                 doc.to_warehouse.marketplace_label() if doc.to_warehouse else "",
                 doc.to_warehouse.name if doc.to_warehouse else "",
                 doc.marketplace_request_number or "",
-                "Да" if doc.marketplace_request_created_at else "Нет",
-                doc.completed_at.strftime("%Y-%m-%d %H:%M") if doc.completed_at else "",
+                "Да"
+                if doc.marketplace_request_created_at
+                and (doc.marketplace_request_number or "").strip()
+                else "Нет",
+                doc.shipped_at.strftime("%Y-%m-%d %H:%M") if doc.shipped_at else "",
                 doc.received_at.strftime("%Y-%m-%d %H:%M") if doc.received_at else "",
                 doc.lines.count(),
-                doc.total_item_qty(),
+                doc.total_sent_qty(),
                 doc.total_plan_fact_qty(),
             ]
         )
+        if doc.shipped_at:
+            day = doc.shipped_at.date()
+            box_count, item_qty = daily.get(day, (0, 0))
+            daily[day] = (box_count + doc.lines.count(), item_qty + doc.total_sent_qty())
+
+    ws2 = wb.create_sheet("Отгрузки по дням")
+    _style_header(ws2, MOVEMENT_DAILY_SHIPMENTS_HEADERS)
+    for day in sorted(daily):
+        box_count, item_qty = daily[day]
+        ws2.append([day.strftime("%Y-%m-%d"), box_count, item_qty])
 
     buffer = io.BytesIO()
     wb.save(buffer)
@@ -459,7 +508,7 @@ def export_shipment_plan_to_excel(picking_list, picking_totals, ozon_cities, wb_
     ws.title = "План отгрузок"
     ws.sheet_view.showGridLines = False
     ws.sheet_view.zoomScale = 85
-    ws.freeze_panes = "H4"
+    ws.freeze_panes = "J4"
     ws.print_options.horizontalCentered = False
     ws.page_setup.orientation = "landscape"
     ws.page_setup.fitToWidth = 1
@@ -470,6 +519,8 @@ def export_shipment_plan_to_excel(picking_list, picking_totals, ozon_cities, wb_
         "Размер",
         "Штрихкод",
         "",
+        "Общий план",
+        "Не хватает по плану",
         "На разбраковке",
         "Готово к отгрузке",
         "В пути",
@@ -514,7 +565,17 @@ def export_shipment_plan_to_excel(picking_list, picking_totals, ozon_cities, wb_
                 ws.cell(row, column).fill = fill
         next_column = end_column + 1
 
-    last_column = max(next_column - 1, len(common_headers))
+    # Последняя колонка с числами (общие показатели + города) — все, что
+    # правее нее, это уже "Комментарий закупщиков", свободный текст без
+    # суммы и без правого выравнивания/числового формата.
+    last_numeric_column = max(next_column - 1, len(common_headers))
+    comment_column = last_numeric_column + 1
+    ws.merge_cells(start_row=1, start_column=comment_column, end_row=2, end_column=comment_column)
+    comment_header = ws.cell(1, comment_column, "Комментарий закупщиков")
+    comment_header.font = Font(name="Arial", size=10, bold=True)
+    comment_header.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    last_column = comment_column
+
     for row in (1, 2):
         for column in range(1, last_column + 1):
             cell = ws.cell(row, column)
@@ -522,18 +583,22 @@ def export_shipment_plan_to_excel(picking_list, picking_totals, ozon_cities, wb_
 
     total_row = 3
     ws.cell(total_row, 1, f"Итого ({len(picking_list)} поз.)")
-    ws.cell(total_row, 5, picking_totals["unplaced"])
-    ws.cell(total_row, 6, picking_totals["ready_to_ship"])
-    ws.cell(total_row, 7, picking_totals["in_transit"])
+    ws.cell(total_row, 5, picking_totals["total_planned"])
+    ws.cell(total_row, 6, picking_totals["total_remaining"])
+    ws.cell(total_row, 7, picking_totals["unplaced"])
+    ws.cell(total_row, 8, picking_totals["ready_to_ship"])
+    ws.cell(total_row, 9, picking_totals["in_transit"])
     for (marketplace, city), column in city_columns.items():
         ws.cell(total_row, column, picking_totals[marketplace][city])
     for column in range(1, last_column + 1):
         cell = ws.cell(total_row, column)
         cell.fill = total_fill
         cell.font = Font(name="Arial", size=9, bold=True)
-        cell.alignment = Alignment(horizontal="right" if column >= 5 else "left", vertical="center")
+        cell.alignment = Alignment(
+            horizontal="right" if 5 <= column <= last_numeric_column else "left", vertical="center"
+        )
         cell.border = Border(bottom=medium_gray)
-        if column >= 5:
+        if 5 <= column <= last_numeric_column:
             cell.number_format = '#,##0;-#,##0;—'
 
     for row_number, product in enumerate(picking_list, start=4):
@@ -541,9 +606,12 @@ def export_shipment_plan_to_excel(picking_list, picking_totals, ozon_cities, wb_
         ws.cell(row_number, 2, product["size"])
         ws.cell(row_number, 3, product["barcode"])
         ws.cell(row_number, 4, "нет на складе" if product["no_stock"] else "")
-        ws.cell(row_number, 5, product["unplaced"])
-        ws.cell(row_number, 6, product["ready_to_ship"])
-        ws.cell(row_number, 7, product["in_transit_total"])
+        ws.cell(row_number, 5, product["total_planned"])
+        ws.cell(row_number, 6, product["total_remaining"])
+        ws.cell(row_number, 7, product["unplaced"])
+        ws.cell(row_number, 8, product["ready_to_ship"])
+        ws.cell(row_number, 9, product["in_transit_total"])
+        ws.cell(row_number, comment_column, product.get("comment") or "")
 
         for (marketplace, city), column in city_columns.items():
             line = product[marketplace].get(city)
@@ -559,13 +627,13 @@ def export_shipment_plan_to_excel(picking_list, picking_totals, ozon_cities, wb_
             cell = ws.cell(row_number, column)
             cell.font = Font(name="Arial", size=9)
             cell.alignment = Alignment(
-                horizontal="right" if column >= 5 else "left",
+                horizontal="right" if 5 <= column <= last_numeric_column else "left",
                 vertical="center",
             )
             cell.border = Border(bottom=thin_gray)
             if product["no_stock"]:
                 cell.fill = no_stock_fill
-            if column >= 5 and not isinstance(cell.value, str):
+            if 5 <= column <= last_numeric_column and not isinstance(cell.value, str):
                 cell.number_format = '#,##0;-#,##0;—'
 
         if product["no_stock"]:
@@ -574,7 +642,7 @@ def export_shipment_plan_to_excel(picking_list, picking_totals, ozon_cities, wb_
             badge.font = Font(name="Arial", size=8, bold=True, color="FFFFFF")
             badge.alignment = Alignment(horizontal="center", vertical="center")
 
-    widths = {1: 30, 2: 12, 3: 19, 4: 16, 5: 18, 6: 22, 7: 12}
+    widths = {1: 30, 2: 12, 3: 19, 4: 16, 5: 14, 6: 16, 7: 18, 8: 22, 9: 12, comment_column: 32}
     for column, width in widths.items():
         ws.column_dimensions[get_column_letter(column)].width = width
     ws.row_dimensions[1].height = 20

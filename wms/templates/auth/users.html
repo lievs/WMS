@@ -26,11 +26,19 @@
           <select name="role" class="form-select">
             <option value="warehouse">Сотрудник склада (полный доступ)</option>
             <option value="production">Сотрудник производства (только сканирование ЧЗ)</option>
+            <option value="logist">Логист (только перемещения, ожидающие транспорт)</option>
           </select>
         </div>
         <div class="mb-2">
           <label class="form-label">Плановая смена, мин <span class="text-muted">(для эффективности на производстве)</span></label>
           <input type="number" step="1" min="1" name="shift_minutes" class="form-control" value="480">
+        </div>
+        <div class="mb-2">
+          <label class="form-label">Рабочий склад</label>
+          <select name="warehouse_id" class="form-select">
+            <option value="">Не назначен</option>
+            {% for wh in warehouses %}{% if wh.is_active %}<option value="{{ wh.id }}">{{ wh.name }}</option>{% endif %}{% endfor %}
+          </select>
         </div>
         <button type="submit" class="btn btn-primary">Создать</button>
       </form>
@@ -41,7 +49,7 @@
   <div class="col-md-8">
     <div class="card p-3">
       <table class="table table-sm table-mobile-compact">
-        <thead><tr><th>Логин</th><th>Имя</th><th>Права</th><th>Разделы</th><th>Роль</th><th>Смена, мин</th><th>Статус</th><th></th></tr></thead>
+        <thead><tr><th>Логин</th><th>Имя</th><th>Права</th><th>Разделы</th><th>Рабочий склад</th><th>Роль</th><th>Смена, мин</th><th>Статус</th><th></th></tr></thead>
         <tbody>
         {% for u in users %}
           <tr>
@@ -127,7 +135,17 @@
                           <div class="form-check mt-3">
                             <input class="form-check-input" type="checkbox" name="movement_complete" id="movementComplete{{ u.id }}" {% if u.movement_complete_allowed %}checked{% endif %}>
                             <label class="form-check-label" for="movementComplete{{ u.id }}">Завершение чужих перемещений</label>
-                            <div class="text-muted small">Даёт кнопки «Собрано» и «Принято на складе» на чужих документах (и просмотр — иначе до кнопок не добраться). Выдайте заведующему складом назначения.</div>
+                            <div class="text-muted small">Даёт кнопку завершения сборки чужого перемещения.</div>
+                          </div>
+                          <div class="form-check mt-3">
+                            <input class="form-check-input" type="checkbox" name="movement_receive" id="movementReceive{{ u.id }}" {% if u.movement_receive_allowed %}checked{% endif %}>
+                            <label class="form-check-label" for="movementReceive{{ u.id }}">Кнопка «Принято на складе»</label>
+                            <div class="text-muted small">Разрешает подтвердить фактическое количество и зафиксировать недовоз.</div>
+                          </div>
+                          <div class="form-check mt-3">
+                            <input class="form-check-input" type="checkbox" name="management_dashboard" id="managementDashboard{{ u.id }}" {% if u.management_dashboard_allowed %}checked{% endif %}>
+                            <label class="form-check-label" for="managementDashboard{{ u.id }}">Панель руководителя</label>
+                            <div class="text-muted small">Открывает сводные показатели эффективности, узкие места и проблемные процессы.</div>
                           </div>
                         </div>
                         <div class="modal-footer">
@@ -139,11 +157,21 @@
                 </div>
               {% endif %}
             </td>
+            <td style="min-width:190px">
+              <form method="post" action="{{ url_for('auth.update_warehouse', user_id=u.id) }}" class="d-flex gap-1">
+                <select name="warehouse_id" class="form-select form-select-sm">
+                  <option value="">Не назначен</option>
+                  {% for wh in warehouses %}{% if wh.is_active %}<option value="{{ wh.id }}" {% if u.warehouse_id == wh.id %}selected{% endif %}>{{ wh.name }}</option>{% endif %}{% endfor %}
+                </select>
+                <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>
+              </form>
+            </td>
             <td style="min-width:200px">
               <form method="post" action="{{ url_for('auth.update_role', user_id=u.id) }}" class="d-flex gap-1">
                 <select name="role" class="form-select form-select-sm" {% if u.id == current_user.id and not u.is_admin %}disabled{% endif %}>
                   <option value="warehouse" {% if u.role == 'warehouse' %}selected{% endif %}>Склад (полный доступ)</option>
                   <option value="production" {% if u.role == 'production' %}selected{% endif %}>Производство (только ЧЗ)</option>
+                  <option value="logist" {% if u.role == 'logist' %}selected{% endif %}>Логист (ждут транспорта)</option>
                 </select>
                 {% if u.id != current_user.id or u.is_admin %}
                 <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>

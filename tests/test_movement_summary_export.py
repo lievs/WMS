@@ -136,7 +136,9 @@ def test_summary_export_separates_boxed_and_actually_received_qty(db, client_log
         receiver_code="WH-MSUM-ACTUAL",
         receiver_marketplace="wb",
         completed_at=now,
+        marketplace_request_number="REQ-MSUM-5",
         marketplace_request_created_at=now,
+        shipped_at=now,
         received_at=now,
     )
     box_item = doc.lines.first().box.items.first()
@@ -164,3 +166,116 @@ def test_summary_export_excludes_no_documents_and_response_is_xlsx(db, client_lo
     resp = client_logged_in.get("/movement/export-summary.xlsx")
     assert resp.status_code == 200
     assert resp.mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def test_summary_export_has_daily_shipments_sheet(db, client_logged_in):
+    """Вторая страница файла — отгрузки по дням: суммарно коробов и товара
+    за каждый день отгрузки (shipped_at), документы без отметки об отгрузке
+    в эту страницу не попадают (см. чат)."""
+    day1 = datetime(2026, 9, 1, 10, 0)
+    day2 = datetime(2026, 9, 2, 11, 0)
+    _make_movement_with_boxes("MSUM-D1", [3, 2], receiver_code="WH-MSUM-D1", shipped_at=day1)
+    _make_movement_with_boxes("MSUM-D2", [5], receiver_code="WH-MSUM-D2", shipped_at=day1)
+    _make_movement_with_boxes("MSUM-D3", [4], receiver_code="WH-MSUM-D3", shipped_at=day2)
+    _make_movement_with_boxes("MSUM-D4-NOSHIP", [10], receiver_code="WH-MSUM-D4")
+
+    resp = client_logged_in.get("/movement/export-summary.xlsx")
+    wb = openpyxl.load_workbook(io.BytesIO(resp.data))
+
+    assert wb.sheetnames == ["Перемещения (сводно)", "Отгрузки по дням"]
+    ws2 = wb["Отгрузки по дням"]
+    header = [c.value for c in ws2[1]]
+    assert header == ["Дата отгрузки", "Кол-во коробов", "Кол-во товара, шт"]
+
+    rows = {row[0]: (row[1], row[2]) for row in ws2.iter_rows(min_row=2, values_only=True) if row[0]}
+    assert rows["2026-09-01"] == (3, 10)  # 2 короба + 1 короб = 3; (3+2)+5 = 10 шт
+    assert rows["2026-09-02"] == (1, 4)
+    assert len(rows) == 2  # неотгруженный документ (MSUM-D4) не попал
+
+
+def test_summary_export_date_range_filters_by_shipped_at(db, client_logged_in):
+    early = datetime(2026, 8, 1, 10, 0)
+    inside = datetime(2026, 9, 10, 10, 0)
+    late = datetime(2026, 10, 1, 10, 0)
+    doc_early = _make_movement_with_boxes("MSUM-R1", [1], receiver_code="WH-MSUM-R1", shipped_at=early)
+    doc_inside = _make_movement_with_boxes("MSUM-R2", [1], receiver_code="WH-MSUM-R2", shipped_at=inside)
+    doc_late = _make_movement_with_boxes("MSUM-R3", [1], receiver_code="WH-MSUM-R3", shipped_at=late)
+
+    resp = client_logged_in.get("/movement/export-summary.xlsx?date_from=2026-09-01&date_to=2026-09-30")
+    rows = _read_xlsx_rows(resp.data)
+    numbers = {r[0] for r in rows}
+
+    assert doc_inside.number in numbers
+    assert doc_early.number not in numbers
+    assert doc_late.number not in numbers
+
+
+def test_summary_export_date_to_is_inclusive_of_whole_day(db, client_logged_in):
+    end_of_day = datetime(2026, 9, 30, 23, 59)
+    doc = _make_movement_with_boxes("MSUM-R4", [1], receiver_code="WH-MSUM-R4", shipped_at=end_of_day)
+
+    resp = client_logged_in.get("/movement/export-summary.xlsx?date_from=2026-09-01&date_to=2026-09-30")
+    numbers = {r[0] for r in _read_xlsx_rows(resp.data)}
+
+    assert doc.number in numbers
+
+
+def test_summary_export_without_dates_includes_everything_like_before(db, client_logged_in):
+    doc_no_ship = _make_movement_with_boxes("MSUM-R5", [1], receiver_code="WH-MSUM-R5")
+    doc_shipped = _make_movement_with_boxes(
+        "MSUM-R6", [1], receiver_code="WH-MSUM-R6", shipped_at=datetime(2020, 1, 1)
+    )
+
+    resp = client_logged_in.get("/movement/export-summary.xlsx")
+    numbers = {r[0] for r in _read_xlsx_rows(resp.data)}
+
+    assert doc_no_ship.number in numbers
+    assert doc_shipped.number in numbers
+
+
+def test_list_page_has_summary_export_date_range_fields(db, client_logged_in):
+    html = client_logged_in.get("/movement/").get_data(as_text=True)
+    assert 'name="date_from"' in html
+    assert 'name="date_to"' in html
+
+
+def test_summary_export_kolvo_v_korobah_shows_live_qty_not_stale_snapshot(db, client_logged_in):
+    """Регрессия: total_sent_qty() раньше отдавал замороженный на момент
+    complete() sent_qty_snapshot, из-за чего сводный экспорт расходился с
+    тем, что видно в самом перемещении после правки короба (см. чат:
+    "экспорт показывает 2220, строка показывает 2147"). Эти цифры сверяют с
+    заявками на самом маркетплейсе, поэтому нужны актуальные данные — теперь
+    total_sent_qty() всегда равен "живому" total_item_qty()."""
+    sender = Warehouse(code="WH-MSUM-SNAP-A", name="Отправитель")
+    receiver = Warehouse(code="WH-MSUM-SNAP-B", name="Получатель")
+    db.session.add_all([sender, receiver])
+    db.session.commit()
+    item = _make_item("777MSUM-SNAP0")
+    doc = MovementDocument(
+        number="MSUM-SNAP", from_warehouse_id=sender.id, to_warehouse_id=receiver.id, status="draft"
+    )
+    db.session.add(doc)
+    db.session.commit()
+    box = Box(box_number="BOX-MSUM-SNAP-0", warehouse_id=sender.id, status="open")
+    db.session.add(box)
+    db.session.commit()
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=10))
+    db.session.add(MovementLine(document_id=doc.id, box_id=box.id, from_warehouse_id=sender.id))
+    db.session.commit()
+
+    # Реальное завершение через маршрут — именно оно фиксирует sent_qty_snapshot.
+    resp = client_logged_in.post(f"/movement/{doc.id}/complete", follow_redirects=True)
+    assert resp.status_code == 200
+    doc = MovementDocument.query.get(doc.id)
+    assert doc.sent_qty_snapshot == 10
+
+    # Короб поправили постфактум — фактическое содержимое выросло.
+    box_item = doc.lines.first().box.items.first()
+    box_item.qty = 73
+    db.session.commit()
+    assert doc.total_item_qty() == 73
+
+    rows = _read_xlsx_rows(client_logged_in.get("/movement/export-summary.xlsx").data)
+    row = next(r for r in rows if r[0] == doc.number)
+
+    assert row[11] == 73  # "Кол-во в коробах" — актуальное количество, не старый снимок 10

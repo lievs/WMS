@@ -65,6 +65,8 @@ def test_marketplace_request_reaches_requested_chip_not_shipped(db, client_logge
     doc, _item = _make_doc_with_box(sender, dest, "MCHIP-0003", "BOX-MCHIP3")
 
     client_logged_in.post(f"/movement/{doc.id}/complete")
+    doc.marketplace_request_number = "REQ-CHIP-3"
+    db.session.commit()
     client_logged_in.post(f"/movement/{doc.id}/toggle-marketplace-request")
 
     html = client_logged_in.get(f"/movement/{doc.id}").get_data(as_text=True)
@@ -78,12 +80,16 @@ def test_received_document_reaches_shipped_chip(db, client_logged_in):
     doc, item = _make_doc_with_box(sender, dest, "MCHIP-0004", "BOX-MCHIP4")
 
     client_logged_in.post(f"/movement/{doc.id}/complete")
+    doc.marketplace_request_number = "REQ-CHIP-4"
+    db.session.commit()
     client_logged_in.post(f"/movement/{doc.id}/toggle-marketplace-request")
+    client_logged_in.post(f"/movement/{doc.id}/mark-shipped")
     client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "1"})
 
     html = client_logged_in.get(f"/movement/{doc.id}").get_data(as_text=True)
 
     assert "status-chip-shipped status-chip-reached" in html
+    assert "status-chip-accepted status-chip-reached" in html
 
 
 def test_list_page_shows_status_chips(db, client_logged_in):
@@ -96,11 +102,14 @@ def test_list_page_shows_status_chips(db, client_logged_in):
     assert "status-chip-onassembly status-chip-reached" in html
 
 
-def test_list_page_has_per_column_text_filters(db, client_logged_in):
+def test_list_page_has_search_field(db, client_logged_in):
+    """Поиск по всем перемещениям (не только по текущей странице, см. чат
+    и test_movement_pagination.py) — одно поле ввода + фильтр по заявке на
+    МП, запрос идет к БД."""
     sender, dest = _make_warehouses("6")
     _make_doc_with_box(sender, dest, "MCHIP-0006", "BOX-MCHIP6")
 
     html = client_logged_in.get("/movement/").get_data(as_text=True)
 
-    assert "col-filter" in html
-    assert 'data-col="1"' in html
+    assert 'name="q"' in html
+    assert 'name="mp_request"' in html

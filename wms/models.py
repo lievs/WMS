@@ -122,13 +122,32 @@ class User(UserMixin, db.Model):
     # (см. movement._can_view_movement_document) — без него не добраться до
     # кнопок на детальной странице.
     movement_complete_allowed = db.Column(db.Boolean, nullable=False, default=False)
+    # Отдельное право подтверждать фактическую приемку перемещения на
+    # складе назначения. Не связано с правом завершать сборку.
+    movement_receive_allowed = db.Column(db.Boolean, nullable=True, default=None)
+    # Отдельный доступ к сводной панели руководителя. Операционные отчеты
+    # могут быть доступны сотруднику, но финансово-управленческая сводка
+    # при этом остается скрытой.
+    management_dashboard_allowed = db.Column(db.Boolean, nullable=False, default=False)
+    # Рабочий склад сотрудника. Для перемещений он всегда становится
+    # складом-отправителем, поэтому сотрудник не может случайно собрать
+    # документ от имени другого склада.
+    warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=True)
     # Версия входа используется для принудительного завершения сессий.
     # Она записывается в cookie при авторизации; увеличение значения делает
     # все ранее выданные cookie пользователя недействительными.
     session_version = db.Column(db.Integer, nullable=False, default=0)
 
+    warehouse = db.relationship("Warehouse", foreign_keys=[warehouse_id])
+
     def is_production_only(self):
         return self.role == "production" and not self.is_admin
+
+    def is_logist_only(self):
+        """Логист видит только перемещения, ожидающие передачи транспорту
+        (movement.transport_list) — ничего больше в WMS, см. чат. Проверяется
+        в before_request так же, как is_production_only()."""
+        return self.role == "logist" and not self.is_admin
 
     def allowed_section_set(self):
         if not self.allowed_sections:
@@ -155,6 +174,16 @@ class User(UserMixin, db.Model):
 
     def can_complete_movements(self):
         return self.is_admin or self.movement_complete_allowed is True
+
+    def can_receive_movements(self):
+        # NULL — пользователь существовал до разделения старого общего
+        # права; сохраняем прежнее поведение до первого сохранения формы.
+        return self.is_admin or self.movement_receive_allowed is True or (
+            self.movement_receive_allowed is None and self.movement_complete_allowed is True
+        )
+
+    def can_view_management_dashboard(self):
+        return self.is_admin or self.management_dashboard_allowed is True
 
     def has_section_access(self, section):
         """Раздел не из SECTIONS (например, служебные api/boxes/labels) не
@@ -245,6 +274,12 @@ class Zone(db.Model):
 
     warehouse = db.relationship("Warehouse")
     cells = db.relationship("Cell", backref="zone", lazy="dynamic")
+    # Короба, размещенные СРАЗУ в ряду, без конкретной ячейки — для
+    # помещений, где нет возможности завести ячейки (см. чат). Ряд с нулем
+    # ячеек уже можно было создать и раньше (cell_count=0 в форме), но до
+    # этого поля разместить в него короб было нечем — только в ячейку.
+    # У самого ряда, в отличие от ячейки, нет ограничения по вместимости.
+    boxes = db.relationship("Box", backref="zone", lazy="dynamic")
 
     __table_args__ = (
         db.UniqueConstraint("warehouse_id", "code", name="uq_zone_warehouse_code"),
@@ -390,6 +425,28 @@ class UnplacedStock(db.Model):
             .all()
         )
 
+    def initial_qty(self):
+        """Сколько изначально пришло по партиям, из которых складывается
+        ТЕКУЩИЙ остаток (см. активные — active_lots(), полностью
+        размещенные партии сюда уже не входят, они больше не часть этого
+        остатка). None — партий нет (остаток заведен до появления партий,
+        начальное количество неизвестно)."""
+        lots = self.active_lots()
+        if not lots:
+            return None
+        return sum(lot.qty_received for lot in lots)
+
+    def placed_qty(self):
+        """Сколько из initial_qty() уже размещено (упаковано в короба/
+        расставлено) — разница между тем, что пришло, и тем, что еще
+        числится неразмещенным (см. чат: колонки "начальный остаток" и
+        "сколько размещено" на странице Размещения). None — как и у
+        initial_qty(), если партий нет."""
+        initial = self.initial_qty()
+        if initial is None:
+            return None
+        return max(initial - self.qty, 0)
+
 
 class UnplacedStockLot(db.Model):
     """Одна партия неразмещенного остатка — привязана к конкретной приемке
@@ -462,6 +519,12 @@ class Box(db.Model):
     box_number = db.Column(db.String(30), unique=True, nullable=False)
     warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=False, index=True)
     cell_id = db.Column(db.Integer, db.ForeignKey("cells.id"), nullable=True, index=True)
+    # Ряд, в который короб размещен НАПРЯМУЮ, без конкретной ячейки — для
+    # помещений без возможности завести ячейки (см. чат). Взаимоисключимо с
+    # cell_id: расставленный короб имеет ЛИБО cell_id, ЛИБО zone_id, никогда
+    # оба сразу (см. placement._place_box). Оба пустые — короб еще не
+    # расставлен вовсе (как и раньше).
+    zone_id = db.Column(db.Integer, db.ForeignKey("zones.id"), nullable=True, index=True)
     placement_document_id = db.Column(
         db.Integer, db.ForeignKey("placement_documents.id"), nullable=True, index=True
     )
@@ -482,6 +545,20 @@ class Box(db.Model):
 
     def total_qty(self):
         return sum(item.qty for item in self.items)
+
+    def is_placed(self):
+        return self.cell_id is not None or self.zone_id is not None
+
+    def location_label(self):
+        """Куда короб расставлен, для использования в середине фразы
+        ("короб размещен в " + location_label()) — "ячейке <код>" либо, для
+        короба напрямую в ряду без ячейки (см. zone_id), "ряду <код>".
+        None — еще не расставлен."""
+        if self.cell_id:
+            return f"ячейке {self.cell.code}"
+        if self.zone_id:
+            return f"ряду {self.zone.code}"
+        return None
 
     def mark_scanned(self, user):
         self.last_scanned_at = datetime.utcnow()
@@ -592,6 +669,14 @@ class ReceivingDocument(db.Model):
     # см. receiving.send_to_sorting/complete.
     status = db.Column(db.String(20), nullable=False, default="draft")
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    # Если приемка была открыта из инвентаризации пустого короба, после
+    # завершения возвращаем сотрудника в тот же лист.
+    return_inventory_id = db.Column(
+        db.Integer, db.ForeignKey("inventory_documents.id"), nullable=True
+    )
+    return_inventory_box_id = db.Column(
+        db.Integer, db.ForeignKey("boxes.id"), nullable=True
+    )
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     # Когда документ перешел на пересчет/разбраковку — для истории статусов
     # на странице приемки (см. receiving.send_to_recount/send_to_sorting).
@@ -751,7 +836,7 @@ class MovementDocument(db.Model):
     number = db.Column(db.String(30), unique=True, nullable=False)
     from_warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=False)
     to_warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=False, index=True)
-    status = db.Column(db.String(20), nullable=False, default="draft")  # draft | completed | merged
+    status = db.Column(db.String(20), nullable=False, default="draft")  # draft | collected | completed | merged
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime)
@@ -791,10 +876,12 @@ class MovementDocument(db.Model):
     # от зеленой "1С" — независима от нее и от самой отправки, для
     # отдельного контроля за заявкой на приемку на стороне маркетплейса.
     marketplace_request_created_at = db.Column(db.DateTime, nullable=True)
-    # Номер самой заявки на приемку у маркетплейса — вносится вручную,
-    # когда становится известен (галочка выше могла быть отмечена раньше,
-    # до того как номер стал известен). См. movement.update_marketplace_request_number.
+    # Номер самой заявки на приемку у маркетплейса вносится вручную до
+    # установки галочки выше. См. movement.update_marketplace_request_number.
     marketplace_request_number = db.Column(db.String(50), nullable=True)
+    # Момент, когда транспорт физически забрал товар. Он отделен и от
+    # подачи заявки на МП, и от последующей фактической приемки площадкой.
+    shipped_at = db.Column(db.DateTime, nullable=True)
     # Заполняется, когда состав уже выгруженного в 1С документа меняют
     # (добавили/удалили короб — movement.add_box/delete_line, или поправили
     # количество в коробе, уже уехавшем этим перемещением — boxes.add_item/
@@ -803,6 +890,15 @@ class MovementDocument(db.Model):
     # ничего не нужно. Сбрасывается обратно в NULL, когда 1С подтверждает,
     # что скорректировала документ у себя (см. export_confirm).
     composition_changed_at = db.Column(db.DateTime, nullable=True)
+    # Снимок количества на момент завершения сборки. Раньше total_sent_qty()
+    # показывал именно его, но это разъезжалось с тем, что видно в экспортах
+    # и с чем эти цифры сверяют по факту — заявками на самом маркетплейсе
+    # (см. чат): если содержимое короба поправили уже после отправки, нужно
+    # видеть актуальное состояние, а не то, что было отправлено изначально.
+    # Поле оставлено (не читается для отображения), поскольку кто-то может
+    # опираться на него отдельно — при необходимости используйте его явно.
+    sent_qty_snapshot = db.Column(db.Float, nullable=True)
+    received_qty_snapshot = db.Column(db.Float, nullable=True)
 
     from_warehouse = db.relationship("Warehouse", foreign_keys=[from_warehouse_id])
     to_warehouse = db.relationship("Warehouse", foreign_keys=[to_warehouse_id])
@@ -828,10 +924,21 @@ class MovementDocument(db.Model):
         """Фактически принято на складе назначения с учетом расхождений."""
         if self.received_at is None:
             return None
+        if self.received_qty_snapshot is not None:
+            return self.received_qty_snapshot
         return self.total_item_qty() + sum(
             discrepancy.received_qty - discrepancy.expected_qty
             for discrepancy in self.discrepancies
         )
+
+    def total_sent_qty(self):
+        """Текущее количество товара в коробах документа — то же самое, что
+        total_item_qty(). Раньше отдавал замороженный sent_qty_snapshot, но
+        эти цифры сравнивают с заявками на самом маркетплейсе, а значит
+        нужны актуальные данные, а не снимок на момент отправки (см. чат:
+        "экспорт показывает 2220, строка показывает 2147" — после правки
+        короба цифры разъехались)."""
+        return self.total_item_qty()
 
     def total_shortage_qty(self):
         """Сколько товара не принято на складе назначения и нужно найти."""
@@ -840,16 +947,14 @@ class MovementDocument(db.Model):
     def total_plan_fact_qty(self):
         """Количество документа, которое может входить в факт плана.
 
-        До создания заявки завершенный документ не считается отгрузкой.
+        До передачи транспорту завершенный документ не считается отгрузкой.
         В пути учитываем состав коробов, после приемки — фактически принятое.
         """
         if self.status != "completed":
             return 0
         if self.received_at is not None:
             return self.total_received_qty()
-        if self.marketplace_request_created_at is not None or (
-            self.marketplace_request_number or ""
-        ).strip():
+        if self.shipped_at is not None:
             return self.total_item_qty()
         return 0
 
@@ -886,6 +991,25 @@ class MovementReceiptDiscrepancy(db.Model):
 
     def excess_qty(self):
         return max(self.received_qty - self.expected_qty, 0)
+
+
+class OneCQuantityCheck(db.Model):
+    """Результат сверки количества документа в 1С с тем же документом WMS."""
+
+    __tablename__ = "one_c_quantity_checks"
+
+    id = db.Column(db.Integer, primary_key=True)
+    document_type = db.Column(db.String(30), nullable=False, index=True)
+    document_id = db.Column(db.Integer, nullable=False, index=True)
+    document_number = db.Column(db.String(50), nullable=False)
+    barcode = db.Column(db.String(100), nullable=True)
+    item_name = db.Column(db.String(300), nullable=True)
+    wms_qty = db.Column(db.Float, nullable=False, default=0)
+    one_c_qty = db.Column(db.Float, nullable=False, default=0)
+    checked_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    def diff(self):
+        return self.one_c_qty - self.wms_qty
 
 
 class MovementLine(db.Model):
@@ -975,9 +1099,16 @@ class InventoryDocument(db.Model):
     # эту ячейку (см. inventory.add_box) — по сути инвентаризация ячейки
     # одновременно и есть ее фактическое размещение.
     cell_id = db.Column(db.Integer, db.ForeignKey("cells.id"), nullable=True)
+    # Аналогично cell_id, но выборочная инвентаризация целого РЯДА без
+    # ячеек (см. чат — помещения, где ячейки завести нельзя): сравнение
+    # идет с тем, что стоит в рядy напрямую (Box.zone_id), а сканирование
+    # короба сразу переставляет его в этот ряд (см. inventory.add_box).
+    # Взаимоисключимо с cell_id — заполнено только одно из двух, либо ни одно.
+    zone_id = db.Column(db.Integer, db.ForeignKey("zones.id"), nullable=True)
 
     warehouse = db.relationship("Warehouse")
     cell = db.relationship("Cell")
+    zone = db.relationship("Zone")
     created_by = db.relationship("User")
     merged_into = db.relationship("InventoryDocument", remote_side=[id], backref="merged_from")
     lines = db.relationship(
@@ -1071,6 +1202,38 @@ class ShipmentPlanLine(db.Model):
     # строки одного объединенного плана могут начинаться в разные даты.
     # Только перемещения с этой даты закрывают потребность строки.
     period_start = db.Column(db.Date, nullable=True)
+    # Комментарий закупщиков из той же строки файла плана (см.
+    # utils.shipment_plan_import._find_comment_col) — например, причина
+    # задержки поставки конкретного SKU. Читается из Google/Excel заново
+    # при каждой загрузке плана, как и planned_qty.
+    buyer_comment = db.Column(db.Text)
+    # Приоритет из колонки "Приоритет" файла плана (см. чат) — один и тот
+    # же на все города/площадки этого штрихкода (колонка стоит до городов,
+    # читается один раз на строку). Не участвует в выполнении плана — либо
+    # красит строку товара в "Что нужно отправить" на дашборде, либо (для
+    # значений 0/1/2) переключает распределение по городам на
+    # distributed_target_qty вместо planned_qty (см. ниже).
+    priority = db.Column(db.Integer, nullable=True)
+    # Код товара-новинки под конкретный маркетплейс — "wb" (из "0w" в файле
+    # плана) или "ozon" (из "0o") — см. чат: "введем еще типы приоритетов".
+    # У новинки обычно еще нет своего плана ни по одному городу (см.
+    # utils.shipment_plan_import._parse_priority_cell — такая строка не
+    # отбрасывается парсером именно из-за этого поля), поэтому распределяет
+    # ее не доля СВОЕГО плана по городам (как для priority 0/1/2), а средний
+    # процент распределения ОСТАЛЬНЫХ товаров этого маркетплейса (см.
+    # shipment_plan._average_city_share_by_marketplace) — и только по
+    # городам указанного маркетплейса, даже если у штрихкода почему-то
+    # нашлись строки и на другой площадке. Взаимоисключимо с priority —
+    # заполнено ровно одно из двух полей, либо ни одного.
+    novelty_marketplace = db.Column(db.String(10), nullable=True)
+    # Для приоритетных товаров (priority in (0, 1, 2)) и товаров-новинок
+    # (novelty_marketplace задан) — целевое количество НА ЭТОТ ГОРОД,
+    # посчитанное при синхронизации плана как доля текущего "готово к
+    # отгрузке" по штрихкоду (см. shipment_plan._apply_priority_distribution)
+    # — вместо жесткого planned_qty города, если фактически упакованного
+    # товара больше или меньше, чем весь план. NULL — ни то ни другое не
+    # задано, либо не с чего считать долю.
+    distributed_target_qty = db.Column(db.Float, nullable=True)
 
     warehouse = db.relationship("Warehouse")
     nomenclature = db.relationship("Nomenclature")
@@ -1078,6 +1241,24 @@ class ShipmentPlanLine(db.Model):
     __table_args__ = (
         db.UniqueConstraint("plan_id", "warehouse_id", "barcode", name="uq_plan_warehouse_barcode"),
     )
+
+    def effective_planned_qty(self):
+        """planned_qty этого города — либо, для приоритетных товаров и
+        товаров-новинок (novelty_marketplace) с уже посчитанным
+        распределением, пропорциональная цель по факту "готово к отгрузке"
+        вместо жесткого плана города (см. distributed_target_qty и чат).
+        Используется ТОЛЬКО подсказкой "куда везти короб" (см.
+        movement._compute_routing) — сознательно не участвует в
+        remaining_qty()/дашборде: там план и так уже показывает разрыв с
+        планом по каждому городу, а при нулевом "готово к отгрузке" эта
+        цель обнулилась бы и товар с реальной нехваткой пропал бы из
+        "Что нужно отправить" вместо того чтобы показать проблему."""
+        if (
+            (self.priority in (0, 1, 2) or self.novelty_marketplace)
+            and self.distributed_target_qty is not None
+        ):
+            return self.distributed_target_qty
+        return self.planned_qty
 
     def remaining_qty(self):
         fulfilled_qty = getattr(self, "current_fulfilled_qty", self.fulfilled_qty)
@@ -1139,3 +1320,123 @@ class OzonArticleMapping(db.Model):
     barcode = db.Column(db.String(50), unique=True, nullable=False, index=True)
     article = db.Column(db.String(200), nullable=False)
     updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# Этапы производства до прихода на склад (после — уже ведется в WMS сквозь
+# ReceivingDocument/PlacementDocument/MovementDocument) — см. панель
+# руководителя и чат (уточненная схема). Порядок важен: используется и для
+# последовательного "продвижения" этапа при синхронизации (см.
+# production_orders._advance_stage), и для отображения воронки в нужном
+# порядке.
+#
+# Точка отсчета первого этапа — НЕ отдельный статус в таблице, а ДАТА ИЗ
+# НАЗВАНИЯ ЛИСТА (см. чат: "из таблицы берем дату из названия листа, это
+# точка отсчета для поиска производства" — тот же прием, что уже есть для
+# листов плана отгрузок, см. shipment_plan_import.extract_period_start),
+# поэтому отдельного "заказ размещен" этапа здесь нет.
+#
+# "Отмена" и "переделка" образца — НЕ отдельные этапы воронки, а
+# статус-модификаторы поверх "sample_sewing" (см. ProductionOrder.
+# sample_cancelled_at/rework_count): переделка продлевает время в этом же
+# этапе (просто возвращает current_stage на "sample_sewing", не трогая уже
+# проставленные даты), отмена — терминальное состояние, заказ выбывает из
+# расчета средних длительностей по живым заказам и считается отдельно.
+PRODUCTION_ORDER_STAGE_KEYS = [
+    "workshop_search",
+    "sample_sewing",
+    "sample_approved",
+    "photo_requested",
+    "mp_card_created",
+    "data_in_1c",
+    "order_in_1c",
+]
+PRODUCTION_ORDER_STAGE_LABELS = {
+    "workshop_search": "Поиск поставщика/цеха",
+    "sample_sewing": "Отшив образца",
+    "sample_approved": "Образец согласован",
+    "photo_requested": "Запрос фото образца",
+    "mp_card_created": "Карточка на МП заведена",
+    "data_in_1c": "Данные занесены в 1С",
+    "order_in_1c": "Заказ внесен в 1С",
+}
+# Терминальное состояние — не часть линейной воронки выше (см. ProductionOrder.current_stage).
+PRODUCTION_ORDER_STAGE_CANCELLED = "sample_cancelled"
+
+
+class ProductionOrder(db.Model):
+    """Заказ на пошив продукции — этапы ДО прихода на склад: поиск
+    поставщика/цеха, отшив образца, согласование, запрос фото, карточка на
+    МП, данные и заказ в 1С (см. чат — панель руководителя). После внесения
+    заказа в 1С дальнейший ориентир — не статус из таблицы, а deadline_date
+    (дедлайн партии) — дальше уже идет обычный процесс WMS (приемка и
+    т.д., см. ReceivingDocument.order_number — сопоставляется с этим же
+    order_number). Источник данных — внешняя Google-таблица, которую ведет
+    менеджер вручную (см. production_orders.py — синхронизация по кнопке в
+    самой таблице, по аналогии с планом отгрузок, см.
+    shipment_plan.google_button_setup).
+
+    Таблица хранит только ТЕКУЩИЙ статус заказа, без истории — сама WMS не
+    может знать даты этапов, которые уже прошли ДО первой синхронизации.
+    Если в таблице есть отдельные колонки с датами этапов (см.
+    production_orders_import._STAGE_DATE_CANDIDATES), даты берутся из них
+    напрямую — это надежный случай. Если таких колонок нет, WMS засчитывает
+    дату этапа тем моментом, когда САМА впервые увидела эту строку в этом
+    статусе (при каждой синхронизации) — это лишь приближение: если
+    менеджер сменил статус за день до синхронизации (или вообще ни разу не
+    запускал ее раньше), фактическая длительность этапа в отчете будет
+    неточной. Чем чаще идет синхронизация, тем точнее."""
+
+    __tablename__ = "production_orders"
+
+    id = db.Column(db.Integer, primary_key=True)
+    order_number = db.Column(db.String(50), unique=True, nullable=False, index=True)
+    marketplace = db.Column(db.String(20), nullable=True)
+    # Текущий этап — один из PRODUCTION_ORDER_STAGE_KEYS, либо
+    # PRODUCTION_ORDER_STAGE_CANCELLED, либо NULL, если текст статуса из
+    # таблицы не удалось сопоставить ни с одним из них (см. raw_status —
+    # тогда там видно, что именно не распозналось).
+    current_stage = db.Column(db.String(30), nullable=True)
+    raw_status = db.Column(db.String(200), nullable=True)
+
+    workshop_search_started_at = db.Column(db.DateTime, nullable=True)
+    sample_sewing_started_at = db.Column(db.DateTime, nullable=True)
+    sample_approved_at = db.Column(db.DateTime, nullable=True)
+    photo_requested_at = db.Column(db.DateTime, nullable=True)
+    mp_card_created_at = db.Column(db.DateTime, nullable=True)
+    data_in_1c_at = db.Column(db.DateTime, nullable=True)
+    order_in_1c_at = db.Column(db.DateTime, nullable=True)
+
+    # См. класс-докстринг и PRODUCTION_ORDER_STAGE_CANCELLED — не часть
+    # линейной воронки, статус-модификаторы поверх "Отшив образца".
+    sample_cancelled_at = db.Column(db.DateTime, nullable=True)
+    rework_count = db.Column(db.Integer, nullable=False, default=0)
+    last_rework_at = db.Column(db.DateTime, nullable=True)
+
+    # Дедлайн партии из таблицы (одна дата на заказ, см. чат) — ориентир
+    # ПОСЛЕ внесения заказа в 1С, когда дальше уже нет отдельных статусов
+    # этой таблицы, а идет обычный процесс WMS. Обновляется при каждой
+    # синхронизации (в отличие от дат этапов — дедлайн может сдвинуться
+    # менеджером, а не только устанавливаться один раз).
+    deadline_date = db.Column(db.Date, nullable=True)
+
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    last_synced_at = db.Column(db.DateTime, nullable=True)
+
+    _STAGE_TIMESTAMP_COLUMNS = {
+        "workshop_search": "workshop_search_started_at",
+        "sample_sewing": "sample_sewing_started_at",
+        "sample_approved": "sample_approved_at",
+        "photo_requested": "photo_requested_at",
+        "mp_card_created": "mp_card_created_at",
+        "data_in_1c": "data_in_1c_at",
+        "order_in_1c": "order_in_1c_at",
+    }
+
+    def stage_timestamp(self, stage_key):
+        column = self._STAGE_TIMESTAMP_COLUMNS.get(stage_key)
+        return getattr(self, column) if column else None
+
+    def set_stage_timestamp(self, stage_key, value):
+        column = self._STAGE_TIMESTAMP_COLUMNS.get(stage_key)
+        if column:
+            setattr(self, column, value)
