@@ -38,6 +38,15 @@
       <button type="submit" class="btn btn-sm btn-outline-secondary">Сохранить</button>
     </form>
     {% endif %}
+    {% if can_manage_document %}
+    <form method="post" action="{{ url_for('movement.update_delivery_slot_date', doc_id=doc.id) }}" class="d-flex gap-1 align-items-center mt-2">
+      <input type="hidden" name="return_to" value="detail">
+      <label class="small text-muted text-nowrap" for="deliverySlotDate{{ doc.id }}">Дата поставки:</label>
+      <input type="date" id="deliverySlotDate{{ doc.id }}" name="delivery_slot_date" value="{{ doc.delivery_slot_date.isoformat() if doc.delivery_slot_date else '' }}" class="form-control form-control-sm" style="max-width:150px"
+             title="Дата слота, забронированного на маркетплейсе — печатается на стикерах отправления вместо сегодняшней даты">
+      <button type="submit" class="btn btn-sm btn-outline-secondary">Сохранить</button>
+    </form>
+    {% endif %}
   </div>
   <div>
     <a class="btn btn-outline-secondary" href="{{ url_for('movement.export_document', doc_id=doc.id) }}">📤 Экспорт в Excel</a>

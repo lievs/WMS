@@ -59,7 +59,11 @@ def _cell_suggestion_context(warehouse_id):
     unplaced_nom_counts), которые считаются без фильтра по cell_id и потому
     ЗАХВАТЫВАЮТ сам этот короб — их корректировка на конкретный короб
     происходит уже в _suggest_cell_from_context, в памяти, без лишнего запроса."""
-    cells = Cell.query.filter_by(warehouse_id=warehouse_id, is_active=True).all()
+    # unlimited=False — безлимитная ячейка ряда (см. Cell.unlimited) не
+    # участвует в автоподборе: это осознанный ручной выбор ряда
+    # ("Размещение в ряды"), а не то, что стоит предлагать вперемешку с
+    # обычными ячейками при упаковке произвольного товара.
+    cells = Cell.query.filter_by(warehouse_id=warehouse_id, is_active=True, unlimited=False).all()
 
     nom_to_cell_ids = {}
     for nid, cell_id_val in (
@@ -306,6 +310,28 @@ def list_documents():
     cell_suggestions = {}
     for warehouse_id, boxes in boxes_by_warehouse.items():
         cell_suggestions.update(suggest_cells_for_boxes(warehouse_id, boxes))
+
+    # Список рядов для вкладки "Размещение в ряды" (см. чат) — количество
+    # коробов берем из уже созданной безлимитной ячейки ряда (см.
+    # _get_or_create_row_cell); пока ряд ни разу не использовали через эту
+    # вкладку, такой ячейки еще нет — считаем, что коробов в ряду 0 (она
+    # создастся сама при первом обращении через scan_row).
+    zones = (
+        Zone.query.filter_by(is_active=True)
+        .join(Warehouse, Zone.warehouse_id == Warehouse.id)
+        .order_by(Warehouse.code, Zone.code)
+        .all()
+    )
+    row_cells_by_zone_code = {
+        (cell.warehouse_id, cell.code): cell
+        for cell in Cell.query.filter_by(unlimited=True).all()
+    }
+    zone_row_box_counts = {
+        zone.id: row_cells_by_zone_code[(zone.warehouse_id, zone.code)].boxes.count()
+        for zone in zones
+        if (zone.warehouse_id, zone.code) in row_cells_by_zone_code
+    }
+
     return render_template(
         "placement/list.html",
         documents=documents,
@@ -314,6 +340,8 @@ def list_documents():
         open_boxes=open_boxes,
         boxes_pagination=boxes_pagination,
         cell_suggestions=cell_suggestions,
+        zones=zones,
+        zone_row_box_counts=zone_row_box_counts,
         warehouses=Warehouse.query.filter_by(is_active=True).order_by(Warehouse.code).all(),
     )
 
@@ -785,7 +813,7 @@ def _place_box(box, location_code, expected_warehouse_id):
 
     cell = Cell.query.filter_by(warehouse_id=expected_warehouse_id, code=location_code).first()
     if cell:
-        if cell.id != box.cell_id and cell.free_space() <= 0:
+        if not cell.unlimited and cell.id != box.cell_id and cell.free_space() <= 0:
             return f"Ячейка '{location_code}' заполнена (вмещает {CELL_CAPACITY} коробов)"
         box.cell_id = cell.id
         box.zone_id = None
@@ -804,6 +832,34 @@ def _place_box(box, location_code, expected_warehouse_id):
         return None
 
     return f"Ячейка или ряд '{location_code}' не найдены на этом складе"
+
+
+def _get_or_create_row_cell(zone):
+    """Возвращает (создавая при первом обращении) специальную ячейку ряда
+    без ограничения по вместимости — см. Cell.unlimited и "Размещение в
+    ряды" в чате. Называется тем же кодом, что и сам ряд: обычные
+    автосгенерированные ячейки получают код вида "<ряд><NNNN>" (см.
+    warehouses._generate_cells), поэтому совпадения с кодом ряда не
+    бывает, и последующий поиск по коду (_place_box, scan_cell) сразу
+    находит именно ее."""
+    cell = Cell.query.filter_by(warehouse_id=zone.warehouse_id, code=zone.code).first()
+    if cell:
+        return cell
+    cell = Cell(warehouse_id=zone.warehouse_id, zone_id=zone.id, code=zone.code, unlimited=True)
+    db.session.add(cell)
+    db.session.commit()
+    return cell
+
+
+@bp.route("/rows/<int:zone_id>/scan")
+def scan_row(zone_id):
+    """Точка входа в "Размещение в ряды" (вкладка на placement.list_documents)
+    — заводит (при необходимости) безлимитную ячейку ряда и сразу
+    перенаправляет на уже существующую страницу сканирования ячейки
+    (scan_cell), которая умеет сканировать в нее короба один за другим."""
+    zone = Zone.query.get_or_404(zone_id)
+    cell = _get_or_create_row_cell(zone)
+    return redirect(url_for("placement.scan_cell", warehouse_id=zone.warehouse_id, cell_code=cell.code))
 
 
 @bp.route("/<int:doc_id>/boxes/<int:box_id>/place", methods=["POST"])

@@ -7,6 +7,7 @@
 
 {% set hint_stock = "Принятый товар, который еще не упакован в короба и не расставлен по ячейкам." %}
 {% set hint_open_boxes = "Уже упакованы, но не расставлены (например, приехали перемещением). Разместите сразу здесь." %}
+{% set hint_rows = "Для помещений без ячеек — короб кладется прямо в ряд, без ограничения по вместимости." %}
 
 <ul class="nav nav-tabs mb-3" id="placementTabs" role="tablist">
   <li class="nav-item" role="presentation">
@@ -14,6 +15,9 @@
   </li>
   <li class="nav-item" role="presentation">
     <button class="nav-link" id="tab-box-btn" data-bs-toggle="tab" data-bs-target="#tab-box" type="button" role="tab">🗄 Разместить короб</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="tab-row-btn" data-bs-toggle="tab" data-bs-target="#tab-row" type="button" role="tab">🧱 Размещение в ряды</button>
   </li>
 </ul>
 
@@ -131,6 +135,34 @@
         </div>
       </div>
       {% endif %}
+    </div>
+  </div>
+
+  <div class="tab-pane fade" id="tab-row" role="tabpanel">
+    <div class="card p-3">
+      <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <h5 class="d-flex align-items-center gap-2 mb-0">
+          Ряды склада
+          <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
+                  data-bs-placement="bottom" data-bs-content="{{ hint_rows }}" aria-label="Подсказка">?</button>
+        </h5>
+      </div>
+      <p class="text-muted small d-none d-md-block">{{ hint_rows }}</p>
+      <table class="table table-sm table-mobile-compact">
+        <thead><tr><th>Склад</th><th>Ряд</th><th>Коробов в ряду</th><th></th></tr></thead>
+        <tbody>
+        {% for zone in zones %}
+          <tr>
+            <td>{{ zone.warehouse.name }}</td>
+            <td>{{ zone.code }}{% if zone.name %} — {{ zone.name }}{% endif %}</td>
+            <td>{{ zone_row_box_counts.get(zone.id, 0) }}</td>
+            <td><a class="btn btn-sm btn-outline-primary" href="{{ url_for('placement.scan_row', zone_id=zone.id) }}">📷 Разместить в ряд</a></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="text-muted">Рядов пока не заведено — создайте ряд на странице склада («Ячейки»)</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
     </div>
   </div>
 </div>

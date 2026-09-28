@@ -157,6 +157,7 @@
        здесь через атрибут form=. -->
   {% for d in documents %}
   <form id="mpReqForm{{ d.id }}" method="post" action="{{ url_for('movement.update_marketplace_request_number', doc_id=d.id) }}" class="d-none"></form>
+  <form id="deliveryDateForm{{ d.id }}" method="post" action="{{ url_for('movement.update_delivery_slot_date', doc_id=d.id) }}" class="d-none"></form>
   {% endfor %}
   <form method="get" action="{{ url_for('movement.export_waybills') }}" id="waybillsForm" class="d-none d-md-block">
     <div class="d-flex justify-content-between align-items-center mb-2">
@@ -175,7 +176,7 @@
     </div>
     <table class="table">
       <thead>
-        <tr><th></th><th>Номер</th><th>Дата</th><th>Откуда</th><th>Куда</th><th>Коробов</th><th>Кол-во товара</th><th>Автор</th><th>Статус</th><th>Приемка</th><th class="text-center">1С</th><th class="text-center">Заявка на МП</th><th>№ заявки на МП</th>{% if current_user.is_admin %}<th class="text-center">Отгружено</th>{% endif %}<th></th></tr>
+        <tr><th></th><th>Номер</th><th>Дата</th><th>Откуда</th><th>Куда</th><th>Коробов</th><th>Кол-во товара</th><th>Автор</th><th>Статус</th><th>Приемка</th><th class="text-center">1С</th><th class="text-center">Заявка на МП</th><th>№ заявки на МП</th><th title="Дата слота, забронированного на маркетплейсе — печатается на стикерах отправления вместо сегодняшней даты">Дата поставки</th>{% if current_user.is_admin %}<th class="text-center">Отгружено</th>{% endif %}<th></th></tr>
       </thead>
       <tbody>
       {% for d in documents %}
@@ -266,6 +267,12 @@
             <div class="d-flex flex-nowrap gap-1">
               <input type="text" name="marketplace_request_number" form="mpReqForm{{ d.id }}" value="{{ d.marketplace_request_number or '' }}" class="form-control form-control-sm" style="width:100px" placeholder="№ заявки">
               <button type="submit" form="mpReqForm{{ d.id }}" class="btn btn-sm btn-outline-secondary">✓</button>
+            </div>
+          </td>
+          <td style="min-width:130px">
+            <div class="d-flex flex-nowrap gap-1">
+              <input type="date" name="delivery_slot_date" form="deliveryDateForm{{ d.id }}" value="{{ d.delivery_slot_date.isoformat() if d.delivery_slot_date else '' }}" class="form-control form-control-sm" style="width:130px">
+              <button type="submit" form="deliveryDateForm{{ d.id }}" class="btn btn-sm btn-outline-secondary">✓</button>
             </div>
           </td>
           {% if current_user.is_admin %}

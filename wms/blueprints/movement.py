@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from flask import Blueprint, Response, abort, flash, jsonify, redirect, render_template, request, url_for
 from flask_login import current_user
@@ -1487,6 +1487,29 @@ def update_marketplace_request_number(doc_id):
     return redirect(url_for("movement.list_documents"))
 
 
+@bp.route("/<int:doc_id>/delivery-slot-date", methods=["POST"])
+def update_delivery_slot_date(doc_id):
+    """Дата слота, забронированного на маркетплейсе для приемки (см. чат) —
+    вносится вручную, используется вместо сегодняшней даты при печати
+    стикеров отправления (см. utils.shipping_label_pdf)."""
+    doc = MovementDocument.query.get_or_404(doc_id)
+    raw = request.form.get("delivery_slot_date", "").strip()
+    if raw:
+        try:
+            doc.delivery_slot_date = date.fromisoformat(raw)
+        except ValueError:
+            flash("Некорректная дата поставки", "danger")
+            if request.form.get("return_to") == "detail":
+                return redirect(url_for("movement.detail", doc_id=doc.id))
+            return redirect(url_for("movement.list_documents"))
+    else:
+        doc.delivery_slot_date = None
+    db.session.commit()
+    if request.form.get("return_to") == "detail":
+        return redirect(url_for("movement.detail", doc_id=doc.id))
+    return redirect(url_for("movement.list_documents"))
+
+
 @bp.route("/<int:doc_id>/export.xlsx")
 def export_document(doc_id):
     doc = MovementDocument.query.get_or_404(doc_id)
@@ -1583,8 +1606,9 @@ def export_shipping_labels():
     перемещения) или по выбранным в списке — один стикер на каждый короб
     документа: отправитель (настраивается в «Настройки» — либо склад
     документа, либо единый текст на все направления), направление,
-    порядковый номер короба из общего количества, дата печати и площадка
-    склада назначения."""
+    порядковый номер короба из общего количества, дата поставки (см.
+    MovementDocument.delivery_slot_date — если не заполнена, дата печати)
+    и площадка склада назначения."""
     doc_ids = request.args.getlist("doc_ids", type=int)
     if not doc_ids:
         flash("Выберите хотя бы одно перемещение для печати стикеров", "danger")

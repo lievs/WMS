@@ -304,6 +304,14 @@ class Cell(db.Model):
     code = db.Column(db.String(50), nullable=False)
     description = db.Column(db.String(200))
     is_active = db.Column(db.Boolean, nullable=False, default=True)
+    # Ячейка без ограничения по вместимости — специальная ячейка ряда для
+    # "Размещения в ряды" (см. чат): называется тем же кодом, что и сам
+    # ряд (обычные автосгенерированные ячейки получают код вида
+    # "<ряд><NNNN>", см. warehouses._generate_cells, поэтому совпадения не
+    # бывает), создается один раз на ряд и не участвует в подсказке ячейки
+    # (см. placement._cell_suggestion_context) — попадает в нее только
+    # осознанным выбором ряда, а не автоподбором.
+    unlimited = db.Column(db.Boolean, nullable=False, default=False)
 
     boxes = db.relationship("Box", backref="cell", lazy="dynamic")
 
@@ -312,6 +320,8 @@ class Cell(db.Model):
     )
 
     def free_space(self, exclude_box_id=None):
+        if self.unlimited:
+            return None
         count = self.boxes.count()
         if exclude_box_id is not None and self.boxes.filter_by(id=exclude_box_id).first():
             count -= 1
@@ -552,9 +562,12 @@ class Box(db.Model):
     def location_label(self):
         """Куда короб расставлен, для использования в середине фразы
         ("короб размещен в " + location_label()) — "ячейке <код>" либо, для
-        короба напрямую в ряду без ячейки (см. zone_id), "ряду <код>".
+        короба напрямую в ряду без ячейки (см. zone_id) или в специальной
+        безлимитной ячейке ряда (см. Cell.unlimited), "ряду <код>".
         None — еще не расставлен."""
         if self.cell_id:
+            if self.cell.unlimited:
+                return f"ряду {self.cell.code}"
             return f"ячейке {self.cell.code}"
         if self.zone_id:
             return f"ряду {self.zone.code}"
@@ -899,6 +912,13 @@ class MovementDocument(db.Model):
     # опираться на него отдельно — при необходимости используйте его явно.
     sent_qty_snapshot = db.Column(db.Float, nullable=True)
     received_qty_snapshot = db.Column(db.Float, nullable=True)
+    # "Дата поставки" — дата слота, забронированного на маркетплейсе для
+    # приемки этого перемещения (см. чат), вносится вручную. Используется
+    # при печати стикеров отправления (см. utils.shipping_label_pdf) вместо
+    # сегодняшней даты — раньше на стикере всегда печаталась дата печати,
+    # что не совпадало с реальной датой поставки, если стикеры печатали
+    # заранее или задним числом.
+    delivery_slot_date = db.Column(db.Date, nullable=True)
 
     from_warehouse = db.relationship("Warehouse", foreign_keys=[from_warehouse_id])
     to_warehouse = db.relationship("Warehouse", foreign_keys=[to_warehouse_id])

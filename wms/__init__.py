@@ -140,6 +140,15 @@ def _ensure_columns():
                         "[schema] users.invoice_receiving_view_allowed заполнен "
                         "для уже существующих пользователей"
                     )
+                if table.name == "cells" and column.name == "unlimited":
+                    # Все уже существующие ячейки — обычные, с ограничением
+                    # по вместимости (это новое поле для отдельной
+                    # безлимитной ячейки ряда, см. чат "Размещение в ряды").
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text("UPDATE cells SET unlimited = 0 WHERE unlimited IS NULL")
+                        )
+                    print("[schema] cells.unlimited заполнен для уже существующих ячеек")
                 if table.name == "users" and column.name == "movement_view_allowed":
                     with db.engine.begin() as conn:
                         conn.execute(
