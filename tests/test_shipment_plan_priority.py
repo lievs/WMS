@@ -223,12 +223,21 @@ def test_effective_planned_qty_falls_back_to_planned_when_not_yet_distributed(db
     assert line.effective_planned_qty() == 100
 
 
-def test_effective_planned_qty_ignores_distributed_target_without_priority(db):
+def test_effective_planned_qty_uses_distributed_target_even_without_own_priority_flag(db):
+    """distributed_target_qty учитывается всегда, когда вычислен — даже
+    если priority/novelty_marketplace стоит не на этой строке, а на
+    другой строке того же штрихкода (см. чат: "приоритет 0w отгружается
+    на озон"). _apply_priority_distribution проставляет
+    distributed_target_qty сразу на ВСЕ строки штрихкода/приоритетной
+    группы — в т.ч. на те, где своего priority нет: например, при
+    распределении по приоритету 0/1/2 между ОЗОН и ВБ вместе, если
+    приоритет стоит только в одном из двух файлов, а во втором для этого
+    же штрихкода приоритет не заполнен."""
     line = ShipmentPlanLine(
         plan_id=1, warehouse_id=1, barcode="X", planned_qty=100, fulfilled_qty=0,
         priority=None, distributed_target_qty=40,
     )
-    assert line.effective_planned_qty() == 100
+    assert line.effective_planned_qty() == 40
 
 
 def test_remaining_qty_still_uses_plain_planned_qty_for_priority_items(db):

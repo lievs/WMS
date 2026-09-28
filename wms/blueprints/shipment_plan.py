@@ -332,7 +332,15 @@ def _apply_priority_distribution():
             for line in other_lines:
                 # Штрихкод новинки нашелся и на другой площадке — код
                 # 0w/0o явно говорит "только сюда", туда не отгружаем.
+                # Обнуляем не только distributed_target_qty (её учитывает
+                # только effective_planned_qty), но и сам planned_qty —
+                # иначе remaining_qty()/"Не хватает по плану" на дашборде
+                # по-прежнему считали бы эту строку живой потребностью
+                # (см. чат: "приоритет 0w отгружается на озон" — строка
+                # получала distributed_target_qty=0, но planned_qty
+                # оставался ненулевым, и туда реально отгружали).
                 line.distributed_target_qty = 0.0
+                line.planned_qty = 0.0
             shares = city_share.get(novelty_marketplace, {})
             total_share = sum(shares.get(l.warehouse_id, 0.0) for l in target_lines)
             for line in target_lines:
@@ -1053,9 +1061,15 @@ def _dashboard_context():
             line.current_fulfilled_qty = 0.0
             line.in_transit_qty = quantities.get("shipped", 0.0)
             line.fulfilled_with_transit_qty = line.in_transit_qty
-            line.effective_remaining_qty = max(
-                line.planned_qty - line.fulfilled_with_transit_qty,
-                0,
+            # Товар-новинка одной площадки (0w/0o) не должен считаться
+            # потребностью ДРУГОЙ площадки, даже если в файле плана
+            # случайно осталось ненулевое число в чужой колонке (см. чат:
+            # "приоритет 0w отгружается на озон" и
+            # ShipmentPlanLine._blocked_by_novelty_marketplace).
+            line.effective_remaining_qty = (
+                0.0
+                if line._blocked_by_novelty_marketplace()
+                else max(line.planned_qty - line.fulfilled_with_transit_qty, 0)
             )
 
         by_warehouse = {}

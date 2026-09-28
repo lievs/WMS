@@ -1281,6 +1281,23 @@ class ShipmentPlanLine(db.Model):
         db.UniqueConstraint("plan_id", "warehouse_id", "barcode", name="uq_plan_warehouse_barcode"),
     )
 
+    def _blocked_by_novelty_marketplace(self):
+        """Товар-новинка (0w/0o в файле плана, см. novelty_marketplace)
+        предназначен ТОЛЬКО указанной площадке — если у этого же штрихкода
+        в файле плана нашлась строка и на ДРУГОЙ площадке (например,
+        случайно осталось ненулевое число в чужой колонке комбинированного
+        листа "Распределение ВБ и ОЗОН"), эта строка не должна считаться
+        реальной потребностью (см. чат: "приоритет 0w отгружается на
+        озон"). Используется и remaining_qty(), и effective_planned_qty() —
+        единое место, где действует правило "новинка одной площадки", а не
+        полагается на то, что _apply_priority_distribution успела
+        обнулить distributed_target_qty."""
+        return bool(
+            self.novelty_marketplace
+            and self.warehouse
+            and self.warehouse.marketplace != self.novelty_marketplace
+        )
+
     def effective_planned_qty(self):
         """planned_qty этого города — либо, для приоритетных товаров и
         товаров-новинок (novelty_marketplace) с уже посчитанным
@@ -1291,15 +1308,24 @@ class ShipmentPlanLine(db.Model):
         remaining_qty()/дашборде: там план и так уже показывает разрыв с
         планом по каждому городу, а при нулевом "готово к отгрузке" эта
         цель обнулилась бы и товар с реальной нехваткой пропал бы из
-        "Что нужно отправить" вместо того чтобы показать проблему."""
-        if (
-            (self.priority in (0, 1, 2) or self.novelty_marketplace)
-            and self.distributed_target_qty is not None
-        ):
+        "Что нужно отправить" вместо того чтобы показать проблему.
+
+        distributed_target_qty учитывается здесь всегда, когда он
+        вычислен (не None) — не только для строк, у которых priority/
+        novelty_marketplace стоит на НЕЙ САМОЙ. _apply_priority_distribution
+        проставляет его и на "чужие" строки того же штрихкода-новинки
+        (см. чат: "приоритет 0w отгружается на озон") — их
+        novelty_marketplace пуст (сама заявка новинки пришла с ДРУГОЙ
+        площадки, не с этой), но 0.0 всё равно нужно применить."""
+        if self._blocked_by_novelty_marketplace():
+            return 0.0
+        if self.distributed_target_qty is not None:
             return self.distributed_target_qty
         return self.planned_qty
 
     def remaining_qty(self):
+        if self._blocked_by_novelty_marketplace():
+            return 0.0
         fulfilled_qty = getattr(self, "current_fulfilled_qty", self.fulfilled_qty)
         return max(self.planned_qty - fulfilled_qty, 0)
 
