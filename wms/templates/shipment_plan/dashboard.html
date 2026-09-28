@@ -158,7 +158,7 @@
     <div class="d-flex align-items-center gap-2 flex-wrap">
       <h5 class="mb-0">Что нужно отправить <span class="text-muted small">(осталось по плану, {{ picking_list|length }} поз., ОЗОН и ВБ вместе)</span></h5>
       <div class="form-check mb-0">
-        <input type="checkbox" class="form-check-input" id="picking-collapse-all" data-picking-collapse-all="picking">
+        <input type="checkbox" class="form-check-input" id="picking-collapse-all" data-picking-collapse-all="picking" checked>
         <label class="form-check-label" for="picking-collapse-all">Свернуть все группы</label>
       </div>
     </div>
@@ -513,6 +513,15 @@
         toggle.textContent = row.classList.contains("picking-group-collapsed") ? "▸" : "▾";
         applyFilters();
       });
+
+      // При открытии страницы таблица сразу в свернутом виде (см. чат) —
+      // галочка "Свернуть все группы" по умолчанию отмечена (checked в
+      // разметке), здесь применяем это состояние к самим строкам сразу
+      // при загрузке, а не только по клику на галочку.
+      if (collapseAllCheckbox && collapseAllCheckbox.checked) {
+        setAllGroupsCollapsed(true);
+      }
+      applyFilters();
     }
   });
 </script>

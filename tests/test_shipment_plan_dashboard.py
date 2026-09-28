@@ -971,3 +971,59 @@ def test_picking_groups_fallback_category_for_unmatched_products(db, client_logg
     html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
 
     assert 'data-group-category="Без категории"' in html
+
+
+def test_totals_row_box_count_is_all_non_empty_boxes_not_only_picking_list(db, client_logged_in):
+    """Итоговая строка "Готово к отгрузке" в шапке таблицы — ВСЕ непустые
+    короба склада (см. чат: "кол-во непустых коробов неверное"), включая
+    короба с товаром, у которого нет невыполненного остатка плана (и
+    поэтому сам товар не попадает в picking_list) — не только короба
+    строк из "Что нужно отправить". Склад-отправитель обязательно должен
+    называться "Основной склад"/"Склад №2 (Шоссейная 167)" — только для
+    них считается разбивка "Готово к отгрузке" по складам (см. чат)."""
+    from wms.models import Box, BoxItem, Nomenclature, ShipmentPlan, ShipmentPlanLine, Warehouse
+
+    main = Warehouse(code="WH-TOTBOX1", name="Основной склад")
+    city = Warehouse(code="WH-TOTBOX2", name="ОЗОН: Город", marketplace="ozon", marketplace_city="Город")
+    db.session.add_all([main, city])
+    db.session.commit()
+
+    item = Nomenclature(sku="SKU-TOTBOX0", barcode="7770001000", name="Товар в плане", unit="шт")
+    db.session.add(item)
+    db.session.commit()
+    plan = ShipmentPlan(marketplace="ozon")
+    db.session.add(plan)
+    db.session.commit()
+    db.session.add(
+        ShipmentPlanLine(
+            plan_id=plan.id, warehouse_id=city.id, nomenclature_id=item.id,
+            barcode=item.barcode, article="ART-TOTBOX", planned_qty=30,
+        )
+    )
+    db.session.commit()
+
+    # Товар ИЗ плана, с невыполненным остатком — попадет в picking_list.
+    box_needed = Box(box_number="BOX-TOTBOX-NEEDED", warehouse_id=main.id, status="open")
+    db.session.add(box_needed)
+    db.session.commit()
+    db.session.add(BoxItem(box_id=box_needed.id, nomenclature_id=item.id, qty=5))
+    db.session.commit()
+
+    # Товар ВНЕ плана вообще, короб не попадет ни в одну строку picking_list.
+    unrelated_item = Nomenclature(sku="SKU-TOTBOX1", barcode="7770001001", name="Товар вне плана", unit="шт")
+    db.session.add(unrelated_item)
+    db.session.commit()
+    box_unrelated = Box(box_number="BOX-TOTBOX-UNRELATED", warehouse_id=main.id, status="open")
+    db.session.add(box_unrelated)
+    db.session.commit()
+    db.session.add(BoxItem(box_id=box_unrelated.id, nomenclature_id=unrelated_item.id, qty=1))
+    db.session.commit()
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    idx = html.find("Итого (")
+    assert idx != -1
+    snippet = html[idx : idx + 800]
+    # Оба короба на складе "Основной склад" — 2, а не 1 (сколько бы их ни
+    # было в picking_list).
+    assert "(2)" in snippet

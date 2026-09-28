@@ -1322,24 +1322,22 @@ def _dashboard_context():
     # каждой колонке (На разбраковке/Готово к отгрузке/В пути и каждый
     # город), чтобы сразу видеть общий объем не пролистывая/не считая
     # вручную по строкам.
+    non_empty_box_counts = _non_empty_box_counts([wh.id for wh in sender_warehouses])
     picking_totals = {
         "total_planned": sum(p["total_planned"] for p in picking_list),
         "total_remaining": sum(p["total_remaining"] for p in picking_list),
         "unplaced": sum(p["unplaced"] for p in picking_list),
         "ready_to_ship": sum(p["ready_to_ship"] for p in picking_list),
-        # boxes — через объединение множеств ID коробов по всем позициям
-        # (не сумма готовых чисел): короб с несколькими товарами внутри
-        # иначе посчитался бы в итоге по разу за каждый (см. чат и
-        # _group_picking_list._add выше — та же причина).
+        # boxes — ВСЕ непустые короба склада (см. чат), не только те, где
+        # есть товар с невыполненным планом: иначе итог по коробам был
+        # меньше реального числа коробов на складе и не совпадал с той же
+        # цифрой в сводке ("Непустых коробов на складе") и с выгрузкой
+        # boxes.export_boxes. Та же _non_empty_box_counts, что и там.
         "ready_to_ship_by_warehouse": [
             {
                 "warehouse": wh,
                 "qty": sum(p["ready_to_ship_by_warehouse"][i]["qty"] for p in picking_list),
-                "boxes": len(
-                    set().union(*(p["ready_to_ship_by_warehouse"][i]["box_ids"] for p in picking_list))
-                )
-                if picking_list
-                else 0,
+                "boxes": non_empty_box_counts.get(wh.id, 0),
             }
             for i, wh in enumerate(sender_warehouses)
         ],
@@ -1378,7 +1376,6 @@ def _dashboard_context():
     overall_production = sum(production_by_nomenclature.values())
     overall_in_transit = sum(m.get("total_in_transit", 0) for m in marketplaces_data)
 
-    non_empty_box_counts = _non_empty_box_counts([wh.id for wh in sender_warehouses])
     summary = {
         "in_transit_by_marketplace": [
             {"label": m["label"], "qty": m.get("total_in_transit", 0)}
