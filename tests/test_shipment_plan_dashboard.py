@@ -1,6 +1,7 @@
 """«В пути» в плане — перемещения, которые транспорт забрал с даты листа."""
 
 import io
+import re
 
 from openpyxl import load_workbook
 
@@ -794,7 +795,7 @@ def test_picking_groups_merge_slash_separated_colors_under_one_model(db, client_
     # на каждый цвет, как было бы без разбора '/'), с двумя подгруппами
     # цвета внутри. Полный артикул при этом остается в data-search-text
     # (нужен для поиска), просто больше не показывается как модель.
-    assert html.count('data-group-level="model" data-group-model="ВзрослаяБазовая"') == 1
+    assert len(re.findall(r'data-group-level="model"[^>]*data-group-model="ВзрослаяБазовая"', html)) == 1
     assert "Цвет: белая" in html
     assert "Цвет: голубой" in html
 
@@ -853,7 +854,7 @@ def test_picking_groups_merge_no_separator_colors_under_one_model(db, client_log
 
     html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
 
-    assert html.count('data-group-level="model" data-group-model="К-тSmile"') == 1
+    assert len(re.findall(r'data-group-level="model"[^>]*data-group-model="К-тSmile"', html)) == 1
     assert "Цвет: белый" in html
     assert "Цвет: голубой" in html
 
@@ -892,3 +893,81 @@ def test_summary_shows_non_empty_box_count_independent_of_plan(db, client_logged
     assert idx != -1
     snippet = html[idx : idx + 200]
     assert "<b>2</b>" in snippet
+
+
+def test_picking_groups_wrap_models_in_category_from_nomenclature(db, client_logged_in):
+    """Верхний уровень группировки — Вид товара номенклатуры (Кардиган/
+    Шапка/..., см. чат и файл-образец), а не что-то разобранное из
+    артикула плана. Модели одной категории объединяются под одним
+    заголовком категории."""
+    from wms.models import Nomenclature, ProductCategory, ShipmentPlan, ShipmentPlanLine, Warehouse
+
+    category = ProductCategory(name="Кардиганы-ТЕСТ", keywords="кардиганытест")
+    db.session.add(category)
+    db.session.commit()
+
+    city = Warehouse(code="WH-CAT1", name="ОЗОН: Город", marketplace="ozon", marketplace_city="Город")
+    db.session.add(city)
+    db.session.commit()
+
+    item_a = Nomenclature(
+        sku="SKU-CAT-A", barcode="7770000901", name="Кардиган А", unit="шт", category_id=category.id
+    )
+    item_b = Nomenclature(
+        sku="SKU-CAT-B", barcode="7770000902", name="Кардиган Б", unit="шт", category_id=category.id
+    )
+    db.session.add_all([item_a, item_b])
+    db.session.commit()
+
+    plan = ShipmentPlan(marketplace="ozon")
+    db.session.add(plan)
+    db.session.commit()
+    db.session.add_all(
+        [
+            ShipmentPlanLine(
+                plan_id=plan.id, warehouse_id=city.id, nomenclature_id=item_a.id,
+                barcode=item_a.barcode, article="Модель_А", planned_qty=5,
+            ),
+            ShipmentPlanLine(
+                plan_id=plan.id, warehouse_id=city.id, nomenclature_id=item_b.id,
+                barcode=item_b.barcode, article="Модель_Б", planned_qty=5,
+            ),
+        ]
+    )
+    db.session.commit()
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    assert 'data-group-level="category" data-group-category="Кардиганы-ТЕСТ"' in html
+    cat_idx = html.find('data-group-category="Кардиганы-ТЕСТ"')
+    model_a_idx = html.find('data-group-model="Модель"')
+    assert cat_idx != -1
+    # Обе модели этой категории идут ПОСЛЕ заголовка категории (внутри
+    # ее секции), а не до него.
+    assert html.find("Модель_А") > cat_idx or html.find(">Модель<") > cat_idx
+
+
+def test_picking_groups_fallback_category_for_unmatched_products(db, client_logged_in):
+    """Товар без сопоставленной номенклатуры (штрихкод не найден) или без
+    вида товара попадает в общую группу "Без категории", а не ломает
+    дашборд."""
+    from wms.models import ShipmentPlan, ShipmentPlanLine, Warehouse
+
+    city = Warehouse(code="WH-CAT2", name="ОЗОН: Город2", marketplace="ozon", marketplace_city="Город2")
+    db.session.add(city)
+    db.session.commit()
+
+    plan = ShipmentPlan(marketplace="ozon")
+    db.session.add(plan)
+    db.session.commit()
+    db.session.add(
+        ShipmentPlanLine(
+            plan_id=plan.id, warehouse_id=city.id, nomenclature_id=None,
+            barcode="7770000903", article="Неизвестный", planned_qty=5,
+        )
+    )
+    db.session.commit()
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    assert 'data-group-category="Без категории"' in html

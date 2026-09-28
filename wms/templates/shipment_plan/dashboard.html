@@ -213,13 +213,50 @@
           {% for city in ozon_cities %}<td class="text-end">{{ picking_totals.ozon[city] | round(0) | int }}</td>{% endfor %}
           {% for city in wb_cities %}<td class="text-end{% if loop.first %} border-start border-2{% endif %}">{{ picking_totals.wb[city] | round(0) | int }}</td>{% endfor %}
         </tr>
-      {% for g in picking_groups %}
+      {% for cat in picking_groups %}
+        {# Строка-заголовок категории (Вид товара номенклатуры — Кардиганы/
+           Шапки/..., см. чат и файл-образец) — верхний уровень, сворачивает
+           все модели/цвета/размеры внутри разом. #}
+        <tr class="table-secondary fw-bold picking-group-row" data-group-level="category" data-group-category="{{ cat.category }}">
+          <td colspan="3">
+            <span class="picking-toggle" data-toggle-group>▾</span>
+            {{ cat.category }}
+            <span class="text-muted small fw-normal">({{ cat.count }} поз.)</span>
+          </td>
+          <td class="text-nowrap">{% if cat.totals.no_stock_count %}<span class="badge bg-danger" title="Позиций без остатка на складе-отправителе">{{ cat.totals.no_stock_count }}</span>{% endif %}</td>
+          <td class="text-end">{{ cat.totals.total_planned | round(0) | int }}</td>
+          <td class="text-end">{% if cat.totals.total_remaining %}<b>{{ cat.totals.total_remaining | round(0) | int }}</b>{% else %}<span class="text-muted">0</span>{% endif %}</td>
+          <td class="text-end">{% if cat.totals.unplaced %}{{ cat.totals.unplaced | round(0) | int }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
+          {% if sender_warehouses %}
+            {% for entry in cat.totals.ready_to_ship_by_warehouse %}
+            <td class="text-end">{% if entry.qty %}<b>{{ entry.qty | round(0) | int }}</b> <span class="text-muted small">({{ entry.boxes | int }})</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+            {% endfor %}
+          {% else %}
+          <td class="text-end text-muted">—</td>
+          {% endif %}
+          <td class="text-end">{% if cat.totals.in_transit_total %}<span class="text-warning-emphasis">{{ cat.totals.in_transit_total | round(0) | int }}</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+          {% for city in ozon_cities %}
+            {% set c = cat.totals.ozon[city] %}
+            <td class="text-end">
+              {% if c.remaining %}<b>{{ c.remaining | round(0) | int }}</b>{% else %}<span class="text-muted">0</span>{% endif %}
+              {% if c.in_transit %}<span class="text-warning-emphasis">&nbsp;({{ c.in_transit | round(0) | int }})</span>{% endif %}
+            </td>
+          {% endfor %}
+          {% for city in wb_cities %}
+            {% set c = cat.totals.wb[city] %}
+            <td class="text-end{% if loop.first %} border-start border-2{% endif %}">
+              {% if c.remaining %}<b>{{ c.remaining | round(0) | int }}</b>{% else %}<span class="text-muted">0</span>{% endif %}
+              {% if c.in_transit %}<span class="text-warning-emphasis">&nbsp;({{ c.in_transit | round(0) | int }})</span>{% endif %}
+            </td>
+          {% endfor %}
+        </tr>
+        {% for g in cat.models %}
         {# Строка-заголовок группы по модели (артикул без цвета, см. чат) —
            сворачивает/разворачивает все цвета и размеры внутри. Суммы в
            числовых колонках посчитаны по всем позициям группы, чтобы
            сворачивание не прятало итоговые цифры. #}
-        <tr class="table-light fw-bold picking-group-row" data-group-level="model" data-group-model="{{ g.model }}">
-          <td colspan="3">
+        <tr class="table-light fw-bold picking-group-row" data-group-level="model" data-group-category="{{ cat.category }}" data-group-model="{{ g.model }}">
+          <td colspan="3" style="padding-left:1.25rem">
             <span class="picking-toggle" data-toggle-group>▾</span>
             {{ g.model or '(без модели)' }}
             <span class="text-muted small fw-normal">({{ g.count }} поз.)</span>
@@ -254,8 +291,8 @@
         {% for cg in g.colors %}
         {# Подгруппа по цвету внутри модели — тот же принцип, сворачивает
            размеры (отдельные строки товара) под собой. #}
-        <tr class="table-light picking-group-row" data-group-level="color" data-group-model="{{ g.model }}" data-group-color="{{ cg.color }}">
-          <td colspan="3" style="padding-left:2rem">
+        <tr class="table-light picking-group-row" data-group-level="color" data-group-category="{{ cat.category }}" data-group-model="{{ g.model }}" data-group-color="{{ cg.color }}">
+          <td colspan="3" style="padding-left:2.5rem">
             <span class="picking-toggle" data-toggle-group>▾</span>
             Цвет: {{ cg.color or '—' }}
             <span class="text-muted small">({{ cg.products|length }} размер.)</span>
@@ -295,7 +332,7 @@
            бейджик — у него нет собственного плана, поэтому его нужно
            отличать от обычных приоритетных строк. Колонки "Приоритет" в
            таблице нет — только фон строки. #}
-        <tr class="picking-item-row {% if p.no_stock %}table-danger{% elif p.novelty_marketplace %}table-primary{% elif p.priority == 1 %}table-success{% elif p.priority == 2 %}table-warning{% elif p.priority == 0 %}table-info{% endif %}" data-search-text="{{ (p.article or '') ~ ' ' ~ p.barcode }}" data-priority="{{ p.novelty_marketplace or (p.priority if p.priority is not none else '') }}" data-group-model="{{ g.model }}" data-group-color="{{ cg.color }}">
+        <tr class="picking-item-row {% if p.no_stock %}table-danger{% elif p.novelty_marketplace %}table-primary{% elif p.priority == 1 %}table-success{% elif p.priority == 2 %}table-warning{% elif p.priority == 0 %}table-info{% endif %}" data-search-text="{{ (p.article or '') ~ ' ' ~ p.barcode }}" data-priority="{{ p.novelty_marketplace or (p.priority if p.priority is not none else '') }}" data-group-category="{{ cat.category }}" data-group-model="{{ g.model }}" data-group-color="{{ cg.color }}">
           <td>{{ p.model }}{% if p.novelty_marketplace %} <span class="badge bg-primary">Новинка {{ 'ВБ' if p.novelty_marketplace == 'wb' else 'Ozon' }}</span>{% endif %}</td>
           <td>{{ p.size or '' }}</td>
           <td>{{ p.barcode }}</td>
@@ -330,6 +367,7 @@
             </td>
           {% endfor %}
         </tr>
+        {% endfor %}
         {% endfor %}
         {% endfor %}
       {% endfor %}
@@ -380,30 +418,43 @@
       var filterActive = q.length > 0 || priorityOnly;
 
       var rows = Array.prototype.slice.call(table.querySelectorAll("tbody tr:not(.picking-totals-row)"));
-      // Строки идут в DOM в порядке модель → её цвета → их размеры, поэтому
-      // "последний встреченный" заголовок каждого уровня — это и есть
-      // родитель текущей строки-товара, без сопоставления по атрибутам.
+      // Строки идут в DOM в порядке категория → модель → её цвета → их
+      // размеры, поэтому "последний встреченный" заголовок каждого уровня
+      // — это и есть родитель текущей строки-товара, без сопоставления по
+      // атрибутам.
+      var currentCategoryRow = null;
       var currentModelRow = null;
       var currentColorRow = null;
+      var categoryCollapsed = false;
       var modelCollapsed = false;
       var colorCollapsed = false;
 
       rows.forEach(function (tr) {
         if (tr.classList.contains("picking-group-row")) {
-          if (tr.dataset.groupLevel === "model") {
+          if (tr.dataset.groupLevel === "category") {
+            currentCategoryRow = tr;
+            categoryCollapsed = tr.classList.contains("picking-group-collapsed");
+            currentModelRow = null;
+            modelCollapsed = false;
+            currentColorRow = null;
+            colorCollapsed = false;
+            delete tr.dataset.hasMatch;
+          } else if (tr.dataset.groupLevel === "model") {
             currentModelRow = tr;
             modelCollapsed = tr.classList.contains("picking-group-collapsed");
             currentColorRow = null;
             colorCollapsed = false;
+            // Свернутая категория прячет и заголовки своих моделей, не
+            // только строки-товаров под ними (тот же принцип, что и у
+            // модель→цвет, см. чат) — запоминаем это здесь, пока известен
+            // currentCategoryRow, второй проход ниже уже не видит
+            // родителя строки.
+            tr.dataset.parentCollapsed = (!filterActive && categoryCollapsed) ? "1" : "";
             delete tr.dataset.hasMatch;
           } else {
             currentColorRow = tr;
             colorCollapsed = tr.classList.contains("picking-group-collapsed");
-            // Свернутая модель прячет и заголовки своих цветов, не только
-            // строки-товаров под ними (см. чат) — запоминаем это здесь,
-            // пока известен currentModelRow, второй проход ниже уже не
-            // видит родителя строки.
-            tr.dataset.parentCollapsed = (!filterActive && modelCollapsed) ? "1" : "";
+            tr.dataset.parentCollapsed = (!filterActive && (categoryCollapsed || modelCollapsed)) ? "1" : "";
             delete tr.dataset.hasMatch;
           }
           return;
@@ -413,10 +464,11 @@
         var matchesPriority = !priorityOnly || (tr.dataset.priority || "") !== "";
         var matchesFilter = matchesSearch && matchesPriority;
         if (matchesFilter) {
+          if (currentCategoryRow) currentCategoryRow.dataset.hasMatch = "1";
           if (currentModelRow) currentModelRow.dataset.hasMatch = "1";
           if (currentColorRow) currentColorRow.dataset.hasMatch = "1";
         }
-        var collapsedByGroup = !filterActive && (modelCollapsed || colorCollapsed);
+        var collapsedByGroup = !filterActive && (categoryCollapsed || modelCollapsed || colorCollapsed);
         tr.hidden = !matchesFilter || collapsedByGroup;
       });
 
@@ -424,12 +476,12 @@
         if (!tr.classList.contains("picking-group-row")) return;
         var hasMatch = tr.dataset.hasMatch === "1";
         delete tr.dataset.hasMatch;
-        if (tr.dataset.groupLevel === "color") {
+        if (tr.dataset.groupLevel === "category") {
+          tr.hidden = !hasMatch;
+        } else {
           var parentCollapsed = tr.dataset.parentCollapsed === "1";
           delete tr.dataset.parentCollapsed;
           tr.hidden = !hasMatch || parentCollapsed;
-        } else {
-          tr.hidden = !hasMatch;
         }
       });
     }

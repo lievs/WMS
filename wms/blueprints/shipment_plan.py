@@ -29,6 +29,7 @@ from ..models import (
     MovementDocument,
     MovementLine,
     Nomenclature,
+    ProductCategory,
     ProductionRecord,
     ReceivingDocument,
     ReceivingLine,
@@ -925,17 +926,20 @@ def _pace_analysis(plan, total_planned, total_fulfilled):
 
 
 def _group_picking_list(picking_list, sender_warehouses, ozon_cities, wb_cities):
-    """Группирует плоский picking_list в дерево модель → цвет → размеры
-    (см. чат) для сворачиваемых групп на дашборде: без этого товар с
-    несколькими цветами и размерами теряется вперемешку среди остальных
-    строк, отсортированных просто по артикулу+размеру. Цвет разбирается из
-    артикула (см. _split_article_model_color) — отдельного поля "цвет" в
-    номенклатуре нет.
+    """Группирует плоский picking_list в дерево категория → модель → цвет
+    → размеры (см. чат и файл-образец) для сворачиваемых групп на
+    дашборде: без этого товар с несколькими цветами и размерами теряется
+    вперемешку среди остальных строк, отсортированных просто по
+    артикулу+размеру. Категория — "Вид товара" номенклатуры (см.
+    item["category"], проставляется в _dashboard_context ДО вызова этой
+    функции), цвет разбирается из артикула (см.
+    _split_article_model_color) — отдельного поля "цвет" в номенклатуре
+    нет.
 
-    На каждом уровне (модель и цвет) считает те же суммы, что видны у
-    отдельной позиции — план/остаток/на разбраковке/готово к отгрузке (по
-    складам)/в пути/по городам — чтобы сворачивание группы не прятало
-    итоговые цифры, только детализацию по размерам."""
+    На каждом уровне (категория, модель и цвет) считает те же суммы, что
+    видны у отдельной позиции — план/остаток/на разбраковке/готово к
+    отгрузке (по складам)/в пути/по городам — чтобы сворачивание группы
+    не прятало итоговые цифры, только детализацию по размерам."""
 
     def _new_totals():
         return {
@@ -980,12 +984,15 @@ def _group_picking_list(picking_list, sender_warehouses, ozon_cities, wb_cities)
         for entry in totals["ready_to_ship_by_warehouse"]:
             entry["boxes"] = len(entry["box_ids"])
 
-    models = {}
+    categories = {}
     for item in picking_list:
         model, color = _split_article_model_color(item["article"])
         item["model"] = model
         item["color"] = color
-        model_group = models.setdefault(
+        category_group = categories.setdefault(
+            item["category"], {"category": item["category"], "models": {}, "totals": _new_totals(), "count": 0}
+        )
+        model_group = category_group["models"].setdefault(
             model, {"model": model, "colors": {}, "totals": _new_totals(), "count": 0}
         )
         color_group = model_group["colors"].setdefault(
@@ -994,20 +1001,31 @@ def _group_picking_list(picking_list, sender_warehouses, ozon_cities, wb_cities)
         color_group["products"].append(item)
         _add(color_group["totals"], item)
         _add(model_group["totals"], item)
+        _add(category_group["totals"], item)
         model_group["count"] += 1
+        category_group["count"] += 1
 
     ordered = []
-    for model in sorted(models.keys(), key=lambda m: m.lower()):
-        model_group = models[model]
-        colors = model_group["colors"]
-        model_group["colors"] = [
-            colors[color] for color in sorted(colors.keys(), key=lambda c: c.lower())
+    # "Без категории" — общая корзина для несопоставленных товаров, всегда
+    # последней, чтобы не мешалась среди настоящих видов товара наверху
+    # списка.
+    for category in sorted(categories.keys(), key=lambda c: (c == "Без категории", c.lower())):
+        category_group = categories[category]
+        models = category_group["models"]
+        category_group["models"] = [
+            models[model] for model in sorted(models.keys(), key=lambda m: m.lower())
         ]
-        for color_group in model_group["colors"]:
-            color_group["products"].sort(key=lambda p: p["size"] or "")
-            _finalize_totals(color_group["totals"])
-        _finalize_totals(model_group["totals"])
-        ordered.append(model_group)
+        for model_group in category_group["models"]:
+            colors = model_group["colors"]
+            model_group["colors"] = [
+                colors[color] for color in sorted(colors.keys(), key=lambda c: c.lower())
+            ]
+            for color_group in model_group["colors"]:
+                color_group["products"].sort(key=lambda p: p["size"] or "")
+                _finalize_totals(color_group["totals"])
+            _finalize_totals(model_group["totals"])
+        _finalize_totals(category_group["totals"])
+        ordered.append(category_group)
     return ordered
 
 
@@ -1163,6 +1181,7 @@ def _dashboard_context():
                     "barcode": line.barcode,
                     "article": line.article,
                     "size": line.size,
+                    "nomenclature_id": line.nomenclature_id,
                     "no_stock": line.nomenclature_id is None
                     or stock.get(line.nomenclature_id, 0) <= 0,
                     # Принято, но еще не упаковано в короб ("на разбраковке") —
@@ -1268,6 +1287,25 @@ def _dashboard_context():
         ),
         key=lambda p: (p["article"] or "", p["size"] or ""),
     )
+
+    # Вид товара (Кардиган/Шапка/...) — для верхнего уровня группировки
+    # (см. чат и файл-образец: Категория → Модель → Цвет → Размер).
+    # Источник — уже существующий "Вид товара" номенклатуры
+    # (Nomenclature.category_id, определяется автоматически по названию
+    # при создании/импорте, см. utils.categorize) — не разбирается заново
+    # из артикула плана. Товар без сопоставленной номенклатуры или без
+    # определенного вида остается в общей группе "Без категории".
+    category_names_by_nomenclature = {}
+    nomenclature_ids = [p["nomenclature_id"] for p in picking_list if p["nomenclature_id"] is not None]
+    if nomenclature_ids:
+        category_names_by_nomenclature = dict(
+            db.session.query(Nomenclature.id, ProductCategory.name)
+            .outerjoin(ProductCategory, Nomenclature.category_id == ProductCategory.id)
+            .filter(Nomenclature.id.in_(nomenclature_ids))
+            .all()
+        )
+    for p in picking_list:
+        p["category"] = category_names_by_nomenclature.get(p["nomenclature_id"]) or "Без категории"
 
     def _city_names(marketplace):
         for m in marketplaces_data:
