@@ -705,6 +705,25 @@ def _ready_to_ship_by_warehouse_and_nomenclature(warehouse_ids):
     return result
 
 
+def _non_empty_box_counts(warehouse_ids):
+    """{warehouse_id: число непустых коробов} — просто физический факт по
+    складу, без всякой привязки к плану/товарам (см. чат: "выводи общее
+    кол-во непустых коробов в заголовке, без привязки к плану"). Та же
+    выборка, что и в boxes.export_boxes ("Выгрузить непустые короба по
+    складам") — чтобы цифра в сводке плана совпадала с тем, что покажет
+    экспорт."""
+    if not warehouse_ids:
+        return {}
+    rows = (
+        db.session.query(Box.warehouse_id, func.count(func.distinct(Box.id)))
+        .join(BoxItem, BoxItem.box_id == Box.id)
+        .filter(Box.warehouse_id.in_(warehouse_ids))
+        .group_by(Box.warehouse_id)
+        .all()
+    )
+    return {warehouse_id: count for warehouse_id, count in rows}
+
+
 # Известные цвета и их сокращения/варианты написания (см. чат) —
 # нужны, чтобы разобрать цвет, слитно приписанный к названию модели без
 # разделителя ("К-тSmileбелый") или сокращенный/усеченный ("бор" вместо
@@ -1307,6 +1326,7 @@ def _dashboard_context():
     overall_production = sum(production_by_nomenclature.values())
     overall_in_transit = sum(m.get("total_in_transit", 0) for m in marketplaces_data)
 
+    non_empty_box_counts = _non_empty_box_counts([wh.id for wh in sender_warehouses])
     summary = {
         "in_transit_by_marketplace": [
             {"label": m["label"], "qty": m.get("total_in_transit", 0)}
@@ -1316,6 +1336,13 @@ def _dashboard_context():
         "total_in_transit": overall_in_transit,
         "total_stock": overall_stock,
         "total_production": overall_production,
+        # Общее кол-во непустых коробов по складу, БЕЗ привязки к плану —
+        # просто физический факт (см. чат), та же цифра, что покажет
+        # выгрузка boxes.export_boxes для этого склада.
+        "non_empty_boxes_by_warehouse": [
+            {"warehouse": wh, "count": non_empty_box_counts.get(wh.id, 0)}
+            for wh in sender_warehouses
+        ],
     }
 
     return {

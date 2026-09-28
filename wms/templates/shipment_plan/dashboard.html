@@ -67,6 +67,15 @@
     <div class="col-md-6 d-flex flex-column gap-2 justify-content-center">
       <div><span class="text-muted">На складе:</span> <b>{{ summary.total_stock | round(0) | int }}</b></div>
       <div><span class="text-muted">На производстве</span> <span class="text-muted small">(с начала периода плана)</span>: <b>{{ summary.total_production | round(0) | int }}</b></div>
+      {% if summary.non_empty_boxes_by_warehouse %}
+      <div>
+        <span class="text-muted">Непустых коробов на складе</span>
+        <span class="text-muted small" title="Все непустые короба физически на складе — без привязки к плану, та же цифра, что и в выгрузке «Короба → Выгрузить непустые короба по складам»">(факт, не план)</span>:
+        {% for row in summary.non_empty_boxes_by_warehouse %}
+          {{ row.warehouse.name }} — <b>{{ row.count }}</b>{% if not loop.last %}, {% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
     </div>
   </div>
 </div>

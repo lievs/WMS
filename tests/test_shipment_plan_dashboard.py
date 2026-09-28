@@ -856,3 +856,39 @@ def test_picking_groups_merge_no_separator_colors_under_one_model(db, client_log
     assert html.count('data-group-level="model" data-group-model="К-тSmile"') == 1
     assert "Цвет: белый" in html
     assert "Цвет: голубой" in html
+
+
+def test_summary_shows_non_empty_box_count_independent_of_plan(db, client_logged_in):
+    """"Непустых коробов на складе" в сводке — просто факт по складу (все
+    непустые короба, включая те, чьих товаров нет в текущем плане), не
+    завязан на picking_list (см. чат: "кол-во коробов отчете и в плане
+    разные")."""
+    from wms.models import Box, BoxItem, Nomenclature, Warehouse
+
+    main = Warehouse(code="WH-BOXSUM1", name="Основной склад")
+    db.session.add(main)
+    db.session.commit()
+
+    planned_item, city, _ = _setup(planned_qty=30)
+    # planned_item на самом деле создан в другом складе "Склад-отправитель"
+    # в _setup — используем main отдельно для контроля состава.
+    unrelated_item = Nomenclature(sku="SKU-BOXSUM1", barcode="7770000901", name="Товар вне плана", unit="шт")
+    db.session.add(unrelated_item)
+    db.session.commit()
+
+    box1 = Box(box_number="BOX-BOXSUM-1", warehouse_id=main.id, status="open")
+    box2 = Box(box_number="BOX-BOXSUM-2", warehouse_id=main.id, status="open")
+    empty_box = Box(box_number="BOX-BOXSUM-EMPTY", warehouse_id=main.id, status="open")
+    db.session.add_all([box1, box2, empty_box])
+    db.session.commit()
+    db.session.add(BoxItem(box_id=box1.id, nomenclature_id=unrelated_item.id, qty=1))
+    db.session.add(BoxItem(box_id=box2.id, nomenclature_id=unrelated_item.id, qty=1))
+    db.session.commit()
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    assert "Непустых коробов на складе" in html
+    idx = html.find("Основной склад")
+    assert idx != -1
+    snippet = html[idx : idx + 200]
+    assert "<b>2</b>" in snippet
