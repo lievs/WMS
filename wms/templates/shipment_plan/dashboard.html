@@ -146,12 +146,14 @@
 {% if picking_list %}
 <div class="card p-3 mb-4">
   <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
-    <h5 class="mb-0">Что нужно отправить <span class="text-muted small">(осталось по плану, {{ picking_list|length }} поз., ОЗОН и ВБ вместе)</span></h5>
     <div class="d-flex align-items-center gap-2 flex-wrap">
+      <h5 class="mb-0">Что нужно отправить <span class="text-muted small">(осталось по плану, {{ picking_list|length }} поз., ОЗОН и ВБ вместе)</span></h5>
       <div class="form-check mb-0">
         <input type="checkbox" class="form-check-input" id="picking-collapse-all" data-picking-collapse-all="picking">
         <label class="form-check-label" for="picking-collapse-all">Свернуть все группы</label>
       </div>
+    </div>
+    <div class="d-flex align-items-center gap-2 flex-wrap">
       <div class="form-check mb-0">
         <input type="checkbox" class="form-check-input" id="picking-priority-only" data-picking-priority-only="picking">
         <label class="form-check-label" for="picking-priority-only">Приоритетные товары</label>
@@ -374,14 +376,25 @@
       // родитель текущей строки-товара, без сопоставления по атрибутам.
       var currentModelRow = null;
       var currentColorRow = null;
+      var modelCollapsed = false;
+      var colorCollapsed = false;
 
       rows.forEach(function (tr) {
         if (tr.classList.contains("picking-group-row")) {
           if (tr.dataset.groupLevel === "model") {
             currentModelRow = tr;
+            modelCollapsed = tr.classList.contains("picking-group-collapsed");
+            currentColorRow = null;
+            colorCollapsed = false;
             delete tr.dataset.hasMatch;
           } else {
             currentColorRow = tr;
+            colorCollapsed = tr.classList.contains("picking-group-collapsed");
+            // Свернутая модель прячет и заголовки своих цветов, не только
+            // строки-товаров под ними (см. чат) — запоминаем это здесь,
+            // пока известен currentModelRow, второй проход ниже уже не
+            // видит родителя строки.
+            tr.dataset.parentCollapsed = (!filterActive && modelCollapsed) ? "1" : "";
             delete tr.dataset.hasMatch;
           }
           return;
@@ -394,17 +407,21 @@
           if (currentModelRow) currentModelRow.dataset.hasMatch = "1";
           if (currentColorRow) currentColorRow.dataset.hasMatch = "1";
         }
-        var collapsedByGroup = !filterActive && (
-          (currentModelRow && currentModelRow.classList.contains("picking-group-collapsed")) ||
-          (currentColorRow && currentColorRow.classList.contains("picking-group-collapsed"))
-        );
+        var collapsedByGroup = !filterActive && (modelCollapsed || colorCollapsed);
         tr.hidden = !matchesFilter || collapsedByGroup;
       });
 
       rows.forEach(function (tr) {
         if (!tr.classList.contains("picking-group-row")) return;
-        tr.hidden = tr.dataset.hasMatch !== "1";
+        var hasMatch = tr.dataset.hasMatch === "1";
         delete tr.dataset.hasMatch;
+        if (tr.dataset.groupLevel === "color") {
+          var parentCollapsed = tr.dataset.parentCollapsed === "1";
+          delete tr.dataset.parentCollapsed;
+          tr.hidden = !hasMatch || parentCollapsed;
+        } else {
+          tr.hidden = !hasMatch;
+        }
       });
     }
 
