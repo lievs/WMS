@@ -358,9 +358,10 @@ def test_shortfall_column_also_subtracts_ready_to_ship_and_unplaced(db, client_l
     assert ">8<" in snippet
 
 
-def test_picking_list_shows_buyer_comment_column(db, client_logged_in):
-    """Комментарий показан как поле ввода (можно править прямо в WMS), а не
-    просто текстом — со значением из buyer_comment."""
+def test_picking_list_has_no_comment_column(db, client_logged_in):
+    """Колонка и форма ввода "Комментарий закупщиков" убраны из таблицы
+    (см. чат) — сам buyer_comment в модели остается, комментарий просто
+    больше не редактируется и не показывается в этом месте интерфейса."""
     sender, city, item = _setup(planned_qty=30)
     line = ShipmentPlanLine.query.first()
     line.buyer_comment = "Поставка задерживается на неделю"
@@ -368,19 +369,8 @@ def test_picking_list_shows_buyer_comment_column(db, client_logged_in):
 
     html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
 
-    assert "Комментарий закупщиков" in html
-    assert 'value="Поставка задерживается на неделю"' in html
-
-
-def test_comment_column_is_positioned_right_after_barcode(db, client_logged_in):
-    sender, city, item = _setup(planned_qty=30)
-
-    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
-
-    barcode_idx = html.index(">Штрихкод<")
-    comment_idx = html.index("Комментарий закупщиков")
-    total_planned_idx = html.index("Общий план")
-    assert barcode_idx < comment_idx < total_planned_idx
+    assert "Комментарий закупщиков" not in html
+    assert "Поставка задерживается на неделю" not in html
 
 
 def test_update_comment_endpoint_saves_buyer_comment(db, client_logged_in):

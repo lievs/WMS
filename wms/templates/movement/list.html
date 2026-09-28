@@ -109,6 +109,7 @@
             <td>
               {% if line.document.status != 'completed' %}—
               {% elif line.document.received_at %}Отгружено
+              {% elif line.document.is_waiting_marketplace_request() %}<span class="badge bg-secondary fw-bold">{{ line.document.transit_status_label() }}</span>
               {% else %}<span class="text-warning-emphasis">{{ line.document.transit_status_label() }}</span>{% endif %}
             </td>
           </tr>
@@ -227,7 +228,11 @@
             {% elif d.received_at %}
               <span class="badge bg-success" title="{{ (d.received_at|msk).strftime('%d.%m.%Y %H:%M') }}">Принято МП {{ (d.received_at|msk).strftime('%d.%m') }}</span>
             {% else %}
+              {% if d.is_waiting_marketplace_request() %}
+              <span class="badge bg-secondary fw-bold">{{ d.transit_status_label() }}</span>
+              {% else %}
               <span class="text-warning-emphasis small">{{ d.transit_status_label() }}</span>
+              {% endif %}
               {% if current_user.can_receive_movements() and d.shipped_at %}
               <a class="btn btn-sm btn-warning movement-receive-btn text-decoration-none" href="{{ url_for('movement.receive', doc_id=d.id) }}"
                  title="Зафиксировать количество, принятое маркетплейсом">📥 Принято на МП</a>
@@ -315,7 +320,11 @@
         <div class="small text-muted">{{ (d.created_at|msk).strftime('%d.%m.%Y') }} · {{ d.lines.count() }} короб. · {{ mobile_total_qty | int if mobile_total_qty == mobile_total_qty | int else mobile_total_qty | round(3) }} шт.{% if d.received_at %}{% set mobile_accepted_qty = d.total_received_qty() %} (принято {{ mobile_accepted_qty | int if mobile_accepted_qty == mobile_accepted_qty | int else mobile_accepted_qty | round(3) }}){% endif %}{% if d.created_by %} · Автор: {{ d.created_by.display_name() }}{% endif %}</div>
         {% if d.status == 'completed' and not d.received_at %}
           <div class="mt-1">
+            {% if d.is_waiting_marketplace_request() %}
+            <span class="badge bg-secondary fw-bold">{{ d.transit_status_label() }}</span>
+            {% else %}
             <span class="text-warning-emphasis small">{{ d.transit_status_label() }}</span>
+            {% endif %}
           </div>
         {% endif %}
       </a>

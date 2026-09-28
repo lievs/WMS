@@ -60,7 +60,11 @@
       <button type="submit" class="btn btn-success">📦 Завершить сборку</button>
     </form>
     {% elif doc.status == 'completed' and not doc.received_at %}
+      {% if doc.is_waiting_marketplace_request() %}
+      <span class="badge bg-secondary fw-bold">{{ doc.transit_status_label() }}</span>
+      {% else %}
       <span class="text-warning-emphasis">{{ doc.transit_status_label() }}</span>
+      {% endif %}
       {% if not (can_manage_document or can_receive_document) %}
       {% elif not doc.marketplace_request_number %}
       <form method="post" action="{{ url_for('movement.update_marketplace_request_number', doc_id=doc.id) }}" class="d-inline-flex gap-1 align-items-center">

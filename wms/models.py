@@ -955,6 +955,14 @@ class MovementDocument(db.Model):
             return "Ожидает транспорт"
         return "Ждет заявки на МП"
 
+    def is_waiting_marketplace_request(self):
+        """True на самом первом этапе после сборки (см. transit_status_label)
+        — используется в шаблонах, чтобы выделить этот статус плашкой
+        (см. чат), не сравнивая текст лейбла строкой."""
+        return self.shipped_at is None and not (
+            self.marketplace_request_created_at is not None and self.marketplace_request_number
+        )
+
     def total_plan_fact_qty(self):
         """Количество документа, которое может входить в факт плана.
 

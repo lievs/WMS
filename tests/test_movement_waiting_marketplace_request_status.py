@@ -80,3 +80,20 @@ def test_admin_sees_same_status_as_other_users(db, client_logged_in):
     assert "Сохранить номер" in waiting_html
     assert "В пути</span>" in shipped_html
     assert "Принято на складе МП" in shipped_html
+
+
+def test_waiting_status_shown_as_badge(db, client_logged_in):
+    """«Ждет заявки на МП» выделена жирной плашкой (badge), остальные
+    статусы (Ожидает транспорт/В пути) — обычным текстом, как раньше."""
+    waiting = _make_completed_doc("5")
+    transport = _make_completed_doc("6")
+    transport.marketplace_request_number = "REQ-6"
+    transport.marketplace_request_created_at = datetime.utcnow()
+    db.session.commit()
+
+    waiting_html = client_logged_in.get(f"/movement/{waiting.id}").get_data(as_text=True)
+    transport_html = client_logged_in.get(f"/movement/{transport.id}").get_data(as_text=True)
+
+    assert '<span class="badge bg-secondary fw-bold">Ждет заявки на МП</span>' in waiting_html
+    assert '<span class="badge bg-secondary fw-bold">' not in transport_html
+    assert "Ожидает транспорт" in transport_html
