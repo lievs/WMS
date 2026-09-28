@@ -7,12 +7,12 @@
 # По умолчанию домен вида <IP>.sslip.io — не требует покупки своего домена,
 # sslip.io просто резолвит это имя в IP сервера:
 #
-#   curl -fsSL https://raw.githubusercontent.com/lievs/WMS/claude/wms-system-python-t1db0u/deploy/setup.sh | bash -s -- you@example.com
+#   curl -fsSL https://raw.githubusercontent.com/lievs/WMS/claude/wms-changes-h3640l/deploy/setup.sh | bash -s -- you@example.com
 #
 # Email необязателен (нужен только для писем от Let's Encrypt об истечении
 # сертификата, сам сертификат он не ограничивает):
 #
-#   curl -fsSL https://raw.githubusercontent.com/lievs/WMS/claude/wms-system-python-t1db0u/deploy/setup.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/lievs/WMS/claude/wms-changes-h3640l/deploy/setup.sh | bash
 #
 # Если есть свой домен, подключенный к Cloudflare (например, чтобы обойти
 # блокировку IP хостинг-провайдера у некоторых операторов) — задайте
@@ -36,7 +36,7 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/lievs/WMS.git"
-BRANCH="claude/wms-system-python-t1db0u"
+BRANCH="claude/wms-changes-h3640l"
 APP_DIR="/opt/wms"
 APP_USER="wms"
 SERVICE_NAME="wms"
@@ -160,6 +160,10 @@ echo "==> Получаю код приложения..."
 # повторный вызов --add идемпотентен (не дублирует запись).
 git config --global --add safe.directory "$APP_DIR"
 if [ -d "$APP_DIR/.git" ]; then
+  # На случай, если на сервере уже стоит origin от другого репозитория
+  # (например, остался от предыдущего источника) — всегда приводим его
+  # к REPO_URL, заданному выше, прежде чем тянуть обновления.
+  git -C "$APP_DIR" remote set-url origin "$REPO_URL"
   git -C "$APP_DIR" fetch origin "$BRANCH"
   git -C "$APP_DIR" checkout "$BRANCH"
   git -C "$APP_DIR" reset --hard "origin/$BRANCH"
