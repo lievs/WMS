@@ -205,9 +205,30 @@ def test_detail_shows_row_code_in_header(db, client_logged_in):
     assert "ROW-I" in html
 
 
-def test_detail_hides_loose_stock_form_for_row_document(db, client_logged_in):
+def test_detail_shows_loose_stock_form_for_row_document(db, client_logged_in):
+    """Ряд без ячеек — товар там нередко лежит вообще без короба (см. чат),
+    поэтому, в отличие от инвентаризации по ЯЧЕЙКЕ, форма "без короба"
+    здесь показывается: скан штрихкода + количество."""
     wh = _make_warehouse("WH-ZONE-11")
     _make_zone(wh, "ROW-J")
     doc = _new_zone_inventory(client_logged_in, wh, "ROW-J")
     html = client_logged_in.get(f"/inventory/{doc.id}").get_data(as_text=True)
-    assert "Учесть товар без короба" not in html
+    assert "Учесть товар без короба" in html
+
+
+def test_add_line_counts_loose_item_in_row_document(db, client_logged_in):
+    wh = _make_warehouse("WH-ZONE-12")
+    _make_zone(wh, "ROW-K")
+    item = _make_item("8880000406", "Товар россыпью в ряду")
+    doc = _new_zone_inventory(client_logged_in, wh, "ROW-K")
+
+    resp = client_logged_in.post(
+        f"/inventory/{doc.id}/lines/add",
+        data={"nomenclature_id": item.id, "qty": 7},
+        follow_redirects=True,
+    )
+
+    assert "Учтено без короба" in resp.get_data(as_text=True)
+    line = doc.lines.filter_by(nomenclature_id=item.id).first()
+    assert line is not None
+    assert line.qty == 7

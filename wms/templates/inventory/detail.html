@@ -63,10 +63,14 @@
   </form>
 </div>
 
-{% if not doc.cell and not doc.zone %}
+{% if not doc.cell %}
 <div class="card p-3 mb-4">
   <h5>Учесть товар без короба</h5>
+  {% if doc.zone %}
+  <p class="text-muted small mb-2">Для товара, который лежит в ряду <b>{{ doc.zone.code }}</b> россыпью, а не в коробе — отсканируйте штрихкод (или введите его вручную) и укажите количество.</p>
+  {% else %}
   <p class="text-muted small mb-2">Для неразмещенного остатка, который лежит россыпью, а не в коробе — иначе он никогда не попадет в подсчет и будет вечно висеть недостачей в сличительной ведомости справа.</p>
+  {% endif %}
   <form method="post" action="{{ url_for('inventory.add_line', doc_id=doc.id) }}" class="row g-2 align-items-end">
     <div class="col-md-7">
       <label class="form-label">Товар</label>
