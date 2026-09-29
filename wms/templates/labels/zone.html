@@ -30,19 +30,6 @@
     font-weight: 700;
     margin-top: 8mm;
   }
-
-  .zone-label-subtitle {
-    font-size: 14pt;
-    color: #333;
-    margin-top: 4mm;
-  }
-
-  .zone-label-cells {
-    font-size: 11pt;
-    color: #333;
-    margin-top: 14mm;
-    max-width: 160mm;
-  }
 </style>
 </head>
 <body data-autoprint="{{ '1' if autoprint else '0' }}">
@@ -54,12 +41,6 @@
 <div class="zone-label-page">
   <img src="{{ barcode_img }}" alt="barcode">
   <div class="zone-label-title">Ряд {{ zone.code }}{% if zone.name %} — {{ zone.name }}{% endif %}</div>
-  <div class="zone-label-subtitle">{{ zone.warehouse.name if zone.warehouse else '' }}</div>
-  {% if cell_codes %}
-  <div class="zone-label-cells">
-    <b>Ячейки в ряду:</b> {{ cell_codes | join(', ') }}
-  </div>
-  {% endif %}
 </div>
 
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>

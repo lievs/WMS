@@ -124,9 +124,9 @@ def build_labels_batch_pdf(
     return buffer.getvalue()
 
 
-def build_zone_label_pdf(code_value: str, title: str, subtitle: str = "", cell_codes=None) -> bytes:
-    """Строит крупную A4-этикетку зоны склада: штрихкод, код/название зоны,
-    список входящих ячеек — для печати и навешивания на стеллаж/вход в зону.
+def build_zone_label_pdf(code_value: str, title: str) -> bytes:
+    """Строит крупную A4-этикетку ряда склада: штрихкод и название ряда —
+    для печати и навешивания на стеллаж/вход в ряд.
     """
     width, height = A4
     buffer = io.BytesIO()
@@ -151,22 +151,6 @@ def build_zone_label_pdf(code_value: str, title: str, subtitle: str = "", cell_c
     ty = y - 18 * mm
     c.setFont(FONT_BOLD, 34)
     c.drawCentredString(width / 2, ty, title)
-
-    if subtitle:
-        ty -= 12 * mm
-        c.setFont(FONT_REGULAR, 16)
-        c.drawCentredString(width / 2, ty, subtitle)
-
-    if cell_codes:
-        ty -= 14 * mm
-        c.setFont(FONT_BOLD, 12)
-        c.drawCentredString(width / 2, ty, "Ячейки в зоне:")
-        ty -= 8 * mm
-        c.setFont(FONT_REGULAR, 11)
-        wrapped = textwrap.wrap(", ".join(cell_codes), width=70)
-        for line in wrapped:
-            c.drawCentredString(width / 2, ty, line)
-            ty -= 6 * mm
 
     c.showPage()
     c.save()
