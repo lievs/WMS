@@ -207,6 +207,85 @@ def test_priority_distribution_zero_planned_total_gives_zero_target(db, client_l
     assert ShipmentPlanLine.query.get(line.id).distributed_target_qty == 0.0
 
 
+def test_overflow_distribution_for_regular_item_when_plan_fully_closed(db, client_logged_in):
+    """Обычный товар (без приоритета): план Москва 100/Казань 50 уже
+    полностью выполнен (fulfilled_qty == planned_qty по обоим городам), но
+    на складе-отправителе остается еще 60 шт "готово к отгрузке" — иначе
+    эти короба никому не предлагает подсказка "куда везти короб" (см. чат:
+    "остаток есть, а потребности не выдает для сборщиков"). Дораспределяем
+    остаток пропорционально исходной доле города в плане — тем же
+    принципом, что и для приоритетных товаров."""
+    item = Nomenclature(sku="SKU-PRIO-6", barcode="7770200006", name="Товар", unit="шт")
+    db.session.add(item)
+    db.session.commit()
+    _make_sender_with_packed_stock(item, qty=60, code="WH-PRIO-6")
+
+    plan = ShipmentPlan.query.filter_by(marketplace="ozon").first() or ShipmentPlan(marketplace="ozon")
+    db.session.add(plan)
+    moscow_wh = Warehouse.query.filter_by(marketplace_city="Москва", marketplace="ozon").first()
+    if not moscow_wh:
+        moscow_wh = Warehouse(code="WH-PRIO-6-MSK", name="ОЗОН: Москва", marketplace="ozon", marketplace_city="Москва")
+        db.session.add(moscow_wh)
+    kazan_wh = Warehouse(code="WH-PRIO-6-KZN", name="ОЗОН: Казань 6", marketplace="ozon", marketplace_city="Казань 6")
+    db.session.add(kazan_wh)
+    db.session.commit()
+
+    moscow = ShipmentPlanLine(
+        plan_id=plan.id, warehouse_id=moscow_wh.id, nomenclature_id=item.id,
+        barcode="7770200006", planned_qty=100, fulfilled_qty=100,
+    )
+    kazan = ShipmentPlanLine(
+        plan_id=plan.id, warehouse_id=kazan_wh.id, nomenclature_id=item.id,
+        barcode="7770200006", planned_qty=50, fulfilled_qty=50,
+    )
+    db.session.add_all([moscow, kazan])
+    db.session.commit()
+
+    from wms.blueprints.shipment_plan import _apply_priority_distribution
+
+    _apply_priority_distribution()
+    db.session.commit()
+
+    assert ShipmentPlanLine.query.get(moscow.id).distributed_target_qty == 40.0
+    assert ShipmentPlanLine.query.get(kazan.id).distributed_target_qty == 20.0
+
+
+def test_no_overflow_distribution_for_regular_item_while_plan_still_open(db, client_logged_in):
+    """Тот же обычный товар, но план еще не полностью закрыт (Казань
+    выполнена не до конца) — дораспределение не включается, чтобы не
+    "растащить" остаток по городам раньше, чем закрыт их собственный план."""
+    item = Nomenclature(sku="SKU-PRIO-7", barcode="7770200007", name="Товар", unit="шт")
+    db.session.add(item)
+    db.session.commit()
+    _make_sender_with_packed_stock(item, qty=60, code="WH-PRIO-7")
+
+    plan = ShipmentPlan.query.filter_by(marketplace="ozon").first() or ShipmentPlan(marketplace="ozon")
+    db.session.add(plan)
+    moscow_wh = Warehouse(code="WH-PRIO-7-MSK", name="ОЗОН: Москва 7", marketplace="ozon", marketplace_city="Москва 7")
+    kazan_wh = Warehouse(code="WH-PRIO-7-KZN", name="ОЗОН: Казань 7", marketplace="ozon", marketplace_city="Казань 7")
+    db.session.add_all([moscow_wh, kazan_wh])
+    db.session.commit()
+
+    moscow = ShipmentPlanLine(
+        plan_id=plan.id, warehouse_id=moscow_wh.id, nomenclature_id=item.id,
+        barcode="7770200007", planned_qty=100, fulfilled_qty=100,
+    )
+    kazan = ShipmentPlanLine(
+        plan_id=plan.id, warehouse_id=kazan_wh.id, nomenclature_id=item.id,
+        barcode="7770200007", planned_qty=50, fulfilled_qty=10,
+    )
+    db.session.add_all([moscow, kazan])
+    db.session.commit()
+
+    from wms.blueprints.shipment_plan import _apply_priority_distribution
+
+    _apply_priority_distribution()
+    db.session.commit()
+
+    assert ShipmentPlanLine.query.get(moscow.id).distributed_target_qty is None
+    assert ShipmentPlanLine.query.get(kazan.id).distributed_target_qty is None
+
+
 def test_effective_planned_qty_uses_distributed_target_when_priority_set(db):
     line = ShipmentPlanLine(
         plan_id=1, warehouse_id=1, barcode="X", planned_qty=100, fulfilled_qty=0,
