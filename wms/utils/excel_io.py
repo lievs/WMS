@@ -637,10 +637,18 @@ def export_shipment_plan_to_excel(picking_list, picking_totals, ozon_cities, wb_
         next_column = end_column + 1
 
     # Последняя колонка с числами (общие показатели + города) — все, что
-    # правее нее, это уже "Комментарий закупщиков", свободный текст без
-    # суммы и без правого выравнивания/числового формата.
+    # правее нее, это уже доп. поля исходного плана (приоритет/новинка) и
+    # "Комментарий закупщиков" — свободный текст без суммы и без правого
+    # выравнивания/числового формата.
     last_numeric_column = max(next_column - 1, len(common_headers))
-    comment_column = last_numeric_column + 1
+    priority_column = last_numeric_column + 1
+    novelty_column = last_numeric_column + 2
+    comment_column = last_numeric_column + 3
+    for column, title in ((priority_column, "Приоритет"), (novelty_column, "Новинка")):
+        ws.merge_cells(start_row=1, start_column=column, end_row=2, end_column=column)
+        cell = ws.cell(1, column, title)
+        cell.font = Font(name="Arial", size=10, bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     ws.merge_cells(start_row=1, start_column=comment_column, end_row=2, end_column=comment_column)
     comment_header = ws.cell(1, comment_column, "Комментарий закупщиков")
     comment_header.font = Font(name="Arial", size=10, bold=True)
@@ -682,6 +690,10 @@ def export_shipment_plan_to_excel(picking_list, picking_totals, ozon_cities, wb_
         ws.cell(row_number, 7, product["unplaced"])
         ws.cell(row_number, 8, product["ready_to_ship"])
         ws.cell(row_number, 9, product["in_transit_total"])
+        ws.cell(row_number, priority_column, product.get("priority"))
+        novelty = product.get("novelty_marketplace")
+        novelty_label = ("Новинка ВБ" if novelty == "wb" else "Новинка Ozon") if novelty else ""
+        ws.cell(row_number, novelty_column, novelty_label)
         ws.cell(row_number, comment_column, product.get("comment") or "")
 
         for (marketplace, city), column in city_columns.items():
@@ -713,7 +725,10 @@ def export_shipment_plan_to_excel(picking_list, picking_totals, ozon_cities, wb_
             badge.font = Font(name="Arial", size=8, bold=True, color="FFFFFF")
             badge.alignment = Alignment(horizontal="center", vertical="center")
 
-    widths = {1: 30, 2: 12, 3: 19, 4: 16, 5: 14, 6: 16, 7: 18, 8: 22, 9: 12, comment_column: 32}
+    widths = {
+        1: 30, 2: 12, 3: 19, 4: 16, 5: 14, 6: 16, 7: 18, 8: 22, 9: 12,
+        priority_column: 11, novelty_column: 14, comment_column: 32,
+    }
     for column, width in widths.items():
         ws.column_dimensions[get_column_letter(column)].width = width
     ws.row_dimensions[1].height = 20

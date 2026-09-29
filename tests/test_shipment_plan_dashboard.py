@@ -297,7 +297,9 @@ def test_excel_export_matches_dashboard_table_and_keeps_transit_separate(db, cli
     assert sheet["G1"].value == "На разбраковке"
     assert sheet["J1"].value == "ОЗОН"
     assert sheet["J2"].value == "Город"
-    assert sheet["K1"].value == "Комментарий закупщиков"
+    assert sheet["K1"].value == "Приоритет"
+    assert sheet["L1"].value == "Новинка"
+    assert sheet["M1"].value == "Комментарий закупщиков"
     assert sheet["A3"].value == "Итого (1 поз.)"
     assert sheet["E3"].value == 30
     assert sheet["I3"].value == 10
