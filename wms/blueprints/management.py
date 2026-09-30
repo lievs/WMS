@@ -212,7 +212,9 @@ def dashboard():
         )
         > 24
     ]
-    one_c_issues = OneCQuantityCheck.query.filter(OneCQuantityCheck.checked_at >= start).count()
+    one_c_issues = OneCQuantityCheck.query.filter(
+        OneCQuantityCheck.checked_at >= start, OneCQuantityCheck.dismissed_at.is_(None)
+    ).count()
 
     alerts = []
     alert_groups = (

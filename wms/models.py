@@ -1067,6 +1067,14 @@ class OneCQuantityCheck(db.Model):
     wms_qty = db.Column(db.Float, nullable=False, default=0)
     one_c_qty = db.Column(db.Float, nullable=False, default=0)
     checked_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    # Расхождение по документу, который уже нельзя исправить (например,
+    # тестовый документ, реально никогда не будет пересверен с 1С) —
+    # админ переносит его "в архив" вручную, чтобы оно не висело в списке
+    # вечно. Повторная сверка этого же документа из 1С (см.
+    # integration_1c.confirm_documents) все равно удаляет старую строку и
+    # создает новую — архивная отметка тогда не переносится, расхождение
+    # снова станет видимым, если оно и правда еще актуально.
+    dismissed_at = db.Column(db.DateTime, nullable=True)
 
     def diff(self):
         return self.one_c_qty - self.wms_qty
