@@ -1181,7 +1181,17 @@ class InventoryLine(db.Model):
 
 class InventoryScannedBox(db.Model):
     """Какие короба уже учтены в этом документе — не дает посчитать один и
-    тот же короб дважды при повторном/случайном скане."""
+    тот же короб дважды при повторном/случайном скане.
+
+    previous_cell_id/previous_zone_id — где короб был ДО того, как
+    сканирование в эту выборочную инвентаризацию (ячейки/ряда) его туда
+    переставило (см. inventory.add_box и почему это "фактическое
+    размещение без отдельного подтверждения"). Если короб уже был в этой
+    же ячейке/ряду — совпадают с текущим местом короба, и "откат" ничего
+    не меняет. Нужны, чтобы при удалении скана/документа (см.
+    inventory._revert_scanned_box_placement) короб не остался висеть
+    расставленным туда, откуда его переставила именно эта инвентаризация,
+    а сам документ-основание для этого уже удален (см. чат)."""
 
     __tablename__ = "inventory_scanned_boxes"
 
@@ -1189,6 +1199,8 @@ class InventoryScannedBox(db.Model):
     document_id = db.Column(db.Integer, db.ForeignKey("inventory_documents.id"), nullable=False)
     box_id = db.Column(db.Integer, db.ForeignKey("boxes.id"), nullable=False)
     scanned_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    previous_cell_id = db.Column(db.Integer, db.ForeignKey("cells.id"), nullable=True)
+    previous_zone_id = db.Column(db.Integer, db.ForeignKey("zones.id"), nullable=True)
 
     box = db.relationship("Box")
 
