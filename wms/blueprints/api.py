@@ -22,6 +22,7 @@ def search_nomenclature():
             Nomenclature.name.ilike(f"%{token}%"),
             Nomenclature.sku.ilike(f"%{token}%"),
             Nomenclature.barcode.ilike(f"%{token}%"),
+            Nomenclature.barcode2.ilike(f"%{token}%"),
         )
         for token in tokens
     ]
@@ -49,7 +50,7 @@ def search_nomenclature():
 @bp.route("/nomenclature/by-barcode/<barcode>")
 def nomenclature_by_barcode(barcode):
     """Точный поиск товара по штрихкоду (для сканера)."""
-    item = Nomenclature.query.filter_by(barcode=barcode.strip()).first()
+    item = Nomenclature.find_by_barcode(barcode)
     if not item:
         return jsonify({"found": False}), 404
     return jsonify(

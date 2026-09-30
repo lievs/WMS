@@ -325,7 +325,7 @@ def _find_nomenclature_for_invoice_row(row):
     поставщика и с sku в номенклатуре не связана, поэтому не используется."""
     barcode = row.get("barcode")
     if barcode:
-        item = Nomenclature.query.filter_by(barcode=barcode).first()
+        item = Nomenclature.find_by_barcode(barcode)
         if item:
             return item
     name = row["name"].strip()
@@ -732,7 +732,7 @@ def add_line_to_box_by_barcode(doc_id, box_id):
     barcode = payload.get("barcode", "").strip()
     qty = float(payload.get("qty", 1) or 1)
     request_token = str(payload.get("request_token", ""))[:64]
-    item = Nomenclature.query.filter_by(barcode=barcode).first()
+    item = Nomenclature.find_by_barcode(barcode)
     if not item:
         return jsonify({"ok": False, "error": f"Товар со штрихкодом '{barcode}' не найден"}), 404
 
@@ -800,7 +800,7 @@ def add_line_by_barcode(doc_id):
     barcode = payload.get("barcode", "").strip()
     qty = payload.get("qty", 1) or 1
     request_token = str(payload.get("request_token", ""))[:64]
-    item = Nomenclature.query.filter_by(barcode=barcode).first()
+    item = Nomenclature.find_by_barcode(barcode)
     if not item:
         return jsonify({"ok": False, "error": f"Товар со штрихкодом '{barcode}' не найден"}), 404
 

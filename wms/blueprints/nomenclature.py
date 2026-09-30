@@ -102,7 +102,7 @@ def locate():
     not_found = False
 
     if barcode:
-        item = Nomenclature.query.filter_by(barcode=barcode).first()
+        item = Nomenclature.find_by_barcode(barcode)
         if item is None:
             not_found = True
         else:
@@ -205,6 +205,7 @@ def list_nomenclature():
                     Nomenclature.name.ilike(like),
                     Nomenclature.sku.ilike(like),
                     Nomenclature.barcode.ilike(like),
+                    Nomenclature.barcode2.ilike(like),
                 )
             )
     pagination = query.order_by(Nomenclature.name).paginate(
@@ -241,11 +242,11 @@ def create_nomenclature():
         return redirect(url_for("nomenclature.list_nomenclature"))
 
     barcode = request.form.get("barcode", "").strip()
+    barcode2 = request.form.get("barcode2", "").strip()
     name = request.form.get("name", "").strip()
     size = request.form.get("size", "").strip()
     sku = request.form.get("sku", "").strip()
     unit = request.form.get("unit", "шт").strip() or "шт"
-    description = request.form.get("description", "").strip()
     norm_minutes = request.form.get("norm_minutes", type=float)
 
     if not barcode or not name:
@@ -255,8 +256,12 @@ def create_nomenclature():
     if not sku:
         sku = barcode
 
-    if Nomenclature.query.filter_by(barcode=barcode).first():
+    if Nomenclature.find_by_barcode(barcode):
         flash(f"Штрихкод '{barcode}' уже используется", "danger")
+        return redirect(url_for("nomenclature.list_nomenclature"))
+
+    if barcode2 and Nomenclature.find_by_barcode(barcode2):
+        flash(f"Доп. штрихкод '{barcode2}' уже используется", "danger")
         return redirect(url_for("nomenclature.list_nomenclature"))
 
     if Nomenclature.query.filter_by(sku=sku).first():
@@ -268,10 +273,10 @@ def create_nomenclature():
     item = Nomenclature(
         sku=sku,
         barcode=barcode,
+        barcode2=barcode2 or None,
         name=name,
         size=size or None,
         unit=unit,
-        description=description,
         norm_minutes=norm_minutes,
         category_id=category.id if category else None,
     )
@@ -325,7 +330,7 @@ def update_barcode(item_id):
         flash("Штрихкод не может быть пустым", "danger")
         return redirect(url_for("nomenclature.list_nomenclature", q=q))
 
-    existing = Nomenclature.query.filter_by(barcode=barcode).first()
+    existing = Nomenclature.find_by_barcode(barcode)
     if existing and existing.id != item.id:
         flash(f"Штрихкод '{barcode}' уже используется у товара «{existing.name}»", "danger")
         return redirect(url_for("nomenclature.list_nomenclature", q=q))
@@ -333,6 +338,31 @@ def update_barcode(item_id):
     item.barcode = barcode
     db.session.commit()
     flash(f"Штрихкод для «{item.name}» обновлен", "success")
+    return redirect(url_for("nomenclature.list_nomenclature", q=q))
+
+
+@bp.route("/<int:item_id>/barcode2", methods=["POST"])
+def update_barcode2(item_id):
+    """Доп. штрихкод — второй код, по которому тоже находится этот же товар
+    (см. Nomenclature.find_by_barcode и чат: старый штрихкод от поставщика,
+    который уже разошелся по коробам/этикеткам, менять сразу на новый
+    рискованно). Пустое значение снимает доп. штрихкод."""
+    if not _require_edit():
+        return redirect(url_for("nomenclature.list_nomenclature"))
+
+    item = Nomenclature.query.get_or_404(item_id)
+    barcode2 = request.form.get("barcode2", "").strip()
+    q = request.form.get("q", "")
+
+    if barcode2:
+        existing = Nomenclature.find_by_barcode(barcode2)
+        if existing and existing.id != item.id:
+            flash(f"Штрихкод '{barcode2}' уже используется у товара «{existing.name}»", "danger")
+            return redirect(url_for("nomenclature.list_nomenclature", q=q))
+
+    item.barcode2 = barcode2 or None
+    db.session.commit()
+    flash(f"Доп. штрихкод для «{item.name}» обновлен", "success")
     return redirect(url_for("nomenclature.list_nomenclature", q=q))
 
 

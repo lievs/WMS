@@ -622,7 +622,7 @@ def add_item_to_box_by_barcode(doc_id, box_id):
 
     barcode = (request.json or {}).get("barcode", "").strip()
     qty = float((request.json or {}).get("qty", 1) or 1)
-    item = Nomenclature.query.filter_by(barcode=barcode).first()
+    item = Nomenclature.find_by_barcode(barcode)
     if not item:
         return jsonify({"ok": False, "error": f"Товар со штрихкодом '{barcode}' не найден"}), 404
 
@@ -685,7 +685,7 @@ def add_line_by_barcode(doc_id):
 
     barcode = (request.json or {}).get("barcode", "").strip()
     qty = float((request.json or {}).get("qty", 1) or 1)
-    item = Nomenclature.query.filter_by(barcode=barcode).first()
+    item = Nomenclature.find_by_barcode(barcode)
     if not item:
         return jsonify({"ok": False, "error": f"Товар со штрихкодом '{barcode}' не найден"}), 404
 

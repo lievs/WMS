@@ -337,6 +337,14 @@ class Nomenclature(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     sku = db.Column(db.String(50), unique=True, nullable=False)
     barcode = db.Column(db.String(50), unique=True, nullable=False)
+    # Доп. штрихкод — тот же товар иногда переклеивают другим штрихкодом
+    # (смена поставщика/переупаковка), а старый код уже мог разойтись по
+    # коробам/этикеткам. Ищется наравне с основным barcode везде, где товар
+    # находят по штрихкоду (см. find_by_barcode), а не только в поиске по
+    # номенклатуре. Уникальность (в т.ч. по отношению к чужому barcode)
+    # проверяется в коде при создании/правке — единого constraint на пару
+    # полей из двух разных строк тут не сделать.
+    barcode2 = db.Column(db.String(50), unique=True, nullable=True)
     name = db.Column(db.String(300), nullable=False)
     size = db.Column(db.String(20), nullable=True)
     unit = db.Column(db.String(20), nullable=False, default="шт")
@@ -356,6 +364,19 @@ class Nomenclature(db.Model):
         if self.norm_minutes is not None:
             return self.norm_minutes
         return self.category.norm_minutes if self.category else None
+
+    @staticmethod
+    def find_by_barcode(code):
+        """Ищет товар по ОСНОВНОМУ или ДОП. штрихкоду — единая точка входа
+        для всех мест, где товар находят сканером (приемка, размещение,
+        производство, API), чтобы доп. штрихкод сразу заработал везде, а не
+        только в отдельно поправленных местах."""
+        code = (code or "").strip()
+        if not code:
+            return None
+        return Nomenclature.query.filter(
+            db.or_(Nomenclature.barcode == code, Nomenclature.barcode2 == code)
+        ).first()
 
     def __repr__(self):
         return f"<Nomenclature {self.sku} {self.name}>"
