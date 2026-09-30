@@ -5,6 +5,9 @@
   <div class="d-flex align-items-center gap-2 flex-wrap">
     <h3 class="mb-0">Номенклатура</h3>
     <a class="btn btn-sm btn-outline-primary" href="{{ url_for('nomenclature.locate') }}">📍 Где товар</a>
+    {% if current_user.can_edit_nomenclature() %}
+    <a class="btn btn-sm btn-outline-warning" href="{{ url_for('nomenclature.duplicates') }}">🧬 Дубли</a>
+    {% endif %}
   </div>
   <div class="d-none d-md-flex gap-2">
     {% if current_user.can_edit_nomenclature() %}
