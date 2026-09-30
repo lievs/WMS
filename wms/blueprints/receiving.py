@@ -944,6 +944,76 @@ def update_lines_bulk(doc_id):
     return redirect(url_for("receiving.detail", doc_id=doc_id))
 
 
+@bp.route("/<int:doc_id>/lines/<int:line_id>/nomenclature", methods=["POST"])
+def update_line_nomenclature(doc_id, line_id):
+    """Исправляет товар, под которым по ошибке приняли строку (например,
+    отсканировали похожий, но не тот штрихкод) — доступно только
+    администратору, независимо от статуса документа, и в отличие от
+    редактирования количества переносит уже случившееся влияние на остаток
+    склада на новый товар, а не только правит саму строку:
+      - если строка упакована в короб при приемке (box_id) — переносится
+        соответствующее количество в BoxItem этого короба;
+      - если строка уже зачислена в неразмещенный остаток (line_completed_at,
+        см. _credit_receiving_line) — годное количество списывается с
+        остатка старого товара и зачисляется остатком нового (с партией под
+        эту же приемку, см. UnplacedStock.add), а возврат поставщику по
+        браку этой приемки переносится на новый товар.
+    Если остаток старого товара к этому моменту уже разошелся дальше
+    (размещен в другие короба, отгружен) — спишется сколько осталось
+    (UnplacedStock.consume сам не уходит в минус), дальше по цепочке это
+    уже не отследить, поэтому лучше проверить остатки вручную."""
+    if not current_user.is_admin:
+        flash("Менять товар в строке приемки может только администратор", "danger")
+        return redirect(url_for("receiving.detail", doc_id=doc_id))
+
+    doc = ReceivingDocument.query.get_or_404(doc_id)
+    line = ReceivingLine.query.filter_by(id=line_id, document_id=doc_id).first_or_404()
+
+    new_item_id = request.form.get("nomenclature_id", type=int)
+    new_item = Nomenclature.query.get(new_item_id) if new_item_id else None
+    if not new_item:
+        flash("Выберите товар", "danger")
+        return redirect(url_for("receiving.detail", doc_id=doc_id))
+
+    old_item = line.nomenclature
+    if new_item.id == old_item.id:
+        return redirect(url_for("receiving.detail", doc_id=doc_id))
+
+    if line.box_id:
+        old_box_item = BoxItem.query.filter_by(
+            box_id=line.box_id, nomenclature_id=old_item.id
+        ).first()
+        moved_qty = min(line.qty, old_box_item.qty) if old_box_item else 0
+        if old_box_item and moved_qty > 0:
+            old_box_item.qty -= moved_qty
+            if old_box_item.qty <= 0:
+                db.session.delete(old_box_item)
+            new_box_item = BoxItem.query.filter_by(
+                box_id=line.box_id, nomenclature_id=new_item.id
+            ).first()
+            if new_box_item:
+                new_box_item.qty += moved_qty
+            else:
+                db.session.add(
+                    BoxItem(box_id=line.box_id, nomenclature_id=new_item.id, qty=moved_qty)
+                )
+    elif line.line_completed_at is not None:
+        good_qty = line.good_qty()
+        if good_qty > 0:
+            UnplacedStock.consume(doc.warehouse_id, old_item.id, good_qty)
+            UnplacedStock.add(doc.warehouse_id, new_item.id, good_qty, receiving_document=doc)
+        if line.defect_qty:
+            for supplier_return in SupplierReturn.query.filter_by(
+                receiving_document_id=doc.id, nomenclature_id=old_item.id
+            ).all():
+                supplier_return.nomenclature_id = new_item.id
+
+    line.nomenclature_id = new_item.id
+    db.session.commit()
+    flash(f"Товар в строке изменен: «{old_item.name}» → «{new_item.name}»", "success")
+    return redirect(url_for("receiving.detail", doc_id=doc_id))
+
+
 @bp.route("/<int:doc_id>/lines/<int:line_id>/delete", methods=["POST"])
 def delete_line(doc_id, line_id):
     doc = ReceivingDocument.query.get_or_404(doc_id)

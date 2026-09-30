@@ -219,7 +219,18 @@
       {% set eq = line.expected_qty %}
       {% set mismatch = eq is not none and line.qty != eq %}
       <tr>
-        <td>{{ line.nomenclature.name }} <span class="text-muted">({{ line.nomenclature.sku }})</span></td>
+        <td style="min-width:260px">
+          {% if current_user.is_admin %}
+          <form method="post" action="{{ url_for('receiving.update_line_nomenclature', doc_id=doc.id, line_id=line.id) }}" class="autocomplete-box d-flex gap-1" data-autocomplete-nomenclature>
+            <input type="text" class="form-control form-control-sm ac-input" value="{{ line.nomenclature.name }} ({{ line.nomenclature.sku }})" autocomplete="off">
+            <input type="hidden" class="ac-value" name="nomenclature_id" value="{{ line.nomenclature.id }}">
+            <button type="submit" class="btn btn-sm btn-outline-secondary flex-shrink-0" title="Изменить товар — переносит уже зачисленный остаток на новый товар">✓</button>
+            <div class="autocomplete-list"></div>
+          </form>
+          {% else %}
+          {{ line.nomenclature.name }} <span class="text-muted">({{ line.nomenclature.sku }})</span>
+          {% endif %}
+        </td>
         <td>{% if line.box %}<a href="{{ url_for('boxes.detail', box_id=line.box.id) }}">{{ line.box.box_number }}</a>{% else %}<span class="text-muted">—</span>{% endif %}</td>
         <td class="{{ 'text-danger fw-semibold' if mismatch else 'text-muted' }}">
           {% if eq is not none %}
@@ -285,7 +296,16 @@
       {% set eq = line.expected_qty %}
       {% set mismatch = eq is not none and line.qty != eq %}
       <div class="list-group-item py-2 px-2">
+        {% if current_user.is_admin %}
+        <form method="post" action="{{ url_for('receiving.update_line_nomenclature', doc_id=doc.id, line_id=line.id) }}" class="autocomplete-box d-flex gap-1" data-autocomplete-nomenclature>
+          <input type="text" class="form-control form-control-sm ac-input" value="{{ line.nomenclature.name }} ({{ line.nomenclature.sku }})" autocomplete="off">
+          <input type="hidden" class="ac-value" name="nomenclature_id" value="{{ line.nomenclature.id }}">
+          <button type="submit" class="btn btn-sm btn-outline-secondary flex-shrink-0">✓</button>
+          <div class="autocomplete-list"></div>
+        </form>
+        {% else %}
         <div>{{ line.nomenclature.name }} <span class="text-muted small">({{ line.nomenclature.sku }})</span></div>
+        {% endif %}
         <div class="d-flex justify-content-between align-items-center gap-2 mt-1">
           <div class="small {{ 'text-danger fw-semibold' if mismatch else 'text-muted' }}">
             {% if line.box %}<a href="{{ url_for('boxes.detail', box_id=line.box.id) }}">{{ line.box.box_number }}</a>{% else %}без короба{% endif %}
