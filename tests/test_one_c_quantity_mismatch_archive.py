@@ -6,7 +6,7 @@
 import pytest
 
 from wms.extensions import db
-from wms.models import OneCQuantityCheck
+from wms.models import AppSetting, OneCQuantityCheck
 
 
 @pytest.fixture(autouse=True)
@@ -117,3 +117,76 @@ def test_dashboard_alert_count_excludes_dismissed(db, client_logged_in):
     html = client_logged_in.get("/management/").get_data(as_text=True)
 
     assert "1С: 1</span>" in html
+
+
+def _sync_quantity_check(client, document_id=42, wms_qty=10, one_c_qty=9):
+    """Эмулирует callback 1С (см. integration_1c.confirm_documents) —
+    ровно то, что происходит при каждой обычной синхронизации."""
+    payload = {
+        "quantity_checks": [{
+            "document_type": "movement", "document_id": document_id,
+            "document_number": f"PER-{document_id}", "barcode": "123", "name": "Товар",
+            "wms_qty": wms_qty, "one_c_qty": one_c_qty,
+        }]
+    }
+    return client.post(
+        "/integrations/1c/api/export/confirm", json=payload,
+        headers={"X-1C-Token": "test-token"},
+    )
+
+
+def test_dismissed_document_stays_archived_after_resync(db, client_logged_in):
+    """Баг из чата: расхождение по тестовому документу, перенесенное в
+    архив, при каждой следующей сверке с 1С полностью пересоздавалось
+    заново (см. confirm_documents — старые строки документа удаляются, а
+    новые создаются "с нуля") и снова вылезало в основном списке. Теперь
+    архивная отметка должна переноситься на новую строку того же
+    документа, пока ее не снимут вручную."""
+    db.session.add(AppSetting(key="api_1c_token", value="test-token"))
+    db.session.commit()
+
+    _sync_quantity_check(client_logged_in, document_id=101)
+    row = OneCQuantityCheck.query.filter_by(document_id=101).one()
+    client_logged_in.post(
+        f"/reports/one-c-quantity-mismatches/{row.id}/dismiss", follow_redirects=True
+    )
+    assert OneCQuantityCheck.query.get(row.id).dismissed_at is not None
+
+    # Повторная (и еще одна) синхронизация с тем же расхождением — как при
+    # обычной регулярной сверке 1С, документ так и не исправили.
+    _sync_quantity_check(client_logged_in, document_id=101)
+    _sync_quantity_check(client_logged_in, document_id=101)
+
+    row_after_resync = OneCQuantityCheck.query.filter_by(document_id=101).one()
+    assert row_after_resync.dismissed_at is not None
+
+    html = client_logged_in.get("/reports/one-c-quantity-mismatches").get_data(as_text=True)
+    assert "PER-101" not in html
+    archived_html = client_logged_in.get(
+        "/reports/one-c-quantity-mismatches?archived=1"
+    ).get_data(as_text=True)
+    assert "PER-101" in archived_html
+
+
+def test_restored_document_reappears_after_resync(db, client_logged_in):
+    """После ручного возврата из архива документ снова ведет себя как
+    обычный (пока не исправленный) — очередная сверка с тем же
+    расхождением должна показать его в основном списке, а не молчать."""
+    db.session.add(AppSetting(key="api_1c_token", value="test-token"))
+    db.session.commit()
+
+    _sync_quantity_check(client_logged_in, document_id=102)
+    row = OneCQuantityCheck.query.filter_by(document_id=102).one()
+    client_logged_in.post(
+        f"/reports/one-c-quantity-mismatches/{row.id}/dismiss", follow_redirects=True
+    )
+    client_logged_in.post(
+        f"/reports/one-c-quantity-mismatches/{row.id}/restore", follow_redirects=True
+    )
+
+    _sync_quantity_check(client_logged_in, document_id=102)
+
+    row_after_resync = OneCQuantityCheck.query.filter_by(document_id=102).one()
+    assert row_after_resync.dismissed_at is None
+    html = client_logged_in.get("/reports/one-c-quantity-mismatches").get_data(as_text=True)
+    assert "PER-102" in html

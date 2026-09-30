@@ -565,7 +565,7 @@ def export_confirm():
     # только расхождения; повторная сверка полностью заменяет результат по
     # документу, поэтому старое предупреждение не остается висеть.
     quantity_checks = data.get("quantity_checks") or []
-    checked_documents = set()
+    checked_documents = {}
     quantity_mismatches = 0
     for check in quantity_checks:
         document_type = str(check.get("document_type") or "movement")[:30]
@@ -574,10 +574,24 @@ def export_confirm():
             continue
         key = (document_type, document_id)
         if key not in checked_documents:
+            # Документ, который уже перенесли "в архив" вручную (см.
+            # reports.dismiss_one_c_quantity_check — например, тестовый
+            # документ, который никогда не сверится правильно), не должен
+            # выныривать в основном списке при каждой следующей сверке:
+            # запоминаем отметку архива ПЕРЕД удалением старых строк и
+            # переносим её на новые строки этого же документа ниже.
+            dismissed_at = (
+                OneCQuantityCheck.query.filter_by(
+                    document_type=document_type, document_id=document_id
+                )
+                .filter(OneCQuantityCheck.dismissed_at.isnot(None))
+                .with_entities(OneCQuantityCheck.dismissed_at)
+                .first()
+            )
+            checked_documents[key] = dismissed_at[0] if dismissed_at else None
             OneCQuantityCheck.query.filter_by(
                 document_type=document_type, document_id=document_id
             ).delete(synchronize_session=False)
-            checked_documents.add(key)
         wms_qty = float(check.get("wms_qty") or 0)
         one_c_qty = float(check.get("one_c_qty") or 0)
         if abs(wms_qty - one_c_qty) < 0.000001:
@@ -591,6 +605,7 @@ def export_confirm():
                 item_name=str(check.get("name") or "") or None,
                 wms_qty=wms_qty,
                 one_c_qty=one_c_qty,
+                dismissed_at=checked_documents[key],
             )
         )
         quantity_mismatches += 1
