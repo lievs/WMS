@@ -79,7 +79,20 @@ def _is_staff():
 
 
 def _is_driver():
+    """Водитель на забор: забирает короба у клиентов, видит ленту заявок."""
     return current_user.role == "mvb_driver" and not current_user.is_admin
+
+
+def _is_line_driver():
+    """Водитель на СЦ: возит рейсы со склада МВБ по точкам СЦ, забор у
+    клиентов ему не нужен."""
+    return current_user.role == "mvb_line_driver" and not current_user.is_admin
+
+
+# Куда пускаем водителя на СЦ: только его рейсы.
+LINE_DRIVER_ENDPOINTS = {
+    "mvb.index", "mvb.logout", "mvb.routes", "mvb.trip_detail", "mvb.trip_action", "mvb.trip_stop_action",
+}
 
 
 def _can_scan(mode):
@@ -111,6 +124,10 @@ def _restrict_to_mvb_users():
         logout_user()
         flash("Учетная запись не привязана к клиенту — обратитесь к администратору МВБ", "danger")
         return redirect(url_for("mvb.login"))
+    if _is_line_driver() and request.endpoint not in LINE_DRIVER_ENDPOINTS:
+        if request.method != "GET":
+            abort(403)
+        return redirect(url_for("mvb.routes"))
     return None
 
 
@@ -126,6 +143,7 @@ def _inject():
         "mvb_is_client": current_user.is_authenticated and _is_client(),
         "mvb_can_scan": (lambda mode: current_user.is_authenticated and _can_scan(mode)),
         "mvb_is_staff": current_user.is_authenticated and _is_staff(),
+        "mvb_is_line_driver": current_user.is_authenticated and _is_line_driver(),
         "MVB_TRIP_STATUSES": MVB_TRIP_STATUSES,
     }
 
@@ -167,8 +185,10 @@ def logout():
 
 @bp.route("/")
 def index():
-    if current_user.role == "mvb_driver" and not current_user.is_admin:
+    if _is_driver():
         return redirect(url_for("mvb.driver"))
+    if _is_line_driver():
+        return redirect(url_for("mvb.routes"))
     return redirect(url_for("mvb.orders"))
 
 
@@ -195,7 +215,7 @@ def orders():
     need_driver = 0 if _is_client() else MvbOrder.query.filter(*need_driver_filter).count()
     return render_template(
         "mvb/orders.html", orders=items, clients=clients, status=status, client_id=client_id,
-        need_driver=need_driver, drivers=_active_drivers() if _is_staff() else [],
+        need_driver=need_driver, drivers=_active_drivers("mvb_driver") if _is_staff() else [],
     )
 
 
@@ -280,7 +300,7 @@ def order_new():
 @bp.route("/orders/<int:order_id>")
 def order_detail(order_id):
     order = _get_order_or_404(order_id)
-    drivers = _active_drivers() if _is_staff() else []
+    drivers = _active_drivers("mvb_driver") if _is_staff() else []
     return render_template(
         "mvb/order_detail.html", order=order, counts=order.status_counts(), drivers=drivers,
     )
@@ -397,18 +417,9 @@ def driver():
         .all()
     )
     vehicle, load = (None, 0)
-    trips = []
     if _is_driver():
         vehicle, load = _driver_vehicle_and_load()
         candidates = [o for o in candidates if o.driver_id in (None, current_user.id)]
-        trips = (
-            MvbTrip.query.filter(
-                MvbTrip.driver_id == current_user.id,
-                MvbTrip.status.in_(["assigned", "arrived", "loading", "departed"]),
-            )
-            .order_by(MvbTrip.planned_arrival_at)
-            .all()
-        )
     free = (vehicle.capacity_boxes - load) if vehicle and vehicle.capacity_boxes else None
     now = datetime.utcnow()
     rows = []
@@ -426,9 +437,22 @@ def driver():
     # Сначала свои, затем новые, затем остальные по дате забора.
     rows.sort(key=lambda r: (not r["mine"], not r["is_new"], r["order"].planned_date or date.max))
     return render_template(
-        "mvb/driver.html", rows=rows, trips=trips, vehicle=vehicle, load=load, free=free,
+        "mvb/driver.html", rows=rows, vehicle=vehicle, load=load, free=free,
         max_order_id=max((r["order"].id for r in rows), default=0),
     )
+
+
+@bp.route("/routes")
+def routes():
+    """Экран водителя на СЦ: его рейсы и точки маршрута, на каждой точке
+    «Сдано на СЦ» или «Не сдано». Ленты забора у клиентов здесь нет."""
+    if not (_is_line_driver() or _is_staff()):
+        return redirect(url_for("mvb.index"))
+    query = MvbTrip.query.filter(MvbTrip.status.in_(["assigned", "arrived", "loading", "departed"]))
+    if _is_line_driver():
+        query = query.filter(MvbTrip.driver_id == current_user.id)
+    trips = query.order_by(MvbTrip.planned_arrival_at).all()
+    return render_template("mvb/routes.html", trips=trips)
 
 
 @bp.route("/driver/orders/<int:order_id>/take", methods=["POST"])
@@ -673,9 +697,12 @@ def _require_staff():
     return True
 
 
-def _active_drivers():
+def _active_drivers(*roles):
+    """Активные водители: на забор (mvb_driver), на СЦ (mvb_line_driver)
+    или оба типа, если роли не указаны."""
+    roles = roles or ("mvb_driver", "mvb_line_driver")
     return (
-        User.query.filter(User.role == "mvb_driver", User.is_active_user.is_(True))
+        User.query.filter(User.role.in_(roles), User.is_active_user.is_(True))
         .order_by(User.full_name, User.username)
         .all()
     )
@@ -1020,7 +1047,7 @@ def _get_trip_or_404(trip_id):
     trip = db.session.get(MvbTrip, trip_id)
     if trip is None:
         abort(404)
-    if not _is_staff() and not (_is_driver() and trip.driver_id == current_user.id):
+    if not _is_staff() and not (_is_line_driver() and trip.driver_id == current_user.id):
         abort(404)
     return trip
 
@@ -1035,7 +1062,7 @@ def trip_detail(trip_id):
     return render_template(
         "mvb/trip_detail.html", trip=trip, ready=ready,
         vehicles=MvbVehicle.query.filter_by(is_active=True).order_by(MvbVehicle.plate).all() if _is_staff() else [],
-        drivers=_active_drivers() if _is_staff() else [],
+        drivers=_active_drivers("mvb_line_driver") if _is_staff() else [],
     )
 
 
@@ -1074,7 +1101,7 @@ def trip_stop_action(trip_id, stop_id, action):
             comment = request.form.get("comment", "").strip()
             if action == "reject" and not comment:
                 flash("Укажите причину, почему не сдано", "danger")
-                return redirect(url_for("mvb.driver") if _is_driver() else url_for("mvb.trip_detail", trip_id=trip.id))
+                return redirect(url_for("mvb.routes") if _is_line_driver() else url_for("mvb.trip_detail", trip_id=trip.id))
             stop.result = "delivered" if action == "deliver" else "rejected"
             stop.delivered_at = now
             stop.delivered_by_id = current_user.id
@@ -1090,8 +1117,8 @@ def trip_stop_action(trip_id, stop_id, action):
                 flash(f"Сдано: {stop.label()} — {len(stop.boxes)} кор.", "success")
             else:
                 flash(f"Не сдано: {stop.label()} — {len(stop.boxes)} кор. везите обратно на склад МВБ", "warning")
-        if _is_driver():
-            return redirect(url_for("mvb.driver"))
+        if _is_line_driver():
+            return redirect(url_for("mvb.routes"))
         return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
 
     if not _is_staff():
@@ -1127,7 +1154,13 @@ def trip_plan(trip_id):
     vehicle = db.session.get(MvbVehicle, vehicle_id) if vehicle_id else None
     driver_id = request.form.get("driver_id", type=int)
     trip.vehicle = vehicle
-    trip.driver_id = driver_id or (vehicle.driver_id if vehicle else None)
+    driver = db.session.get(User, driver_id) if driver_id else (vehicle.driver if vehicle else None)
+    # Рейс на СЦ везет только водитель на СЦ (водители на забор — отдельно).
+    if driver is not None and driver.role != "mvb_line_driver":
+        if driver_id:
+            abort(400)
+        driver = None
+    trip.driver = driver
     trip.planned_arrival_at = _local_to_utc(request.form.get("planned_arrival_at"))
     trip.planned_load_start_at = _local_to_utc(request.form.get("planned_load_start_at"))
     trip.planned_load_end_at = _local_to_utc(request.form.get("planned_load_end_at"))
@@ -1185,8 +1218,8 @@ def trip_action(trip_id, action):
         return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
     db.session.commit()
     flash(f"Рейс {trip.number}: {trip.status_label}", "success")
-    if _is_driver():
-        return redirect(url_for("mvb.driver"))
+    if _is_line_driver():
+        return redirect(url_for("mvb.routes"))
     return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
 
 

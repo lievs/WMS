@@ -12,7 +12,7 @@
     <div class="col-md-3">
       <select name="driver_id" class="form-select">
         <option value="">Водитель (необязательно)</option>
-        {% for d in drivers %}<option value="{{ d.id }}">{{ d.display_name() }}</option>{% endfor %}
+        {% for d in drivers %}<option value="{{ d.id }}">{{ d.display_name() }} · {{ MVB_ROLES.get(d.role) }}</option>{% endfor %}
       </select>
     </div>
     <div class="col-md-1"><button class="btn btn-success w-100">+</button></div>
@@ -31,7 +31,7 @@
       <td>
         <select form="veh-{{ v.id }}" name="driver_id" class="form-select form-select-sm">
           <option value="">—</option>
-          {% for d in drivers %}<option value="{{ d.id }}" {{ 'selected' if v.driver_id == d.id }}>{{ d.display_name() }}</option>{% endfor %}
+          {% for d in drivers %}<option value="{{ d.id }}" {{ 'selected' if v.driver_id == d.id }}>{{ d.display_name() }} · {{ MVB_ROLES.get(d.role) }}</option>{% endfor %}
         </select>
       </td>
       <td><input form="veh-{{ v.id }}" type="checkbox" name="is_active" value="1" class="form-check-input" {{ 'checked' if v.is_active }}></td>

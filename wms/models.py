@@ -74,7 +74,8 @@ SECTION_CODES = {code for code, _ in SECTIONS}
 # Роли раздела «МВБ Логистика» (отдельный вход, см. blueprints/mvb.py).
 MVB_ROLES = {
     "mvb_client": "Клиент",
-    "mvb_driver": "Водитель",
+    "mvb_driver": "Водитель на забор",
+    "mvb_line_driver": "Водитель на СЦ",
     "mvb_staff": "Склад МВБ (приемщик / оператор)",
     "mvb_admin": "Администратор МВБ",
 }

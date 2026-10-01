@@ -18,7 +18,9 @@
     </button>
     <div class="collapse navbar-collapse" id="navMvb">
       <ul class="navbar-nav me-auto">
-        {% if current_user.role != 'mvb_driver' or current_user.is_admin %}
+        {% if mvb_is_line_driver %}
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.routes') }}">Мои рейсы</a></li>
+        {% elif current_user.role != 'mvb_driver' or current_user.is_admin %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.orders') }}">Заявки</a></li>
         {% endif %}
         {% if mvb_can_scan('pickup') %}

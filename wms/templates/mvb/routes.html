@@ -1,0 +1,43 @@
+{% extends "mvb/base.html" %}
+{% block title %}Мои рейсы{% endblock %}
+{% block content %}
+<h3 class="mb-3">{{ 'Мои рейсы на СЦ' if mvb_is_line_driver else 'Рейсы в работе' }}</h3>
+{% for t in trips %}
+  <div class="card p-3 mb-2 border-success">
+    <div class="d-flex justify-content-between flex-wrap gap-2 align-items-center mb-2">
+      <div>
+        <b>{{ t.number }}</b> · {{ t.status_label }}<br>
+        <span class="text-muted">Подача: {{ (t.planned_arrival_at|msk).strftime('%d.%m %H:%M') if t.planned_arrival_at else 'не назначена' }}{% if t.vehicle %} · {{ t.vehicle.plate }}{% endif %} · коробов: {{ t.boxes|length }}{% if not mvb_is_line_driver and t.driver %} · {{ t.driver.display_name() }}{% endif %}</span>
+      </div>
+      {% if t.status == 'assigned' %}
+      <form method="post" action="{{ url_for('mvb.trip_action', trip_id=t.id, action='arrive') }}"><button class="btn btn-outline-success">Я на погрузке</button></form>
+      {% endif %}
+    </div>
+    <ol class="list-group list-group-numbered">
+      {% for stop in t.stops %}
+      <li class="list-group-item d-flex justify-content-between align-items-center gap-2 flex-wrap">
+        <div class="me-auto">
+          <a target="_blank" href="https://yandex.ru/maps/?text={{ (stop.marketplace_label ~ ' ' ~ (stop.destination or ''))|urlencode }}">📍 {{ stop.label() }}</a>
+          <div class="small text-muted">коробов: {{ stop.boxes|length }}</div>
+        </div>
+        {% if stop.result == 'delivered' %}
+          <span class="text-success">✓ сдано {{ (stop.delivered_at|msk).strftime('%H:%M') }}</span>
+        {% elif stop.result == 'rejected' %}
+          <span class="text-danger">✗ не сдано: {{ stop.delivery_comment }}</span>
+        {% elif t.status == 'departed' %}
+          {% set trip = t %}{% include "mvb/_stop_result.html" %}
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+  </div>
+{% else %}
+  <div class="text-muted">Назначенных рейсов нет.</div>
+{% endfor %}
+<p class="text-muted small mt-3">Список обновляется автоматически раз в минуту.</p>
+{% endblock %}
+{% block scripts %}
+<script>
+setInterval(() => { if (!document.hidden && !document.activeElement.matches("input, textarea")) location.reload(); }, 60000);
+</script>
+{% endblock %}
