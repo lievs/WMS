@@ -33,6 +33,8 @@
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.pallets') }}">Паллеты</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.trips') }}">Рейсы</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.vehicles') }}">Транспорт</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.prices') }}">Прайс</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.reports') }}">Отчет</a></li>
         {% endif %}
         {% if current_user.can_manage_mvb() %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.admin_clients') }}">Клиенты</a></li>

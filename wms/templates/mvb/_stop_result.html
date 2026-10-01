@@ -1,0 +1,10 @@
+{# Итог на точке маршрута: «Сдано на СЦ» или «Не сдано» с причиной. Нужны trip и stop. #}
+<div class="d-flex flex-wrap gap-1 align-items-start">
+  <form method="post" action="{{ url_for('mvb.trip_stop_action', trip_id=trip.id, stop_id=stop.id, action='deliver') }}" onsubmit="return confirm('Сдано на СЦ {{ stop.label() }}?')">
+    <button class="btn btn-success">Сдано на СЦ</button>
+  </form>
+  <form method="post" action="{{ url_for('mvb.trip_stop_action', trip_id=trip.id, stop_id=stop.id, action='reject') }}" class="d-flex gap-1">
+    <input name="comment" class="form-control" placeholder="Причина, если не сдано" required style="min-width:160px">
+    <button class="btn btn-outline-danger text-nowrap">Не сдано</button>
+  </form>
+</div>

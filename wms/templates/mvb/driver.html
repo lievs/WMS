@@ -37,10 +37,12 @@
           <a target="_blank" href="https://yandex.ru/maps/?text={{ (stop.marketplace_label ~ ' ' ~ (stop.destination or ''))|urlencode }}">📍 {{ stop.label() }}</a>
           <div class="small text-muted">коробов: {{ stop.boxes|length }}</div>
         </div>
-        {% if stop.delivered_at %}
+        {% if stop.result == 'delivered' %}
           <span class="text-success">✓ сдано {{ (stop.delivered_at|msk).strftime('%H:%M') }}</span>
+        {% elif stop.result == 'rejected' %}
+          <span class="text-danger">✗ не сдано: {{ stop.delivery_comment }}</span>
         {% elif t.status == 'departed' %}
-          <form method="post" action="{{ url_for('mvb.trip_stop_action', trip_id=t.id, stop_id=stop.id, action='deliver') }}" onsubmit="return confirm('Сдано на СЦ {{ stop.label() }}?')"><button class="btn btn-success">Сдано на СЦ</button></form>
+          {% set trip = t %}{% include "mvb/_stop_result.html" %}
         {% endif %}
       </li>
       {% endfor %}

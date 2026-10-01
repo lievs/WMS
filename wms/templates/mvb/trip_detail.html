@@ -33,14 +33,16 @@
     <li class="list-group-item d-flex justify-content-between align-items-center flex-wrap gap-2">
       <div class="me-auto">
         <b>{{ stop.label() }}</b>
-        <span class="text-muted">· погружено {{ stop.boxes|length }}{% if ready.get(stop.id) %} · ждут на складе {{ ready[stop.id] }}{% endif %}</span>
+        <span class="text-muted">· погружено {{ stop.boxes|length }}{% if stop.planned_boxes %} из {{ stop.planned_boxes }} план.{% endif %}{% if ready.get(stop.id) %} · ждут на складе {{ ready[stop.id] }}{% endif %}</span>
       </div>
-      {% if stop.delivered_at %}
+      {% if stop.result == 'delivered' %}
         <span class="text-success">✓ сдано {{ dt(stop.delivered_at) }}</span>
+      {% elif stop.result == 'rejected' %}
+        <span class="text-danger">✗ не сдано {{ dt(stop.delivered_at) }}: {{ stop.delivery_comment }}</span>
       {% elif trip.status == 'departed' %}
         <span class="text-muted me-2">в пути</span>
         {% if mvb_is_staff %}
-        <form method="post" action="{{ url_for('mvb.trip_stop_action', trip_id=trip.id, stop_id=stop.id, action='deliver') }}" onsubmit="return confirm('Отметить сдачу на СЦ {{ stop.label() }}?')"><button class="btn btn-sm btn-outline-success">Сдано на СЦ</button></form>
+        {% include "mvb/_stop_result.html" %}
         {% endif %}
       {% elif mvb_is_staff and trip.status in ('searching','assigned','arrived','loading') %}
         <div class="d-flex gap-1">

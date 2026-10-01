@@ -1,0 +1,44 @@
+{% extends "mvb/base.html" %}
+{% block title %}Прайс{% endblock %}
+{% block content %}
+<h3 class="mb-1">Прайс</h3>
+<p class="text-muted">Цена за короб с градацией по количеству коробов в заявке: «от N коробов — X руб. за короб». Стоимость заявки считается при оформлении (короба × цена ступени), оператор может поправить её в заявке.</p>
+<div class="row g-3">
+{% for kind, title in kinds.items() %}
+  <div class="col-lg-6">
+    <div class="card p-3 h-100">
+      <h5>{{ title }}</h5>
+      <table class="table table-sm align-middle">
+        <thead><tr><th>От коробов</th><th>Цена за короб, руб.</th><th></th></tr></thead>
+        <tbody>
+        {% for t in tiers[kind] %}
+          <tr>
+            <td><input form="tier-{{ t.id }}" name="min_boxes" type="number" min="1" class="form-control form-control-sm" value="{{ t.min_boxes }}" style="max-width:110px"></td>
+            <td><input form="tier-{{ t.id }}" name="price_per_box" class="form-control form-control-sm" value="{{ '%g'|format(t.price_per_box) }}" style="max-width:130px"></td>
+            <td class="d-flex gap-1">
+              <form method="post" id="tier-{{ t.id }}">
+                <input type="hidden" name="tier_id" value="{{ t.id }}"><input type="hidden" name="kind" value="{{ kind }}">
+                <button class="btn btn-sm btn-outline-primary">Сохранить</button>
+              </form>
+              <form method="post">
+                <input type="hidden" name="tier_id" value="{{ t.id }}"><input type="hidden" name="action" value="delete">
+                <button class="btn btn-sm btn-outline-danger">✕</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="3" class="text-muted">Не заполнено — стоимость считаться не будет</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <form method="post" class="d-flex flex-wrap gap-2">
+        <input type="hidden" name="kind" value="{{ kind }}">
+        <input name="min_boxes" type="number" min="1" class="form-control w-auto" placeholder="от, кор." style="max-width:110px" required>
+        <input name="price_per_box" class="form-control w-auto" placeholder="руб. за короб" style="max-width:140px" required>
+        <button class="btn btn-success">+ Ступень</button>
+      </form>
+    </div>
+  </div>
+{% endfor %}
+</div>
+{% endblock %}

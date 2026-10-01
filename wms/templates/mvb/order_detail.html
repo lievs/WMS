@@ -23,6 +23,14 @@
   </div>
 </div>
 
+{% if mvb_is_staff and order.status == 'confirmed' and not order.client.is_internal %}
+<form method="post" action="{{ url_for('mvb.order_costs', order_id=order.id) }}" class="card p-3 mb-3 d-flex flex-row flex-wrap gap-2 align-items-end">
+  <div><label class="form-label small mb-0">Забор груза, ₽</label><input name="pickup_cost" class="form-control" value="{{ '%.2f'|format(order.pickup_cost) if order.pickup_cost is not none else '' }}" style="max-width:150px"></div>
+  <div><label class="form-label small mb-0">Отправка на СЦ, ₽</label><input name="sc_cost" class="form-control" value="{{ '%.2f'|format(order.sc_cost) if order.sc_cost is not none else '' }}" style="max-width:150px"></div>
+  <button class="btn btn-outline-success">Сохранить стоимость</button>
+  <button class="btn btn-outline-secondary" name="action" value="recalc">Пересчитать по прайсу</button>
+</form>
+{% endif %}
 {% if order.wms_movement %}
 <div class="alert alert-secondary">Свои короба из перемещения WMS {{ order.wms_movement.number }} — сканируются по прежним этикеткам WMS{% if order.wms_movement.shipped_at %}; в WMS отмечено «Транспорт забрал»{% endif %}.</div>
 {% endif %}
@@ -35,6 +43,13 @@
       {% if order.pickup_address %}<div><b>Адрес забора:</b> {{ order.pickup_address }}</div>{% endif %}
       <div><b>Дата / время:</b> {{ order.planned_date.strftime('%d.%m.%Y') if order.planned_date else '—' }}{% if order.time_from %} {{ order.time_from }}{% if order.time_to %}–{{ order.time_to }}{% endif %}{% endif %}</div>
       <div><b>Коробов:</b> {{ order.box_count }}</div>
+      {% if order.status == 'confirmed' and not order.client.is_internal %}
+      <div><b>Стоимость:</b>
+        {% if order.total_cost is not none %}
+          {% if order.pickup_cost is not none %}забор {{ '%.2f'|format(order.pickup_cost) }} ₽ · {% endif %}{% if order.sc_cost is not none %}отправка на СЦ {{ '%.2f'|format(order.sc_cost) }} ₽ · {% endif %}<b>итого {{ '%.2f'|format(order.total_cost) }} ₽</b>
+        {% else %}не рассчитана{% endif %}
+      </div>
+      {% endif %}
       {% if order.comment %}<div><b>Комментарий:</b> {{ order.comment }}</div>{% endif %}
     </div>
   </div>

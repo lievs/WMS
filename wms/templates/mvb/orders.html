@@ -5,6 +5,9 @@
   <h3 class="mb-0">Заявки</h3>
   <a class="btn btn-success" href="{{ url_for('mvb.order_new') }}">+ Новая заявка</a>
 </div>
+{% if need_driver and status != 'need_driver' %}
+<div class="alert alert-warning py-2">Новых заявок на забор без водителя: <b>{{ need_driver }}</b> · <a href="{{ url_for('mvb.orders', status='need_driver') }}">показать</a></div>
+{% endif %}
 <form class="row g-2 mb-3" method="get">
   <div class="col-auto">
     <select name="status" class="form-select" onchange="this.form.submit()">
@@ -12,6 +15,7 @@
       <option value="draft" {{ 'selected' if status == 'draft' }}>Черновики</option>
       <option value="confirmed" {{ 'selected' if status == 'confirmed' }}>Оформленные</option>
       <option value="cancelled" {{ 'selected' if status == 'cancelled' }}>Отмененные</option>
+      {% if not mvb_is_client %}<option value="need_driver" {{ 'selected' if status == 'need_driver' }}>Забор без водителя</option>{% endif %}
     </select>
   </div>
   {% if clients %}
@@ -27,21 +31,36 @@
 <table class="table table-hover align-middle">
   <thead><tr>
     <th>Номер</th>{% if not mvb_is_client %}<th>Клиент</th>{% endif %}<th>Куда</th><th>Способ</th>
-    <th>Дата / время</th><th class="text-end">Коробов</th><th>Статус</th>
+    <th>Дата / время</th><th class="text-end">Коробов</th><th class="text-end">Стоимость, ₽</th><th>Статус</th>{% if drivers %}<th>Водитель</th>{% endif %}
   </tr></thead>
   <tbody>
   {% for o in orders %}
-    <tr style="cursor:pointer" onclick="location.href='{{ url_for('mvb.order_detail', order_id=o.id) }}'">
+    <tr>
       <td><a href="{{ url_for('mvb.order_detail', order_id=o.id) }}">{{ o.number }}</a></td>
       {% if not mvb_is_client %}<td>{{ o.client.name }}</td>{% endif %}
       <td>{{ o.marketplace_label }}{% if o.destination %} · {{ o.destination }}{% endif %}</td>
       <td>{{ o.delivery_label }}</td>
       <td>{{ o.planned_date.strftime('%d.%m.%Y') if o.planned_date else '—' }}{% if o.time_from %} {{ o.time_from }}{% if o.time_to %}–{{ o.time_to }}{% endif %}{% endif %}</td>
       <td class="text-end">{{ o.box_count }}</td>
+      <td class="text-end">{{ '%.2f'|format(o.total_cost) if o.total_cost is not none else '—' }}</td>
       <td>{{ o.progress_label() }}</td>
+      {% if drivers %}
+      <td>
+        {% if o.status == 'confirmed' and o.delivery_method == 'pickup' %}
+        <form method="post" action="{{ url_for('mvb.order_assign_driver', order_id=o.id) }}" class="d-flex gap-1">
+          <input type="hidden" name="back" value="orders"><input type="hidden" name="status" value="{{ status }}">
+          <select name="driver_id" class="form-select form-select-sm {{ 'border-warning' if not o.driver_id }}" style="min-width:140px">
+            <option value="">— не назначен —</option>
+            {% for d in drivers %}<option value="{{ d.id }}" {{ 'selected' if o.driver_id == d.id }}>{{ d.display_name() }}</option>{% endfor %}
+          </select>
+          <button class="btn btn-sm btn-outline-success">OK</button>
+        </form>
+        {% else %}<span class="text-muted">—</span>{% endif %}
+      </td>
+      {% endif %}
     </tr>
   {% else %}
-    <tr><td colspan="7" class="text-muted text-center py-4">Заявок пока нет</td></tr>
+    <tr><td colspan="9" class="text-muted text-center py-4">Заявок пока нет</td></tr>
   {% endfor %}
   </tbody>
 </table>

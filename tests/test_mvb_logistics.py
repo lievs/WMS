@@ -7,7 +7,8 @@ from wms.extensions import db
 from datetime import datetime
 
 from wms.models import (
-    Box, MovementDocument, MovementLine, MvbBox, MvbClient, MvbOrder, MvbPallet, MvbTrip, MvbVehicle,
+    Box, MovementDocument, MovementLine, MvbBox, MvbClient, MvbOrder, MvbPallet, MvbPriceTier, MvbTrip,
+    MvbVehicle,
     User, Warehouse,
 )
 
@@ -627,3 +628,204 @@ def test_wms_shipped_not_set_without_marketplace_request_or_partial(db, client):
     client.post(f"/mvb/trips/{trip2.id}/scan", data={"barcode": boxes2[0].barcode_value})
     client.post(f"/mvb/trips/{trip2.id}/depart")
     assert db.session.get(MovementDocument, doc2.id).shipped_at is None  # уехал не весь
+
+
+# ---------- сквозная цепочка (как описал владелец) ----------
+
+
+def test_full_chain_seller_to_sc(db, client):
+    """Селлер создает заявку → оператор видит её и назначает водителя из
+    списка → водитель по дороге видит другие заявки и берет ту, что влезает
+    → короба сканируются при заборе → приемка на складе → программа считает
+    машины и формирует рейсы по наполненности (статус «Поиск авто») →
+    погрузка сканом каждого короба → водитель на точках отмечает
+    «Сдано» / «Не сдано»."""
+    seller = _user("seller", "mvb_client", _mvb_client("ИП Селлер"))
+    seller2 = _user("seller2", "mvb_client", _mvb_client("ООО Второй"))
+    operator = _user("operator", "mvb_staff")
+    driver = _user("driver", "mvb_driver")
+    _vehicle(capacity=6, driver=driver)
+
+    # 1. селлеры создают заявки на забор
+    _login(client, seller)
+    first = _confirmed_order(client, box_count="3", destination="Коледино")
+    _login(client, seller2)
+    second = _confirmed_order(client, box_count="2", marketplace="ozon", destination="Хоругвино")
+    too_big = _confirmed_order(client, box_count="9", destination="Коледино")
+
+    # 2. оператор видит заявки без водителя и назначает водителя из списка
+    _login(client, operator)
+    client.get("/mvb/orders")
+    html = client.get("/mvb/orders").get_data(as_text=True)
+    assert "без водителя: <b>3</b>" in html and driver.display_name() in html
+    client.post(f"/mvb/orders/{first.id}/driver", data={"driver_id": str(driver.id), "back": "orders"})
+    assert db.session.get(MvbOrder, first.id).driver_id == driver.id
+
+    # 3. водитель в пути: видит свою и чужие свободные заявки, что влезает
+    _login(client, driver)
+    client.get("/mvb/driver")
+    feed = client.get("/mvb/driver").get_data(as_text=True)
+    assert first.number in feed and second.number in feed and too_big.number in feed
+    for box in first.boxes:
+        client.post("/mvb/scan/pickup", data={"barcode": box.barcode})
+    client.get("/mvb/driver")
+    feed = client.get("/mvb/driver").get_data(as_text=True)
+    assert "свободно <b>3</b>" in feed  # 3 из 6 заняты
+    # вторая заявка (2 кор.) помещается — берет её по дороге
+    client.post(f"/mvb/driver/orders/{second.id}/take")
+    for box in second.boxes:
+        data = client.post("/mvb/scan/pickup", data={"barcode": box.barcode}).get_json()
+    assert data["warning"] == "В машине 5 из 6 кор."
+
+    # 4. приемка на складе
+    _login(client, operator)
+    for box in first.boxes + second.boxes:
+        assert client.post("/mvb/scan/receive", data={"barcode": box.barcode}).get_json()["ok"]
+
+    # 5. программа считает машины и разбивает отгрузку по наполненности
+    html = client.get("/mvb/dispatch?capacity=4").get_data(as_text=True)
+    assert "нужно машин по 4 кор.: <b>2</b>" in html
+    client.post("/mvb/trips/new", data={
+        "dir": ["wb|Коледино", "ozon|Хоругвино"], "mode": "fill", "capacity": "4",
+    })
+    trips = MvbTrip.query.order_by(MvbTrip.id).all()
+    assert len(trips) == 2 and {t.status for t in trips} == {"searching"}
+    assert [t.planned_boxes for t in trips] == [4, 1]
+    assert [(s.label(), s.planned_boxes) for s in trips[0].stops] == [
+        ("Wildberries · Коледино", 3), ("Ozon · Хоругвино", 1)]
+    assert "Поиск авто: 2" in client.get("/mvb/trips").get_data(as_text=True)
+
+    # 6. авто найдено, погрузка: сканируется каждый короб
+    trip = trips[0]
+    vehicle = _vehicle(capacity=4, driver=driver)
+    client.post(f"/mvb/trips/{trip.id}/plan", data={"vehicle_id": str(vehicle.id)})
+    for box in first.boxes + second.boxes[:1]:
+        assert client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": box.barcode}).get_json()["ok"]
+    client.post(f"/mvb/trips/{trip.id}/depart")
+
+    # 7. водитель на точках: Коледино сдано, Хоругвино не сдано
+    _login(client, driver)
+    db.session.refresh(trip)
+    wb_stop, oz_stop = trip.stops
+    client.post(f"/mvb/trips/{trip.id}/stops/{wb_stop.id}/deliver")
+    client.post(f"/mvb/trips/{trip.id}/stops/{oz_stop.id}/reject", data={"comment": "СЦ не принял: нет слота"})
+    db.session.refresh(trip)
+    assert trip.status == "delivered"
+    assert {b.status for b in first.boxes} == {"delivered"}
+    assert second.boxes[0].status == "not_delivered"
+    assert oz_stop.result == "rejected" and oz_stop.delivery_comment == "СЦ не принял: нет слота"
+
+    # не сданный короб возвращается на склад и снова готов к отправке
+    _login(client, operator)
+    assert client.post("/mvb/scan/receive", data={"barcode": second.boxes[0].barcode}).get_json()["ok"]
+    box = db.session.get(MvbBox, second.boxes[0].id)
+    assert box.status == "received" and box.trip_id is None
+    assert "Хоругвино" in client.get("/mvb/dispatch").get_data(as_text=True)
+
+
+def test_reject_requires_reason(db, client):
+    client_user = _user("client1", "mvb_client", _mvb_client())
+    staff = _user("staff1", "mvb_staff")
+    order = _received_order(client, client_user, staff, box_count="1")
+    trip = _trip(client)
+    client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": order.boxes[0].barcode})
+    client.post(f"/mvb/trips/{trip.id}/depart")
+    db.session.refresh(trip)
+    client.post(f"/mvb/trips/{trip.id}/stops/{trip.stops[0].id}/reject", data={"comment": ""})
+    db.session.refresh(trip)
+    assert trip.stops[0].result is None and order.boxes[0].status == "shipped"
+
+
+def test_fill_mode_splits_one_direction_over_several_trucks(db, client):
+    client_user = _user("client1", "mvb_client", _mvb_client())
+    staff = _user("staff1", "mvb_staff")
+    _received_order(client, client_user, staff, box_count="7")
+    client.post("/mvb/trips/new", data={"dir": ["wb|Коледино"], "mode": "fill", "capacity": "3"})
+    trips = MvbTrip.query.order_by(MvbTrip.id).all()
+    assert [t.planned_boxes for t in trips] == [3, 3, 1]
+    assert all(len(t.stops) == 1 for t in trips)
+
+
+# ---------- прайс, стоимость, отчет ----------
+
+
+def _set_prices(http):
+    for kind, min_boxes, price in [("pickup", 1, "50"), ("sc", 1, "120"), ("sc", 10, "100"), ("sc", 50, "80,5")]:
+        http.post("/mvb/prices", data={"kind": kind, "min_boxes": str(min_boxes), "price_per_box": price})
+
+
+def test_price_tiers_and_order_cost(db, client):
+    staff = _user("staff1", "mvb_staff")
+    client_user = _user("client1", "mvb_client", _mvb_client())
+    _login(client, staff)
+    _set_prices(client)
+    assert MvbPriceTier.price_for("sc", 9) == 120
+    assert MvbPriceTier.price_for("sc", 10) == 100
+    assert MvbPriceTier.price_for("sc", 60) == 80.5
+    # та же ступень второй раз не дублируется, а обновляется
+    client.post("/mvb/prices", data={"kind": "sc", "min_boxes": "10", "price_per_box": "95"})
+    assert MvbPriceTier.query.filter_by(kind="sc", min_boxes=10).one().price_per_box == 95
+    assert "Отправка на СЦ" in client.get("/mvb/prices").get_data(as_text=True)
+
+    _login(client, client_user)
+    pickup = _confirmed_order(client, box_count="12")
+    self_order = _confirmed_order(client, box_count="3", delivery_method="self", pickup_address="")
+    db.session.refresh(pickup)
+    assert pickup.pickup_cost == 600 and pickup.sc_cost == 1140 and pickup.total_cost == 1740
+    db.session.refresh(self_order)
+    assert self_order.pickup_cost is None and self_order.sc_cost == 360
+
+    # клиент видит стоимость, но поправить не может
+    assert "1740.00" in client.get(f"/mvb/orders/{pickup.id}").get_data(as_text=True)
+    client.post(f"/mvb/orders/{pickup.id}/costs", data={"pickup_cost": "0", "sc_cost": "0"})
+    assert db.session.get(MvbOrder, pickup.id).total_cost == 1740
+
+    _login(client, staff)
+    client.post(f"/mvb/orders/{pickup.id}/costs", data={"pickup_cost": "500", "sc_cost": "1 000,50"})
+    order = db.session.get(MvbOrder, pickup.id)
+    assert order.pickup_cost == 500 and order.sc_cost == 1000.5
+    client.post(f"/mvb/orders/{pickup.id}/costs", data={"action": "recalc"})
+    assert db.session.get(MvbOrder, pickup.id).sc_cost == 1140
+    client.post(f"/mvb/orders/{pickup.id}/costs", data={"pickup_cost": "-5"})
+    assert db.session.get(MvbOrder, pickup.id).pickup_cost == 600
+
+
+def test_prices_page_staff_only(db, client):
+    _login(client, _user("client1", "mvb_client", _mvb_client()))
+    client.post("/mvb/prices", data={"kind": "sc", "min_boxes": "1", "price_per_box": "1"})
+    assert MvbPriceTier.query.count() == 0
+    assert client.get("/mvb/reports").status_code == 302
+
+
+def test_client_report_for_period(db, client):
+    staff = _user("staff1", "mvb_staff")
+    a = _user("ca", "mvb_client", _mvb_client("Альфа"))
+    b = _user("cb", "mvb_client", _mvb_client("Бета"))
+    _login(client, staff)
+    _set_prices(client)
+    order_a = _received_order(client, a, staff, box_count="3")
+    _received_order(client, b, staff, box_count="2", delivery_method="self", pickup_address="")
+
+    trip = _trip(client)
+    for box in order_a.boxes[:2]:
+        client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": box.barcode})
+    client.post(f"/mvb/trips/{trip.id}/depart")
+    db.session.refresh(trip)
+    client.post(f"/mvb/trips/{trip.id}/stops/{trip.stops[0].id}/deliver")
+
+    today = datetime.utcnow().date().isoformat()
+    html = client.get(f"/mvb/reports?date_from={today}&date_to={today}").get_data(as_text=True)
+    assert "Альфа" in html and "Бета" in html
+    from wms.blueprints.mvb import _report_rows
+
+    rows, totals = _report_rows(datetime.utcnow().date(), datetime.utcnow().date())
+    by_name = {r["client"].name: r for r in rows}
+    assert by_name["Альфа"]["boxes"] == 3 and by_name["Альфа"]["shipped"] == 2 and by_name["Альфа"]["delivered"] == 2
+    assert by_name["Альфа"]["total"] == 3 * 50 + 3 * 120
+    assert by_name["Бета"]["shipped"] == 0 and by_name["Бета"]["pickup_cost"] == 0
+    assert totals["boxes"] == 5
+
+    xlsx = client.get(f"/mvb/reports.xlsx?date_from={today}&date_to={today}")
+    assert xlsx.status_code == 200 and xlsx.data[:2] == b"PK"
+    # другой период — пусто
+    assert _report_rows(datetime(2020, 1, 1).date(), datetime(2020, 1, 31).date())[0] == []

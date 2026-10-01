@@ -1592,6 +1592,9 @@ MVB_BOX_STATUSES = [
     ("loaded", "Погружен в машину"),
     ("shipped", "В пути на СЦ"),
     ("delivered", "Сдан на СЦ"),
+    # Вне основной цепочки: водитель отметил «Не сдано» на точке — короб
+    # едет обратно и снова принимается сканом на складе МВБ.
+    ("not_delivered", "Не сдан на СЦ — возврат на склад"),
 ]
 MVB_BOX_STATUS_LABELS = dict(MVB_BOX_STATUSES)
 MVB_BOX_STATUS_ORDER = {code: i for i, (code, _) in enumerate(MVB_BOX_STATUSES)}
@@ -1643,6 +1646,10 @@ class MvbOrder(db.Model):
     # Заявка, созданная из перемещения WMS (свои короба со своими
     # штрихкодами, без переклейки этикеток).
     wms_movement_id = db.Column(db.Integer, db.ForeignKey("movement_documents.id"), index=True)
+    # Стоимость (руб.): считается по прайсу при оформлении, оператор может
+    # поправить вручную.
+    pickup_cost = db.Column(db.Float)
+    sc_cost = db.Column(db.Float)
 
     client = db.relationship("MvbClient")
     driver = db.relationship("User", foreign_keys=[driver_id])
@@ -1659,6 +1666,12 @@ class MvbOrder(db.Model):
     @property
     def delivery_label(self):
         return MVB_DELIVERY_METHODS.get(self.delivery_method, self.delivery_method)
+
+    @property
+    def total_cost(self):
+        if self.pickup_cost is None and self.sc_cost is None:
+            return None
+        return (self.pickup_cost or 0) + (self.sc_cost or 0)
 
     def status_counts(self):
         counts = {code: 0 for code, _ in MVB_BOX_STATUSES}
@@ -1852,8 +1865,15 @@ class MvbTripStop(db.Model):
     seq = db.Column(db.Integer, nullable=False, default=1)
     marketplace = db.Column(db.String(10), nullable=False)
     destination = db.Column(db.String(200))
+    # Сколько коробов этого направления запланировано в эту машину (при
+    # разбивке «по наполненности авто»); 0 — без плана.
+    planned_boxes = db.Column(db.Integer, nullable=False, default=0)
     delivered_at = db.Column(db.DateTime)
     delivered_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    # Итог на точке: delivered — сдано; rejected — не сдано (короба
+    # возвращаются на склад МВБ, причина в delivery_comment).
+    result = db.Column(db.String(20))
+    delivery_comment = db.Column(db.Text)
 
     trip = db.relationship("MvbTrip", back_populates="stops")
     boxes = db.relationship("MvbBox", back_populates="trip_stop", order_by="MvbBox.loaded_at")
@@ -1864,3 +1884,35 @@ class MvbTripStop(db.Model):
 
     def label(self):
         return f"{self.marketplace_label} · {self.destination}" if self.destination else self.marketplace_label
+
+
+MVB_PRICE_KINDS = {"pickup": "Забор груза", "sc": "Отправка на СЦ"}
+
+
+class MvbPriceTier(db.Model):
+    """Прайс МВБ: цена за короб с градацией по количеству коробов в заявке
+    («от N коробов — X руб. за короб»). kind: pickup — забор, sc — отправка
+    на СЦ."""
+
+    __tablename__ = "mvb_price_tiers"
+
+    id = db.Column(db.Integer, primary_key=True)
+    kind = db.Column(db.String(10), nullable=False, index=True)
+    min_boxes = db.Column(db.Integer, nullable=False, default=1)
+    price_per_box = db.Column(db.Float, nullable=False, default=0)
+
+    @staticmethod
+    def price_for(kind, boxes):
+        """Цена за короб для количества boxes: ступень с наибольшим
+        «от N», не превышающим boxes. None — прайс не заполнен."""
+        tier = (
+            MvbPriceTier.query.filter(MvbPriceTier.kind == kind, MvbPriceTier.min_boxes <= boxes)
+            .order_by(MvbPriceTier.min_boxes.desc())
+            .first()
+        )
+        return tier.price_per_box if tier else None
+
+    @staticmethod
+    def cost_for(kind, boxes):
+        price = MvbPriceTier.price_for(kind, boxes)
+        return None if price is None else round(price * boxes, 2)
