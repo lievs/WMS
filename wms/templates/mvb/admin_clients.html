@@ -1,0 +1,41 @@
+{% extends "mvb/base.html" %}
+{% block title %}Клиенты{% endblock %}
+{% block content %}
+<h3 class="mb-3">Клиенты</h3>
+<form method="post" class="card p-3 mb-4">
+  <h6>Новый клиент</h6>
+  <div class="row g-2">
+    <div class="col-md-3"><input name="name" class="form-control" placeholder="Название *" required></div>
+    <div class="col-md-2"><input name="inn" class="form-control" placeholder="ИНН"></div>
+    <div class="col-md-2"><input name="contact_name" class="form-control" placeholder="Контакт"></div>
+    <div class="col-md-2"><input name="phone" class="form-control" placeholder="Телефон"></div>
+    <div class="col-md-3"><input name="address" class="form-control" placeholder="Адрес забора по умолчанию"></div>
+  </div>
+  <div class="mt-2"><button class="btn btn-success">Добавить</button></div>
+</form>
+<div class="table-responsive">
+<table class="table align-middle">
+  <thead><tr><th>Название</th><th>ИНН</th><th>Контакт</th><th>Телефон</th><th>Адрес</th><th>Активен</th><th></th></tr></thead>
+  <tbody>
+  {% for c in clients %}
+    <tr>
+        <td><input form="client-{{ c.id }}" name="name" class="form-control form-control-sm" value="{{ c.name }}" required></td>
+        <td><input form="client-{{ c.id }}" name="inn" class="form-control form-control-sm" value="{{ c.inn or '' }}"></td>
+        <td><input form="client-{{ c.id }}" name="contact_name" class="form-control form-control-sm" value="{{ c.contact_name or '' }}"></td>
+        <td><input form="client-{{ c.id }}" name="phone" class="form-control form-control-sm" value="{{ c.phone or '' }}"></td>
+        <td><input form="client-{{ c.id }}" name="address" class="form-control form-control-sm" value="{{ c.address or '' }}"></td>
+        <td><input form="client-{{ c.id }}" type="checkbox" name="is_active" value="1" class="form-check-input" {{ 'checked' if c.is_active }}></td>
+        <td>
+          <form method="post" id="client-{{ c.id }}">
+            <input type="hidden" name="client_id" value="{{ c.id }}">
+            <button class="btn btn-sm btn-outline-primary">Сохранить</button>
+          </form>
+        </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="text-muted">Клиентов пока нет</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

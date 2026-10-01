@@ -1,0 +1,81 @@
+{% extends "mvb/base.html" %}
+{% block title %}{{ 'Заявка ' ~ order.number if order else 'Новая заявка' }}{% endblock %}
+{% macro val(name, default='') -%}
+{%- if form is defined and form.get(name) is not none -%}{{ form.get(name) }}
+{%- elif order and order[name] is not none -%}{{ order[name] }}
+{%- else -%}{{ default }}{%- endif -%}
+{%- endmacro %}
+{% block content %}
+<h3 class="mb-3">{{ 'Заявка ' ~ order.number if order else 'Новая заявка' }}</h3>
+<form method="post" class="card p-3" style="max-width:720px">
+  {% if clients %}
+  <div class="mb-3">
+    <label class="form-label">Клиент</label>
+    <select name="client_id" class="form-select" required>
+      <option value="">— выберите —</option>
+      {% for c in clients %}<option value="{{ c.id }}" data-address="{{ c.address or '' }}" {{ 'selected' if val('client_id') == c.id|string }}>{{ c.name }}</option>{% endfor %}
+    </select>
+  </div>
+  {% endif %}
+  <div class="row g-3">
+    <div class="col-sm-6">
+      <label class="form-label">Маркетплейс</label>
+      <select name="marketplace" class="form-select">
+        {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}" {{ 'selected' if val('marketplace', 'wb') == code }}>{{ label }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-sm-6">
+      <label class="form-label">СЦ / склад маркетплейса</label>
+      <input name="destination" class="form-control" value="{{ val('destination') }}" placeholder="например, Коледино">
+    </div>
+    <div class="col-sm-6">
+      <label class="form-label">Количество коробов</label>
+      <input name="box_count" type="number" min="1" max="500" class="form-control" value="{{ val('box_count', 1) }}" required>
+    </div>
+    <div class="col-sm-6">
+      <label class="form-label">Способ передачи</label>
+      <select name="delivery_method" class="form-select">
+        {% for code, label in MVB_DELIVERY_METHODS.items() %}<option value="{{ code }}" {{ 'selected' if val('delivery_method', 'pickup') == code }}>{{ label }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-12">
+      <label class="form-label">Адрес забора</label>
+      <input name="pickup_address" class="form-control" value="{{ val('pickup_address', default_address or '') }}">
+      <div class="form-text">Обязателен для забора транспортной компанией.</div>
+    </div>
+    <div class="col-sm-4">
+      <label class="form-label">Дата забора / сдачи</label>
+      <input name="planned_date" type="date" class="form-control" value="{{ val('planned_date') }}">
+    </div>
+    <div class="col-sm-4">
+      <label class="form-label">Время с</label>
+      <input name="time_from" type="time" class="form-control" value="{{ val('time_from') }}">
+    </div>
+    <div class="col-sm-4">
+      <label class="form-label">по</label>
+      <input name="time_to" type="time" class="form-control" value="{{ val('time_to') }}">
+    </div>
+    <div class="col-12">
+      <label class="form-label">Комментарий</label>
+      <textarea name="comment" class="form-control" rows="2">{{ val('comment') }}</textarea>
+    </div>
+  </div>
+  <div class="mt-3 d-flex gap-2">
+    <button class="btn btn-success">Сохранить</button>
+    <a class="btn btn-outline-secondary" href="{{ url_for('mvb.order_detail', order_id=order.id) if order else url_for('mvb.orders') }}">Отмена</a>
+  </div>
+</form>
+{% endblock %}
+{% block scripts %}
+<script>
+  // Адрес клиента по умолчанию подставляется при выборе клиента (оператором).
+  const clientSelect = document.querySelector("select[name=client_id]");
+  const addressInput = document.querySelector("input[name=pickup_address]");
+  if (clientSelect) {
+    clientSelect.addEventListener("change", () => {
+      const opt = clientSelect.selectedOptions[0];
+      if (opt && opt.dataset.address && !addressInput.value) addressInput.value = opt.dataset.address;
+    });
+  }
+</script>
+{% endblock %}

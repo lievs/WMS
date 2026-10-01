@@ -1,0 +1,25 @@
+{% extends "mvb/base.html" %}
+{% block title %}Забор{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+  <h3 class="mb-0">Заявки на забор</h3>
+  <a class="btn btn-success btn-lg" href="{{ url_for('mvb.scan', mode='pickup') }}">📷 Сканировать короба</a>
+</div>
+{% for o in orders %}
+  {% set c = o.status_counts() %}
+  <div class="card p-3 mb-2">
+    <div class="d-flex justify-content-between flex-wrap gap-2">
+      <div>
+        <b>{{ o.number }}</b> · {{ o.client.name }}{% if o.client.phone %} · <a href="tel:{{ o.client.phone }}">{{ o.client.phone }}</a>{% endif %}<br>
+        {{ o.pickup_address or '—' }}<br>
+        <span class="text-muted">{{ o.planned_date.strftime('%d.%m.%Y') if o.planned_date else 'дата не указана' }}{% if o.time_from %} {{ o.time_from }}{% if o.time_to %}–{{ o.time_to }}{% endif %}{% endif %} · {{ o.marketplace_label }}{% if o.destination %} · {{ o.destination }}{% endif %}</span>
+      </div>
+      <div class="text-end">
+        <div class="fs-5">Забрано {{ o.box_count - c.created }} из {{ o.box_count }}</div>
+      </div>
+    </div>
+  </div>
+{% else %}
+  <div class="text-muted">Заявок на забор нет.</div>
+{% endfor %}
+{% endblock %}

@@ -358,6 +358,7 @@ def create_app(config_class=Config):
     from .blueprints.onboarding import bp as onboarding_bp
     from .blueprints.marketplace_export import bp as marketplace_export_bp
     from .blueprints.management import bp as management_bp
+    from .blueprints.mvb import bp as mvb_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(main_bp)
@@ -378,6 +379,7 @@ def create_app(config_class=Config):
     app.register_blueprint(onboarding_bp, url_prefix="/onboarding")
     app.register_blueprint(marketplace_export_bp, url_prefix="/marketplace-export")
     app.register_blueprint(management_bp, url_prefix="/management")
+    app.register_blueprint(mvb_bp, url_prefix="/mvb")
 
     with app.app_context():
         from . import models  # noqa: F401
@@ -402,6 +404,7 @@ def create_app(config_class=Config):
         from .blueprints.production_orders import (
             GOOGLE_SHEETS_PUBLIC_ENDPOINTS as PRODUCTION_ORDERS_PUBLIC_ENDPOINTS,
         )
+        from .blueprints.mvb import MVB_PUBLIC_ENDPOINTS
         from .models import User
 
         if request.endpoint is None:
@@ -426,17 +429,39 @@ def create_app(config_class=Config):
                 logout_user()
                 session.pop("session_version", None)
                 flash("Сессия завершена администратором. Войдите снова.", "warning")
+                if request.endpoint.startswith("mvb."):
+                    return redirect(url_for("mvb.login"))
                 return redirect(url_for("auth.login"))
+        # Страницы WMS из auth.* (настройки, смена пароля) пользователям МВБ
+        # тоже не показываем — только выход.
+        if (
+            current_user.is_authenticated
+            and current_user.is_mvb_user()
+            and request.endpoint.startswith("auth.")
+            and request.endpoint != "auth.logout"
+        ):
+            return redirect(url_for("mvb.index"))
         if (
             request.endpoint == "static"
             or request.endpoint.startswith("auth.")
             or request.endpoint in API_1C_PUBLIC_ENDPOINTS
             or request.endpoint in GOOGLE_SHEETS_PUBLIC_ENDPOINTS
             or request.endpoint in PRODUCTION_ORDERS_PUBLIC_ENDPOINTS
+            or request.endpoint in MVB_PUBLIC_ENDPOINTS
         ):
             return None
         if not current_user.is_authenticated:
+            # У «МВБ Логистики» своя страница входа.
+            if request.endpoint.startswith("mvb."):
+                return redirect(url_for("mvb.login"))
             return redirect(url_for("auth.login", next=request.full_path))
+        # Пользователи МВБ Логистики видят только свой раздел /mvb, остальной
+        # WMS им недоступен (доступ к /mvb для пользователей WMS проверяет
+        # сам blueprint mvb).
+        if current_user.is_mvb_user():
+            if request.endpoint.startswith("mvb."):
+                return None
+            return redirect(url_for("mvb.index"))
         # Роль "производство" — доступ только к сканированию ЧЗ, ничего
         # больше (даже при прямом вводе адреса другой страницы) — кроме
         # страницы обучения, она должна быть доступна всем сотрудникам

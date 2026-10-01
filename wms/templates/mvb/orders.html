@@ -1,0 +1,49 @@
+{% extends "mvb/base.html" %}
+{% block title %}Заявки{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+  <h3 class="mb-0">Заявки</h3>
+  <a class="btn btn-success" href="{{ url_for('mvb.order_new') }}">+ Новая заявка</a>
+</div>
+<form class="row g-2 mb-3" method="get">
+  <div class="col-auto">
+    <select name="status" class="form-select" onchange="this.form.submit()">
+      <option value="">Все статусы</option>
+      <option value="draft" {{ 'selected' if status == 'draft' }}>Черновики</option>
+      <option value="confirmed" {{ 'selected' if status == 'confirmed' }}>Оформленные</option>
+      <option value="cancelled" {{ 'selected' if status == 'cancelled' }}>Отмененные</option>
+    </select>
+  </div>
+  {% if clients %}
+  <div class="col-auto">
+    <select name="client_id" class="form-select" onchange="this.form.submit()">
+      <option value="">Все клиенты</option>
+      {% for c in clients %}<option value="{{ c.id }}" {{ 'selected' if client_id == c.id }}>{{ c.name }}</option>{% endfor %}
+    </select>
+  </div>
+  {% endif %}
+</form>
+<div class="table-responsive">
+<table class="table table-hover align-middle">
+  <thead><tr>
+    <th>Номер</th>{% if not mvb_is_client %}<th>Клиент</th>{% endif %}<th>Куда</th><th>Способ</th>
+    <th>Дата / время</th><th class="text-end">Коробов</th><th>Статус</th>
+  </tr></thead>
+  <tbody>
+  {% for o in orders %}
+    <tr style="cursor:pointer" onclick="location.href='{{ url_for('mvb.order_detail', order_id=o.id) }}'">
+      <td><a href="{{ url_for('mvb.order_detail', order_id=o.id) }}">{{ o.number }}</a></td>
+      {% if not mvb_is_client %}<td>{{ o.client.name }}</td>{% endif %}
+      <td>{{ o.marketplace_label }}{% if o.destination %} · {{ o.destination }}{% endif %}</td>
+      <td>{{ o.delivery_label }}</td>
+      <td>{{ o.planned_date.strftime('%d.%m.%Y') if o.planned_date else '—' }}{% if o.time_from %} {{ o.time_from }}{% if o.time_to %}–{{ o.time_to }}{% endif %}{% endif %}</td>
+      <td class="text-end">{{ o.box_count }}</td>
+      <td>{{ o.progress_label() }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="text-muted text-center py-4">Заявок пока нет</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

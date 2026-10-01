@@ -71,6 +71,14 @@ SECTIONS = [
 ]
 SECTION_CODES = {code for code, _ in SECTIONS}
 
+# Роли раздела «МВБ Логистика» (отдельный вход, см. blueprints/mvb.py).
+MVB_ROLES = {
+    "mvb_client": "Клиент",
+    "mvb_driver": "Водитель",
+    "mvb_staff": "Склад МВБ (приемщик / оператор)",
+    "mvb_admin": "Администратор МВБ",
+}
+
 
 class User(UserMixin, db.Model):
     __tablename__ = "users"
@@ -138,7 +146,21 @@ class User(UserMixin, db.Model):
     # все ранее выданные cookie пользователя недействительными.
     session_version = db.Column(db.Integer, nullable=False, default=0)
 
+    # Клиент МВБ Логистики, от имени которого работает пользователь с ролью
+    # "mvb_client" (видит только заявки и короба своего клиента).
+    mvb_client_id = db.Column(db.Integer, db.ForeignKey("mvb_clients.id"), nullable=True)
+
     warehouse = db.relationship("Warehouse", foreign_keys=[warehouse_id])
+    mvb_client = db.relationship("MvbClient", foreign_keys=[mvb_client_id])
+
+    def is_mvb_user(self):
+        """Пользователь раздела «МВБ Логистика» — входит через отдельную
+        страницу /mvb/login и видит только этот раздел, остальной WMS ему
+        недоступен (проверяется в before_request)."""
+        return (self.role or "") in MVB_ROLES and not self.is_admin
+
+    def can_manage_mvb(self):
+        return self.is_admin or self.role == "mvb_admin"
 
     def is_production_only(self):
         return self.role == "production" and not self.is_admin
@@ -1550,3 +1572,146 @@ class ProductionOrder(db.Model):
         column = self._STAGE_TIMESTAMP_COLUMNS.get(stage_key)
         if column:
             setattr(self, column, value)
+
+
+# ---------- МВБ Логистика ----------
+#
+# Отдельный раздел: клиенты оформляют заявки на забор коробов (самопривоз
+# или забор транспортной компанией), каждый короб получает собственный
+# штрихкод, и по сканам видно, какие короба забрали, приняли на складе МВБ
+# и отправили на сортировочный центр маркетплейса (WB / Ozon).
+
+MVB_MARKETPLACES = {"wb": "Wildberries", "ozon": "Ozon"}
+MVB_DELIVERY_METHODS = {"pickup": "Забор транспортной компанией", "self": "Самопривоз"}
+MVB_ORDER_STATUSES = {"draft": "Черновик", "confirmed": "Оформлена", "cancelled": "Отменена"}
+# Порядок важен: короб движется только вперед по этому списку.
+MVB_BOX_STATUSES = [
+    ("created", "Ожидает передачи"),
+    ("picked_up", "Забран, в пути на склад"),
+    ("received", "На складе МВБ"),
+    ("shipped", "В пути на СЦ"),
+    ("delivered", "Сдан на СЦ"),
+]
+MVB_BOX_STATUS_LABELS = dict(MVB_BOX_STATUSES)
+MVB_BOX_STATUS_ORDER = {code: i for i, (code, _) in enumerate(MVB_BOX_STATUSES)}
+
+
+class MvbClient(db.Model):
+    __tablename__ = "mvb_clients"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(200), nullable=False)
+    inn = db.Column(db.String(20))
+    contact_name = db.Column(db.String(200))
+    phone = db.Column(db.String(50))
+    # Адрес забора по умолчанию — подставляется в новую заявку.
+    address = db.Column(db.String(500))
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<MvbClient {self.name}>"
+
+
+class MvbOrder(db.Model):
+    """Заявка клиента на передачу коробов: сколько коробов, куда (WB/Ozon,
+    СЦ), способ передачи (забор ТК / самопривоз), адрес и время забора."""
+
+    __tablename__ = "mvb_orders"
+
+    id = db.Column(db.Integer, primary_key=True)
+    number = db.Column(db.String(30), unique=True, nullable=False)
+    client_id = db.Column(db.Integer, db.ForeignKey("mvb_clients.id"), nullable=False, index=True)
+    marketplace = db.Column(db.String(10), nullable=False, default="wb")
+    destination = db.Column(db.String(200))
+    box_count = db.Column(db.Integer, nullable=False, default=1)
+    delivery_method = db.Column(db.String(10), nullable=False, default="pickup")
+    pickup_address = db.Column(db.String(500))
+    planned_date = db.Column(db.Date)
+    time_from = db.Column(db.String(5))
+    time_to = db.Column(db.String(5))
+    comment = db.Column(db.Text)
+    status = db.Column(db.String(20), nullable=False, default="draft", index=True)
+    created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    confirmed_at = db.Column(db.DateTime)
+
+    client = db.relationship("MvbClient")
+    created_by = db.relationship("User", foreign_keys=[created_by_id])
+    boxes = db.relationship(
+        "MvbBox", back_populates="order", order_by="MvbBox.seq", cascade="all, delete-orphan"
+    )
+
+    @property
+    def marketplace_label(self):
+        return MVB_MARKETPLACES.get(self.marketplace, self.marketplace)
+
+    @property
+    def delivery_label(self):
+        return MVB_DELIVERY_METHODS.get(self.delivery_method, self.delivery_method)
+
+    def status_counts(self):
+        counts = {code: 0 for code, _ in MVB_BOX_STATUSES}
+        for box in self.boxes:
+            counts[box.status] = counts.get(box.status, 0) + 1
+        return counts
+
+    def progress_label(self):
+        """Сводный статус для списка: черновик/отмена или самый дальний
+        этап, до которого дошли короба, с количеством, например
+        «На складе МВБ: 7 из 10»."""
+        if self.status != "confirmed":
+            return MVB_ORDER_STATUSES.get(self.status, self.status)
+        if not self.boxes:
+            return MVB_ORDER_STATUSES["confirmed"]
+        furthest = max(MVB_BOX_STATUS_ORDER.get(b.status, 0) for b in self.boxes)
+        if furthest == 0:
+            return MVB_BOX_STATUSES[0][1]
+        reached = sum(1 for b in self.boxes if MVB_BOX_STATUS_ORDER.get(b.status, 0) >= furthest)
+        return f"{MVB_BOX_STATUSES[furthest][1]}: {reached} из {len(self.boxes)}"
+
+
+class MvbBox(db.Model):
+    """Короб заявки с собственным уникальным штрихкодом (номер заявки +
+    порядковый номер короба), по которому его сканируют на каждом этапе."""
+
+    __tablename__ = "mvb_boxes"
+
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.Integer, db.ForeignKey("mvb_orders.id"), nullable=False, index=True)
+    seq = db.Column(db.Integer, nullable=False)
+    barcode = db.Column(db.String(40), unique=True, nullable=False)
+    status = db.Column(db.String(20), nullable=False, default="created")
+    picked_up_at = db.Column(db.DateTime)
+    received_at = db.Column(db.DateTime)
+    shipped_at = db.Column(db.DateTime)
+    delivered_at = db.Column(db.DateTime)
+
+    order = db.relationship("MvbOrder", back_populates="boxes")
+    events = db.relationship(
+        "MvbBoxEvent", back_populates="box", order_by="MvbBoxEvent.created_at",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def status_label(self):
+        return MVB_BOX_STATUS_LABELS.get(self.status, self.status)
+
+
+class MvbBoxEvent(db.Model):
+    """История сканов короба: кто и когда перевел его в новый статус."""
+
+    __tablename__ = "mvb_box_events"
+
+    id = db.Column(db.Integer, primary_key=True)
+    box_id = db.Column(db.Integer, db.ForeignKey("mvb_boxes.id"), nullable=False, index=True)
+    status = db.Column(db.String(20), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    box = db.relationship("MvbBox", back_populates="events")
+    user = db.relationship("User")
+
+    @property
+    def status_label(self):
+        return MVB_BOX_STATUS_LABELS.get(self.status, self.status)

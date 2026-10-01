@@ -1,0 +1,72 @@
+{% extends "mvb/base.html" %}
+{% block title %}Заявка {{ order.number }}{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h3 class="mb-1">Заявка {{ order.number }}</h3>
+    <div class="text-muted">{{ order.client.name }} · создана {{ (order.created_at|msk).strftime('%d.%m.%Y %H:%M') }}</div>
+  </div>
+  <div class="d-flex flex-wrap gap-2">
+    {% if order.status == 'draft' %}
+      <a class="btn btn-outline-primary" href="{{ url_for('mvb.order_edit', order_id=order.id) }}">Изменить</a>
+      <form method="post" action="{{ url_for('mvb.order_confirm', order_id=order.id) }}">
+        <button class="btn btn-success">Оформить и присвоить штрихкоды</button>
+      </form>
+    {% elif order.status == 'confirmed' %}
+      <a class="btn btn-success" target="_blank" href="{{ url_for('mvb.order_labels_pdf', order_id=order.id) }}">🖨 Этикетки на все короба</a>
+    {% endif %}
+    {% if order.status != 'cancelled' and counts.created == order.boxes|length %}
+      <form method="post" action="{{ url_for('mvb.order_cancel', order_id=order.id) }}" onsubmit="return confirm('Отменить заявку?')">
+        <button class="btn btn-outline-danger">Отменить</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-md-6">
+    <div class="card p-3 h-100">
+      <div><b>Статус:</b> {{ order.progress_label() }}</div>
+      <div><b>Куда:</b> {{ order.marketplace_label }}{% if order.destination %} · {{ order.destination }}{% endif %}</div>
+      <div><b>Способ:</b> {{ order.delivery_label }}</div>
+      {% if order.pickup_address %}<div><b>Адрес забора:</b> {{ order.pickup_address }}</div>{% endif %}
+      <div><b>Дата / время:</b> {{ order.planned_date.strftime('%d.%m.%Y') if order.planned_date else '—' }}{% if order.time_from %} {{ order.time_from }}{% if order.time_to %}–{{ order.time_to }}{% endif %}{% endif %}</div>
+      <div><b>Коробов:</b> {{ order.box_count }}</div>
+      {% if order.comment %}<div><b>Комментарий:</b> {{ order.comment }}</div>{% endif %}
+    </div>
+  </div>
+  {% if order.status == 'confirmed' %}
+  <div class="col-md-6">
+    <div class="card p-3 h-100">
+      {% for code, label in MVB_BOX_STATUSES %}
+        <div class="d-flex justify-content-between"><span>{{ label }}</span><b>{{ counts[code] }}</b></div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+{% if order.status == 'draft' %}
+  <div class="alert alert-info">Это черновик. После оформления каждому из {{ order.box_count }} коробов будет присвоен свой штрихкод — распечатайте этикетки и наклейте на каждый короб. Короб без штрихкода не принимается.</div>
+{% elif order.boxes %}
+<div class="table-responsive">
+<table class="table table-sm align-middle">
+  <thead><tr><th>№</th><th>Штрихкод</th><th>Статус</th><th>Забран</th><th>На складе</th><th>Отгружен на СЦ</th><th>Сдан на СЦ</th><th></th></tr></thead>
+  <tbody>
+  {% for b in order.boxes %}
+    <tr>
+      <td>{{ b.seq }}</td>
+      <td class="font-monospace text-nowrap">{{ b.barcode }}</td>
+      <td>{{ b.status_label }}</td>
+      <td>{{ (b.picked_up_at|msk).strftime('%d.%m %H:%M') if b.picked_up_at else '' }}</td>
+      <td>{{ (b.received_at|msk).strftime('%d.%m %H:%M') if b.received_at else '' }}</td>
+      <td>{{ (b.shipped_at|msk).strftime('%d.%m %H:%M') if b.shipped_at else '' }}</td>
+      <td>{{ (b.delivered_at|msk).strftime('%d.%m %H:%M') if b.delivered_at else '' }}</td>
+      <td><a target="_blank" href="{{ url_for('mvb.order_labels_pdf', order_id=order.id, seq=b.seq) }}" title="Этикетка">🖨</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}
