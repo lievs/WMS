@@ -10,7 +10,7 @@
 <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
 </head>
 <body>
-<nav class="navbar navbar-expand-lg navbar-dark mb-4" style="background:#14532d">
+<nav class="navbar navbar-expand-xl navbar-dark mb-4" style="background:#14532d">
   <div class="container-fluid">
     <a class="navbar-brand" href="{{ url_for('mvb.index') }}">🚚 МВБ Логистика</a>
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMvb">
@@ -29,6 +29,7 @@
         {% endfor %}
         {% if mvb_is_staff %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.wms_movements') }}">Из WMS</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.registrations') }}">Новые клиенты{% if mvb_pending_clients %} <span class="badge bg-warning text-dark">{{ mvb_pending_clients }}</span>{% endif %}</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.dispatch') }}">К отправке</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.pallets') }}">Паллеты</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.trips') }}">Рейсы</a></li>

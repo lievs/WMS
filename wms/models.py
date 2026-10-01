@@ -1614,7 +1614,20 @@ class MvbClient(db.Model):
     # Служебный клиент «Свои короба (WMS)» для заявок из перемещений WMS.
     is_internal = db.Column(db.Boolean, nullable=False, default=False)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
+    email = db.Column(db.String(200))
+    # Самостоятельная регистрация: pending — ждет подтверждения оператора
+    # (войти и создавать заявки нельзя), approved — работает, rejected —
+    # отклонен. Клиенты, заведенные вручную, сразу approved.
+    approval = db.Column(db.String(20), nullable=False, default="approved", server_default="approved", index=True)
+    approved_at = db.Column(db.DateTime)
+    approved_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    approved_by = db.relationship("User", foreign_keys=[approved_by_id])
+    users = db.relationship("User", foreign_keys="User.mvb_client_id", viewonly=True, order_by="User.id")
+
+    def is_approved(self):
+        return (self.approval or "approved") == "approved"
 
     def __repr__(self):
         return f"<MvbClient {self.name}>"

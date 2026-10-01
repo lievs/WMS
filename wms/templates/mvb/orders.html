@@ -5,6 +5,17 @@
   <h3 class="mb-0">Заявки</h3>
   <a class="btn btn-success" href="{{ url_for('mvb.order_new') }}">+ Новая заявка</a>
 </div>
+{% if mvb_is_client and not orders and not status %}
+<div class="card p-4 mb-3">
+  <h5>Добро пожаловать в МВБ Логистика!</h5>
+  <ol class="mb-3">
+    <li>Создайте заявку: маркетплейс, СЦ, количество коробов, адрес и время забора (или самопривоз).</li>
+    <li>Распечатайте этикетки — у каждого короба свой штрихкод — и наклейте на короба.</li>
+    <li>Водитель заберет короба, дальше статус каждого короба виден здесь до сдачи на СЦ.</li>
+  </ol>
+  <div><a class="btn btn-success btn-lg" href="{{ url_for('mvb.order_new') }}">+ Создать первую заявку</a></div>
+</div>
+{% else %}
 {% if need_driver and status != 'need_driver' %}
 <div class="alert alert-warning py-2">Новых заявок на забор без водителя: <b>{{ need_driver }}</b> · <a href="{{ url_for('mvb.orders', status='need_driver') }}">показать</a></div>
 {% endif %}
@@ -65,4 +76,5 @@
   </tbody>
 </table>
 </div>
+{% endif %}
 {% endblock %}

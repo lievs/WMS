@@ -938,3 +938,74 @@ def test_client_report_for_period(db, client):
     assert xlsx.status_code == 200 and xlsx.data[:2] == b"PK"
     # другой период — пусто
     assert _report_rows(datetime(2020, 1, 1).date(), datetime(2020, 1, 31).date())[0] == []
+
+
+# ---------- регистрация клиента ----------
+
+
+def _register(http, **overrides):
+    data = {
+        "name": "ИП Новый", "inn": "7701234567", "contact_name": "Анна", "phone": "+7 900 123-45-67",
+        "email": "a@example.com", "address": "Москва, ул. Ленина 1", "username": "newclient",
+        "password": "secret1", "password2": "secret1",
+    }
+    data.update(overrides)
+    return http.post("/mvb/register", data=data)
+
+
+def test_client_self_registration_needs_operator_approval(db, client):
+    assert client.get("/mvb/register").status_code == 200
+    assert "Зарегистрироваться" in client.get("/mvb/login").get_data(as_text=True)
+    response = _register(client)
+    assert response.status_code == 302 and response.headers["Location"].endswith("/mvb/login")
+    new = MvbClient.query.filter_by(name="ИП Новый").one()
+    assert new.approval == "pending" and new.users[0].username == "newclient"
+
+    # до подтверждения войти нельзя
+    html = client.post("/mvb/login", data={"username": "newclient", "password": "secret1"}).get_data(as_text=True)
+    assert "на проверке" in html
+    assert client.get("/mvb/orders").status_code == 302
+
+    # оператор видит новую регистрацию и подтверждает
+    staff = _user("staff1", "mvb_staff")
+    _login(client, staff)
+    client.get("/mvb/registrations")
+    page = client.get("/mvb/registrations").get_data(as_text=True)
+    assert "ИП Новый" in page and "7701234567" in page
+    assert "Новые клиенты <span" in page
+    client.post(f"/mvb/registrations/{new.id}/approve")
+    assert db.session.get(MvbClient, new.id).approval == "approved"
+
+    client.post("/mvb/logout")
+    response = client.post("/mvb/login", data={"username": "newclient", "password": "secret1"})
+    assert response.status_code == 302
+    form = client.get("/mvb/orders/new").get_data(as_text=True)
+    assert "Москва, ул. Ленина 1" in form  # адрес из регистрации подставляется в заявку
+
+
+def test_registration_validation_and_reject(db, client):
+    _user("taken", "mvb_client", _mvb_client())
+    for overrides, message in [
+        ({"inn": "123"}, "ИНН"),
+        ({"username": "Taken"}, "логин уже занят"),
+        ({"password2": "other"}, "Пароли не совпадают"),
+        ({"phone": "12"}, "телефон"),
+    ]:
+        html = _register(client, **overrides).get_data(as_text=True)
+        assert message in html
+    assert MvbClient.query.filter_by(name="ИП Новый").count() == 0
+
+    _register(client)
+    new = MvbClient.query.filter_by(name="ИП Новый").one()
+    staff = _user("staff1", "mvb_staff")
+    _login(client, staff)
+    client.post(f"/mvb/registrations/{new.id}/reject")
+    client.post("/mvb/logout")
+    html = client.post("/mvb/login", data={"username": "newclient", "password": "secret1"}).get_data(as_text=True)
+    assert "отклонена" in html
+
+    # клиент не может подтверждать регистрации
+    other = _user("client2", "mvb_client", _mvb_client("Другой"))
+    _login(client, other)
+    client.post(f"/mvb/registrations/{new.id}/approve")
+    assert db.session.get(MvbClient, new.id).approval == "rejected"

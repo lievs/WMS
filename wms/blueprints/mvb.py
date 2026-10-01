@@ -35,7 +35,7 @@ bp = Blueprint("mvb", __name__)
 
 # Эндпоинты, доступные без входа (проверяется в require_login приложения).
 # Ссылка для наемного водителя на СЦ (без учетной записи) — по токену рейса.
-MVB_PUBLIC_ENDPOINTS = {"mvb.login", "mvb.trip_public", "mvb.trip_public_arrive", "mvb.trip_public_stop"}
+MVB_PUBLIC_ENDPOINTS = {"mvb.login", "mvb.register", "mvb.trip_public", "mvb.trip_public_arrive", "mvb.trip_public_stop"}
 
 MAX_BOXES_PER_ORDER = 500
 
@@ -109,6 +109,11 @@ def _restrict_to_mvb_users():
     if not (current_user.is_admin or current_user.role in MVB_ROLES):
         flash("Раздел «МВБ Логистика» вам не доступен", "danger")
         return redirect(url_for("main.index"))
+    if _is_client() and current_user.mvb_client_id and _client_login_block(current_user):
+        message = _client_login_block(current_user)
+        logout_user()
+        flash(message, "warning")
+        return redirect(url_for("mvb.login"))
     if _is_client() and not current_user.mvb_client_id:
         logout_user()
         flash("Учетная запись не привязана к клиенту — обратитесь к администратору МВБ", "danger")
@@ -128,6 +133,10 @@ def _inject():
         "mvb_is_client": current_user.is_authenticated and _is_client(),
         "mvb_can_scan": (lambda mode: current_user.is_authenticated and _can_scan(mode)),
         "mvb_is_staff": current_user.is_authenticated and _is_staff(),
+        "mvb_pending_clients": (
+            MvbClient.query.filter_by(approval="pending").count()
+            if current_user.is_authenticated and _is_staff() else 0
+        ),
         "MVB_TRIP_STATUSES": MVB_TRIP_STATUSES,
     }
 
@@ -155,9 +164,77 @@ def login():
         flash("Неверный логин или пароль", "danger")
         return render_template("mvb/login.html", username=username)
 
+    blocked = _client_login_block(user)
+    if blocked:
+        flash(blocked, "warning")
+        return render_template("mvb/login.html", username=username)
+
     login_user(user, remember=True)
     session["session_version"] = user.session_version or 0
     return redirect(url_for("mvb.index"))
+
+
+def _client_login_block(user):
+    """Почему клиент пока не может войти (регистрация не подтверждена,
+    отклонена или клиент отключен); None — может."""
+    if user.role != "mvb_client" or user.is_admin or user.mvb_client is None:
+        return None
+    client = user.mvb_client
+    if client.approval == "pending":
+        return "Регистрация на проверке у оператора МВБ — войти можно после подтверждения"
+    if client.approval == "rejected":
+        return "Регистрация отклонена — свяжитесь с МВБ Логистика"
+    if not client.is_active:
+        return "Учетная запись клиента отключена — свяжитесь с МВБ Логистика"
+    return None
+
+
+@bp.route("/register", methods=["GET", "POST"])
+def register():
+    """Самостоятельная регистрация клиента: компания + логин; клиент ждет
+    подтверждения оператора (approval=pending), до этого войти нельзя."""
+    if current_user.is_authenticated and (current_user.is_admin or current_user.role in MVB_ROLES):
+        return redirect(url_for("mvb.index"))
+    form = {k: request.form.get(k, "").strip() for k in (
+        "name", "inn", "contact_name", "phone", "email", "address", "username",
+    )}
+    if request.method == "GET":
+        return render_template("mvb/register.html", form=form)
+
+    password = request.form.get("password", "")
+    errors = []
+    if not form["name"]:
+        errors.append("Укажите название компании или ИП")
+    inn = "".join(ch for ch in form["inn"] if ch.isdigit())
+    if len(inn) not in (10, 12):
+        errors.append("ИНН — 10 или 12 цифр")
+    if not form["contact_name"]:
+        errors.append("Укажите контактное лицо")
+    if sum(ch.isdigit() for ch in form["phone"]) < 10:
+        errors.append("Укажите телефон")
+    if not form["username"]:
+        errors.append("Придумайте логин")
+    elif User.query.filter(db.func.lower(User.username) == form["username"].lower()).first():
+        errors.append("Такой логин уже занят")
+    if len(password) < 6:
+        errors.append("Пароль — не короче 6 символов")
+    elif password != request.form.get("password2", ""):
+        errors.append("Пароли не совпадают")
+    if errors:
+        for error in errors:
+            flash(error, "danger")
+        return render_template("mvb/register.html", form=form)
+
+    client = MvbClient(
+        name=form["name"], inn=inn, contact_name=form["contact_name"], phone=form["phone"],
+        email=form["email"] or None, address=form["address"] or None, approval="pending",
+    )
+    user = User(username=form["username"], full_name=form["contact_name"], role="mvb_client", mvb_client=client)
+    user.set_password(password)
+    db.session.add_all([client, user])
+    db.session.commit()
+    flash("Заявка на регистрацию отправлена. Оператор МВБ проверит данные и подтвердит — после этого войдите со своим логином.", "success")
+    return redirect(url_for("mvb.login"))
 
 
 @bp.route("/logout", methods=["POST"])
@@ -572,6 +649,38 @@ def _require_manage():
         flash("Доступно только администратору МВБ", "danger")
         return False
     return True
+
+
+@bp.route("/registrations")
+def registrations():
+    """Новые клиенты, зарегистрировавшиеся сами: оператор подтверждает или
+    отклоняет."""
+    if not _require_staff():
+        return redirect(url_for("mvb.index"))
+    pending = MvbClient.query.filter_by(approval="pending").order_by(MvbClient.created_at).all()
+    recent = (
+        MvbClient.query.filter(MvbClient.approval.in_(["approved", "rejected"]), MvbClient.approved_at.isnot(None))
+        .order_by(MvbClient.approved_at.desc()).limit(20).all()
+    )
+    return render_template("mvb/registrations.html", pending=pending, recent=recent)
+
+
+@bp.route("/registrations/<int:client_id>/<action>", methods=["POST"])
+def registration_action(client_id, action):
+    if not _require_staff():
+        return redirect(url_for("mvb.index"))
+    client = db.session.get(MvbClient, client_id)
+    if client is None or action not in ("approve", "reject"):
+        abort(404)
+    client.approval = "approved" if action == "approve" else "rejected"
+    client.approved_at = datetime.utcnow()
+    client.approved_by_id = current_user.id
+    db.session.commit()
+    if action == "approve":
+        flash(f"Клиент «{client.name}» подтвержден — может входить и создавать заявки", "success")
+    else:
+        flash(f"Регистрация «{client.name}» отклонена", "warning")
+    return redirect(url_for("mvb.registrations"))
 
 
 @bp.route("/admin/clients", methods=["GET", "POST"])
