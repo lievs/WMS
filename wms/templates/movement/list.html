@@ -59,7 +59,7 @@
           <thead><tr><th>Склад-город</th><th></th></tr></thead>
           <tbody>
           {% for entry in routing %}
-            <tr{% if loop.first %} class="table-success"{% endif %}>
+            <tr{% if loop.first %} class="route-recommended-row"{% endif %}>
               <td>
                 {% if entry.warehouse.marketplace %}<span class="badge bg-secondary">{{ entry.warehouse.marketplace_label() }}</span>{% endif %}
                 {{ entry.warehouse.name }}{% if loop.first %} <span class="badge bg-success">рекомендуем</span>{% endif %}

@@ -116,6 +116,11 @@ body {
   border-color: #fff !important;
 }
 
+/* Рекомендованная строка в "Куда везти короб" (movement/list.html) — обычный
+   Bootstrap table-success слишком яркий (насыщенный зеленый) на целую
+   строку, см. чат. Фон светлее и чуть приглушенный. */
+.route-recommended-row, .route-recommended-row > td { background-color: #eaf6ee !important; }
+
 /* ---- Мобильный экран ---- */
 
 /* Широкие таблицы не должны ломать верстку на телефоне — скроллим по горизонтали */
