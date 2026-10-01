@@ -185,7 +185,6 @@ def test_box_scanned_through_all_stages(db, client):
     box = order.boxes[0]
 
     driver = _user("driver1", "mvb_driver")
-    line_driver = _user("line1", "mvb_line_driver")
     staff = _user("staff1", "mvb_staff")
 
     _login(client, driver)
@@ -199,11 +198,11 @@ def test_box_scanned_through_all_stages(db, client):
 
     _login(client, staff)
     assert client.post("/mvb/scan/receive", data={"barcode": box.barcode}).get_json()["ok"]
-    trip = _trip(client, driver=line_driver)
+    trip = _trip(client, driver=driver)
     assert client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": box.barcode}).get_json()["ok"]
     client.post(f"/mvb/trips/{trip.id}/depart")
 
-    _login(client, line_driver)
+    _login(client, driver)
     _deliver_all(client, trip)
 
     db.session.refresh(box)
@@ -325,7 +324,7 @@ def test_trip_lifecycle_with_plan_and_fact(db, client):
     rom = _mvb_client()
     client_user = _user("client1", "mvb_client", rom)
     staff = _user("staff1", "mvb_staff")
-    driver = _user("driver1", "mvb_line_driver")
+    driver = _user("driver1", "mvb_driver")
     order = _received_order(client, client_user, staff)
 
     trip = _new_trip(client, ("wb", "Коледино"))
@@ -361,7 +360,7 @@ def test_trip_lifecycle_with_plan_and_fact(db, client):
     assert {b.status for b in order.boxes} == {"shipped"}
 
     _login(client, driver)
-    assert client.get("/mvb/routes").status_code == 200
+    assert client.get("/mvb/driver").status_code == 200
     _deliver_all(client, trip)
     db.session.refresh(trip)
     assert trip.status == "delivered"
@@ -370,8 +369,8 @@ def test_trip_lifecycle_with_plan_and_fact(db, client):
 
 def test_driver_cannot_operate_other_trips_or_staff_actions(db, client):
     staff = _user("staff1", "mvb_staff")
-    driver = _user("driver1", "mvb_line_driver")
-    other = _user("driver2", "mvb_line_driver")
+    driver = _user("driver1", "mvb_driver")
+    other = _user("driver2", "mvb_driver")
     _login(client, staff)
     trip = _trip(client, driver=driver)
 
@@ -473,7 +472,7 @@ def test_stage2_pages_render(db, client_logged_in):
 def test_multi_stop_route_driver_delivers_each_point(db, client):
     client_user = _user("client1", "mvb_client", _mvb_client())
     staff = _user("staff1", "mvb_staff")
-    driver = _user("driver1", "mvb_line_driver")
+    driver = _user("driver1", "mvb_driver")
     wb = _received_order(client, client_user, staff, box_count="2")
     oz = _received_order(client, client_user, staff, marketplace="ozon", destination="Хоругвино", box_count="1")
     other = _received_order(client, client_user, staff, marketplace="wb", destination="Казань", box_count="1")
@@ -497,7 +496,7 @@ def test_multi_stop_route_driver_delivers_each_point(db, client):
 
     first, second = trip.stops
     _login(client, driver)
-    client.get("/mvb/routes")
+    client.get("/mvb/driver")
     client.post(f"/mvb/trips/{trip.id}/stops/{first.id}/deliver")
     db.session.refresh(trip)
     assert trip.status == "departed"
@@ -645,7 +644,6 @@ def test_full_chain_seller_to_sc(db, client):
     seller2 = _user("seller2", "mvb_client", _mvb_client("ООО Второй"))
     operator = _user("operator", "mvb_staff")
     driver = _user("driver", "mvb_driver")
-    line_driver = _user("line", "mvb_line_driver")
     _vehicle(capacity=6, driver=driver)
 
     # 1. селлеры создают заявки на забор
@@ -684,7 +682,8 @@ def test_full_chain_seller_to_sc(db, client):
     for box in first.boxes + second.boxes:
         assert client.post("/mvb/scan/receive", data={"barcode": box.barcode}).get_json()["ok"]
 
-    # 5. программа считает машины и разбивает отгрузку по наполненности
+    # 5. программа считает машины и компонует рейсы по наполненности,
+    # не разбивая заявки: 3 + 2 кор. в машины по 4 — две машины
     html = client.get("/mvb/dispatch?capacity=4").get_data(as_text=True)
     assert "нужно машин по 4 кор.: <b>2</b>" in html
     client.post("/mvb/trips/new", data={
@@ -692,34 +691,39 @@ def test_full_chain_seller_to_sc(db, client):
     })
     trips = MvbTrip.query.order_by(MvbTrip.id).all()
     assert len(trips) == 2 and {t.status for t in trips} == {"searching"}
-    assert [t.planned_boxes for t in trips] == [4, 1]
-    assert [(s.label(), s.planned_boxes) for s in trips[0].stops] == [
-        ("Wildberries · Коледино", 3), ("Ozon · Хоругвино", 1)]
+    assert [t.planned_boxes for t in trips] == [3, 2]
+    assert [[s.label() for s in t.stops] for t in trips] == [["Wildberries · Коледино"], ["Ozon · Хоругвино"]]
+    assert db.session.get(MvbOrder, first.id).planned_trip_id == trips[0].id
+    assert db.session.get(MvbOrder, second.id).planned_trip_id == trips[1].id
     assert "Поиск авто: 2" in client.get("/mvb/trips").get_data(as_text=True)
 
-    # 6. авто найдено, погрузка: сканируется каждый короб
-    trip = trips[0]
-    vehicle = _vehicle(capacity=4, driver=line_driver)
-    client.post(f"/mvb/trips/{trip.id}/plan", data={"vehicle_id": str(vehicle.id)})
-    assert db.session.get(MvbTrip, trip.id).driver_id == line_driver.id
-    for box in first.boxes + second.boxes[:1]:
-        assert client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": box.barcode}).get_json()["ok"]
-    client.post(f"/mvb/trips/{trip.id}/depart")
+    # 6. авто найдено — наемный водитель без регистрации, погрузка сканом
+    # каждого короба; водителю уходит ссылка
+    links = []
+    for trip, order in zip(trips, (first, second)):
+        client.post(f"/mvb/trips/{trip.id}/plan", data={
+            "car_plate": "в777ор77", "driver_name": "Случайный Водитель", "driver_phone": "+79990000000",
+        })
+        db.session.refresh(trip)
+        assert trip.status == "assigned" and trip.car_plate == "В777ОР77" and trip.driver_id is None
+        for box in order.boxes:
+            assert client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": box.barcode}).get_json()["ok"]
+        client.post(f"/mvb/trips/{trip.id}/depart")
+        links.append(f"/mvb/t/{trip.access_token}")
 
-    # 7. водитель на СЦ (другой, не тот, что забирал) на точках:
-    # Коледино сдано, Хоругвино не сдано
-    _login(client, line_driver)
-    client.get("/mvb/routes")
-    route = client.get("/mvb/routes").get_data(as_text=True)
-    assert trip.number in route and "Заберу" not in route
-    db.session.refresh(trip)
-    wb_stop, oz_stop = trip.stops
-    client.post(f"/mvb/trips/{trip.id}/stops/{wb_stop.id}/deliver")
-    client.post(f"/mvb/trips/{trip.id}/stops/{oz_stop.id}/reject", data={"comment": "СЦ не принял: нет слота"})
-    db.session.refresh(trip)
-    assert trip.status == "delivered"
+    # 7. водитель по ссылке (без входа): Коледино сдано, Хоругвино не сдано
+    client.post("/mvb/logout")
+    wb_trip, oz_trip = trips
+    page = client.get(links[0]).get_data(as_text=True)
+    assert wb_trip.number in page and "Сдано на СЦ" in page
+    client.post(f"{links[0]}/stops/{wb_trip.stops[0].id}/deliver")
+    client.post(f"{links[1]}/stops/{oz_trip.stops[0].id}/reject", data={"comment": "СЦ не принял: нет слота"})
+    db.session.refresh(wb_trip)
+    db.session.refresh(oz_trip)
+    assert wb_trip.status == "delivered" and oz_trip.status == "delivered"
     assert {b.status for b in first.boxes} == {"delivered"}
-    assert second.boxes[0].status == "not_delivered"
+    assert {b.status for b in second.boxes} == {"not_delivered"}
+    oz_stop = oz_trip.stops[0]
     assert oz_stop.result == "rejected" and oz_stop.delivery_comment == "СЦ не принял: нет слота"
 
     # не сданный короб возвращается на склад и снова готов к отправке
@@ -730,43 +734,39 @@ def test_full_chain_seller_to_sc(db, client):
     assert "Хоругвино" in client.get("/mvb/dispatch").get_data(as_text=True)
 
 
-def test_pickup_and_sc_drivers_are_separate(db, client):
-    """Водители на забор и на СЦ — разные: водителю на СЦ не нужна лента
-    забора у клиентов, водитель на забор не возит рейсы на СЦ."""
+def test_driver_on_sc_trip_does_not_see_free_pickups(db, client):
+    """Водителя можно назначить и на забор, и на рейс на СЦ; в рейсе на СЦ
+    функция «забрать по дороге» ему не нужна."""
     staff = _user("staff1", "mvb_staff")
-    pickup = _user("pickup1", "mvb_driver")
-    line = _user("line1", "mvb_line_driver")
+    driver = _user("driver1", "mvb_driver")
     client_user = _user("client1", "mvb_client", _mvb_client())
+    received = _received_order(client, client_user, staff, box_count="1")
     _login(client, client_user)
-    order = _confirmed_order(client)
+    free = _confirmed_order(client, box_count="2")
+    mine = _confirmed_order(client, box_count="1")
 
-    _login(client, line)
-    assert client.get("/mvb/").headers["Location"].endswith("/mvb/routes")
-    for url in ("/mvb/driver", "/mvb/orders", "/mvb/scan/pickup"):
-        assert client.get(url).headers["Location"].endswith("/mvb/routes")
-    client.post(f"/mvb/driver/orders/{order.id}/take")
-    client.post("/mvb/scan/pickup", data={"barcode": order.boxes[0].barcode})
-    assert db.session.get(MvbOrder, order.id).driver_id is None
-    assert db.session.get(MvbBox, order.boxes[0].id).status == "created"
-
-    # оператор: на забор — только водители на забор, на рейс — только на СЦ
     _login(client, staff)
-    client.post(f"/mvb/orders/{order.id}/driver", data={"driver_id": str(line.id)})
-    assert db.session.get(MvbOrder, order.id).driver_id is None
-    trip = _trip(client)
-    assert client.post(f"/mvb/trips/{trip.id}/plan", data={"driver_id": str(pickup.id)}).status_code == 400
-    vehicle = _vehicle(capacity=5, driver=pickup)
-    client.post(f"/mvb/trips/{trip.id}/plan", data={"vehicle_id": str(vehicle.id)})
-    assert db.session.get(MvbTrip, trip.id).driver_id is None  # из авто водитель на забор не подставляется
-    client.post(f"/mvb/trips/{trip.id}/plan", data={"vehicle_id": str(vehicle.id), "driver_id": str(line.id)})
-    assert db.session.get(MvbTrip, trip.id).driver_id == line.id
+    client.post(f"/mvb/orders/{mine.id}/driver", data={"driver_id": str(driver.id)})
+    trip = _trip(client, driver=driver)
+    assert trip.driver_id == driver.id
+    client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": received.boxes[0].barcode})
+    client.post(f"/mvb/trips/{trip.id}/depart")
 
-    # водитель на забор рейс не видит, в его ленте рейсов нет
-    _login(client, pickup)
-    assert client.get(f"/mvb/trips/{trip.id}").status_code == 404
+    _login(client, driver)
     client.get("/mvb/driver")
-    feed = client.get("/mvb/driver").get_data(as_text=True)
-    assert order.number in feed and trip.number not in feed
+    html = client.get("/mvb/driver").get_data(as_text=True)
+    assert trip.number in html and "Сдано на СЦ" in html
+    assert mine.number in html and free.number not in html and "Заберу" not in html
+    client.post(f"/mvb/driver/orders/{free.id}/take")
+    assert db.session.get(MvbOrder, free.id).driver_id is None
+
+    # рейс закрыт — снова видит свободные заявки и может взять
+    _deliver_all(client, trip)
+    client.get("/mvb/driver")
+    html = client.get("/mvb/driver").get_data(as_text=True)
+    assert free.number in html and "Заберу" in html
+    client.post(f"/mvb/driver/orders/{free.id}/take")
+    assert db.session.get(MvbOrder, free.id).driver_id == driver.id
 
 
 def test_reject_requires_reason(db, client):
@@ -782,14 +782,77 @@ def test_reject_requires_reason(db, client):
     assert trip.stops[0].result is None and order.boxes[0].status == "shipped"
 
 
-def test_fill_mode_splits_one_direction_over_several_trucks(db, client):
+def test_fill_mode_packs_whole_orders(db, client):
+    """Компоновка рейсов не разбивает заявки: 3 + 3 + 2 кор. в машины по 5 —
+    [3 + 2] и [3]; заявка больше машины едет отдельно целиком."""
+    client_user = _user("client1", "mvb_client", _mvb_client())
+    staff = _user("staff1", "mvb_staff")
+    a = _received_order(client, client_user, staff, box_count="3")
+    b = _received_order(client, client_user, staff, box_count="3")
+    c = _received_order(client, client_user, staff, marketplace="ozon", destination="Хоругвино", box_count="2")
+    html = client.get("/mvb/dispatch?capacity=5").get_data(as_text=True)
+    assert "нужно машин по 5 кор.: <b>2</b>" in html and "Предложение по рейсам" in html
+    client.post("/mvb/trips/new", data={"dir": ["wb|Коледино", "ozon|Хоругвино"], "mode": "fill", "capacity": "5"})
+    trips = MvbTrip.query.order_by(MvbTrip.id).all()
+    assert [t.planned_boxes for t in trips] == [5, 3]
+    assert [o.number for o in trips[0].planned_orders] == [a.number, c.number]
+    assert [o.number for o in trips[1].planned_orders] == [b.number]
+
+    # погрузка короба заявки из другого рейса — предупреждение
+    client.post(f"/mvb/trips/{trips[1].id}/plan", data={"car_plate": "А1"})
+    data = client.post(f"/mvb/trips/{trips[1].id}/scan", data={"barcode": a.boxes[0].barcode}).get_json()
+    assert data["ok"] and trips[0].number in data["warning"]
+
+    # отмена рейса освобождает заявки
+    client.post(f"/mvb/trips/{trips[0].id}/cancel")
+    assert db.session.get(MvbOrder, c.id).planned_trip_id is None
+
+
+def test_order_bigger_than_truck_goes_whole(db, client):
     client_user = _user("client1", "mvb_client", _mvb_client())
     staff = _user("staff1", "mvb_staff")
     _received_order(client, client_user, staff, box_count="7")
     client.post("/mvb/trips/new", data={"dir": ["wb|Коледино"], "mode": "fill", "capacity": "3"})
     trips = MvbTrip.query.order_by(MvbTrip.id).all()
-    assert [t.planned_boxes for t in trips] == [3, 3, 1]
-    assert all(len(t.stops) == 1 for t in trips)
+    assert [t.planned_boxes for t in trips] == [7]
+
+
+def test_sc_driver_link_without_login(db, client):
+    """Наемный водитель на СЦ не регистрируется: по ссылке он отмечает подачу
+    и итог на точках; по чужому/неверному токену — 404, служебное закрыто."""
+    client_user = _user("client1", "mvb_client", _mvb_client())
+    staff = _user("staff1", "mvb_staff")
+    order = _received_order(client, client_user, staff, box_count="2")
+    trip = _new_trip(client, ("wb", "Коледино"))
+    client.post(f"/mvb/trips/{trip.id}/plan", data={"car_plate": "е555кх77", "capacity_boxes": "10"})
+    db.session.refresh(trip)
+    assert trip.status == "assigned" and trip.capacity() == 10
+    detail = client.get(f"/mvb/trips/{trip.id}").get_data(as_text=True)
+    link = f"/mvb/t/{trip.access_token}"
+    assert link in detail and "wa.me" in detail
+
+    client.post("/mvb/logout")
+    assert client.get("/mvb/t/wrong-token").status_code == 404
+    assert client.get(link).status_code == 200
+    assert client.get(f"/mvb/trips/{trip.id}").status_code == 302  # служебное — только со входом
+    client.post(f"{link}/arrive")
+    assert db.session.get(MvbTrip, trip.id).status == "arrived"
+    # до отправки «Сдано» не принимается
+    client.post(f"{link}/stops/{trip.stops[0].id}/deliver")
+    assert db.session.get(MvbTrip, trip.id).stops[0].result is None
+
+    _login(client, staff)
+    for box in order.boxes:
+        client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": box.barcode})
+    client.post(f"/mvb/trips/{trip.id}/depart")
+    client.post("/mvb/logout")
+    client.post(f"{link}/stops/{trip.stops[0].id}/reject", data={"comment": ""})
+    assert db.session.get(MvbTrip, trip.id).stops[0].result is None  # без причины нельзя
+    client.post(f"{link}/stops/{trip.stops[0].id}/deliver")
+    trip = db.session.get(MvbTrip, trip.id)
+    assert trip.status == "delivered" and trip.stops[0].delivered_by_id is None
+    assert {b.status for b in order.boxes} == {"delivered"}
+    assert "Рейс завершен" in client.get(link).get_data(as_text=True)
 
 
 # ---------- прайс, стоимость, отчет ----------

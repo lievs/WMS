@@ -11,6 +11,7 @@
 (кроме администраторов) — наоборот, сюда не попадают.
 """
 
+import secrets
 from datetime import date, datetime
 
 from flask import (
@@ -33,7 +34,8 @@ from ..utils.timezone import MOSCOW_OFFSET
 bp = Blueprint("mvb", __name__)
 
 # Эндпоинты, доступные без входа (проверяется в require_login приложения).
-MVB_PUBLIC_ENDPOINTS = {"mvb.login"}
+# Ссылка для наемного водителя на СЦ (без учетной записи) — по токену рейса.
+MVB_PUBLIC_ENDPOINTS = {"mvb.login", "mvb.trip_public", "mvb.trip_public_arrive", "mvb.trip_public_stop"}
 
 MAX_BOXES_PER_ORDER = 500
 
@@ -79,20 +81,7 @@ def _is_staff():
 
 
 def _is_driver():
-    """Водитель на забор: забирает короба у клиентов, видит ленту заявок."""
     return current_user.role == "mvb_driver" and not current_user.is_admin
-
-
-def _is_line_driver():
-    """Водитель на СЦ: возит рейсы со склада МВБ по точкам СЦ, забор у
-    клиентов ему не нужен."""
-    return current_user.role == "mvb_line_driver" and not current_user.is_admin
-
-
-# Куда пускаем водителя на СЦ: только его рейсы.
-LINE_DRIVER_ENDPOINTS = {
-    "mvb.index", "mvb.logout", "mvb.routes", "mvb.trip_detail", "mvb.trip_action", "mvb.trip_stop_action",
-}
 
 
 def _can_scan(mode):
@@ -124,10 +113,6 @@ def _restrict_to_mvb_users():
         logout_user()
         flash("Учетная запись не привязана к клиенту — обратитесь к администратору МВБ", "danger")
         return redirect(url_for("mvb.login"))
-    if _is_line_driver() and request.endpoint not in LINE_DRIVER_ENDPOINTS:
-        if request.method != "GET":
-            abort(403)
-        return redirect(url_for("mvb.routes"))
     return None
 
 
@@ -143,7 +128,6 @@ def _inject():
         "mvb_is_client": current_user.is_authenticated and _is_client(),
         "mvb_can_scan": (lambda mode: current_user.is_authenticated and _can_scan(mode)),
         "mvb_is_staff": current_user.is_authenticated and _is_staff(),
-        "mvb_is_line_driver": current_user.is_authenticated and _is_line_driver(),
         "MVB_TRIP_STATUSES": MVB_TRIP_STATUSES,
     }
 
@@ -185,10 +169,8 @@ def logout():
 
 @bp.route("/")
 def index():
-    if _is_driver():
+    if current_user.role == "mvb_driver" and not current_user.is_admin:
         return redirect(url_for("mvb.driver"))
-    if _is_line_driver():
-        return redirect(url_for("mvb.routes"))
     return redirect(url_for("mvb.orders"))
 
 
@@ -215,7 +197,7 @@ def orders():
     need_driver = 0 if _is_client() else MvbOrder.query.filter(*need_driver_filter).count()
     return render_template(
         "mvb/orders.html", orders=items, clients=clients, status=status, client_id=client_id,
-        need_driver=need_driver, drivers=_active_drivers("mvb_driver") if _is_staff() else [],
+        need_driver=need_driver, drivers=_active_drivers() if _is_staff() else [],
     )
 
 
@@ -300,7 +282,7 @@ def order_new():
 @bp.route("/orders/<int:order_id>")
 def order_detail(order_id):
     order = _get_order_or_404(order_id)
-    drivers = _active_drivers("mvb_driver") if _is_staff() else []
+    drivers = _active_drivers() if _is_staff() else []
     return render_template(
         "mvb/order_detail.html", order=order, counts=order.status_counts(), drivers=drivers,
     )
@@ -406,6 +388,19 @@ def _driver_vehicle_and_load(user=None):
     return vehicle, load
 
 
+def _driver_active_trips(user=None):
+    """Рейсы на СЦ, назначенные водителю и еще не завершенные."""
+    user = user or current_user
+    return (
+        MvbTrip.query.filter(
+            MvbTrip.driver_id == user.id,
+            MvbTrip.status.in_(["assigned", "arrived", "loading", "departed"]),
+        )
+        .order_by(MvbTrip.planned_arrival_at)
+        .all()
+    )
+
+
 @bp.route("/driver")
 def driver():
     """Экран водителя на маршруте: сколько места в машине и лента заявок на
@@ -417,9 +412,14 @@ def driver():
         .all()
     )
     vehicle, load = (None, 0)
+    trips = []
     if _is_driver():
         vehicle, load = _driver_vehicle_and_load()
-        candidates = [o for o in candidates if o.driver_id in (None, current_user.id)]
+        trips = _driver_active_trips()
+        # Водитель в рейсе на СЦ чужие заявки «по дороге» не берет — видит
+        # только то, что оператор назначил ему самому.
+        allowed = (current_user.id,) if trips else (None, current_user.id)
+        candidates = [o for o in candidates if o.driver_id in allowed]
     free = (vehicle.capacity_boxes - load) if vehicle and vehicle.capacity_boxes else None
     now = datetime.utcnow()
     rows = []
@@ -437,22 +437,9 @@ def driver():
     # Сначала свои, затем новые, затем остальные по дате забора.
     rows.sort(key=lambda r: (not r["mine"], not r["is_new"], r["order"].planned_date or date.max))
     return render_template(
-        "mvb/driver.html", rows=rows, vehicle=vehicle, load=load, free=free,
+        "mvb/driver.html", rows=rows, trips=trips, on_trip=bool(trips), vehicle=vehicle, load=load, free=free,
         max_order_id=max((r["order"].id for r in rows), default=0),
     )
-
-
-@bp.route("/routes")
-def routes():
-    """Экран водителя на СЦ: его рейсы и точки маршрута, на каждой точке
-    «Сдано на СЦ» или «Не сдано». Ленты забора у клиентов здесь нет."""
-    if not (_is_line_driver() or _is_staff()):
-        return redirect(url_for("mvb.index"))
-    query = MvbTrip.query.filter(MvbTrip.status.in_(["assigned", "arrived", "loading", "departed"]))
-    if _is_line_driver():
-        query = query.filter(MvbTrip.driver_id == current_user.id)
-    trips = query.order_by(MvbTrip.planned_arrival_at).all()
-    return render_template("mvb/routes.html", trips=trips)
 
 
 @bp.route("/driver/orders/<int:order_id>/take", methods=["POST"])
@@ -465,6 +452,9 @@ def driver_take(order_id):
         abort(400)
     if order.driver_id not in (None, current_user.id):
         flash(f"Заявку {order.number} уже взял другой водитель", "warning")
+        return redirect(url_for("mvb.driver"))
+    if order.driver_id is None and _driver_active_trips():
+        flash("Вы в рейсе на СЦ — заявки на забор назначает оператор", "warning")
         return redirect(url_for("mvb.driver"))
     vehicle, load = _driver_vehicle_and_load()
     remaining = sum(1 for b in order.boxes if b.status == "created")
@@ -697,12 +687,9 @@ def _require_staff():
     return True
 
 
-def _active_drivers(*roles):
-    """Активные водители: на забор (mvb_driver), на СЦ (mvb_line_driver)
-    или оба типа, если роли не указаны."""
-    roles = roles or ("mvb_driver", "mvb_line_driver")
+def _active_drivers():
     return (
-        User.query.filter(User.role.in_(roles), User.is_active_user.is_(True))
+        User.query.filter(User.role == "mvb_driver", User.is_active_user.is_(True))
         .order_by(User.full_name, User.username)
         .all()
     )
@@ -712,7 +699,8 @@ def _move_box(box, status, now):
     box.status = status
     if status in BOX_TIMESTAMP_FIELDS:
         setattr(box, BOX_TIMESTAMP_FIELDS[status], now)
-    db.session.add(MvbBoxEvent(box=box, status=status, user_id=current_user.id, created_at=now))
+    user_id = current_user.id if current_user.is_authenticated else None
+    db.session.add(MvbBoxEvent(box=box, status=status, user_id=user_id, created_at=now))
 
 
 def _parse_dt(value):
@@ -916,6 +904,41 @@ def _ready_groups():
     return sorted(groups.values(), key=lambda g: g["oldest"])
 
 
+def _ready_order_items(selected=None):
+    """Готовые к отправке короба по заявкам — заявка внутри направления
+    едет целиком, поэтому компонуем рейсы заявками. Порядок FIFO: сначала
+    самые давние направления, внутри — самые давние заявки."""
+    items = {}
+    for box in _ready_boxes_query().all():
+        key = _direction_key(box.order.marketplace, box.order.destination)
+        if selected is not None and key not in selected:
+            continue
+        item = items.setdefault(box.order_id, {
+            "order": box.order, "key": key, "marketplace": box.order.marketplace,
+            "destination": (box.order.destination or "").strip(), "boxes": 0, "oldest": box.received_at,
+        })
+        item["boxes"] += 1
+    group_oldest = {}
+    for item in items.values():
+        group_oldest[item["key"]] = min(group_oldest.get(item["key"], item["oldest"]), item["oldest"])
+    return sorted(items.values(), key=lambda i: (group_oldest[i["key"]], i["key"], i["oldest"]))
+
+
+def _pack_orders(items, capacity):
+    """Компоновка рейсов без разбиения заявок: каждая заявка целиком идет в
+    первую машину, где хватает места, иначе — в новую. Заявка больше
+    вместимости едет отдельной машиной (сверх вместимости)."""
+    bins = []
+    for item in items:
+        target = next((b for b in bins if b["boxes"] + item["boxes"] <= capacity), None)
+        if target is None:
+            target = {"items": [], "boxes": 0}
+            bins.append(target)
+        target["items"].append(item)
+        target["boxes"] += item["boxes"]
+    return bins
+
+
 def _vehicle_capacities():
     return sorted({
         v.capacity_boxes for v in MvbVehicle.query.filter_by(is_active=True).all() if v.capacity_boxes
@@ -937,13 +960,16 @@ def dispatch():
     for trip in MvbTrip.query.filter(MvbTrip.status.in_(["searching", "assigned", "arrived", "loading"])).all():
         for stop in trip.stops:
             open_trips.setdefault(_direction_key(stop.marketplace, stop.destination), []).append(trip)
+    items = _ready_order_items()
     for row in rows:
         row["trips"] = open_trips.get(row["key"], [])
-        row["vehicles"] = -(-row["boxes"] // capacity) if capacity else None
+        row["orders"] = [i for i in items if i["key"] == row["key"]]
+        row["vehicles"] = len(_pack_orders(row["orders"], capacity)) if capacity else None
     total = sum(r["boxes"] for r in rows)
+    proposal = _pack_orders(items, capacity) if capacity else []
     return render_template(
         "mvb/dispatch.html", rows=rows, capacity=capacity, capacities=capacities, total=total,
-        total_vehicles=(-(-total // capacity) if capacity else None),
+        total_vehicles=len(proposal) if capacity else None, proposal=proposal,
     )
 
 
@@ -979,10 +1005,10 @@ def _add_stop(trip, marketplace, destination):
 def trip_new():
     """Рейсы по отмеченным направлениям (в порядке FIFO).
 
-    mode=single — один рейс-маршрут по всем точкам; mode=fill — разбивка
-    по наполненности авто: машины заполняются по очереди до вместимости,
-    направление, не влезшее целиком, продолжается в следующей машине. Каждый
-    рейс создается в статусе «Поиск авто»."""
+    mode=single — один рейс-маршрут по всем точкам; mode=fill — компоновка
+    по наполненности авто целыми заявками (заявка не делится между машинами,
+    см. _pack_orders). Каждый рейс создается в статусе «Поиск авто», заявки
+    запоминаются как запланированные в него (planned_trip)."""
     if not _require_staff():
         return redirect(url_for("mvb.index"))
     selected = set(request.form.getlist("dir"))
@@ -1011,34 +1037,40 @@ def trip_new():
         created.append(trip)
         return trip
 
+    items = _ready_order_items(selected)
+    oversized = []
+
+    def plan(trip, item):
+        stop = _add_stop(trip, item["marketplace"], item["destination"])
+        stop.planned_boxes += item["boxes"]
+        trip.planned_boxes += item["boxes"]
+        item["order"].planned_trip = trip
+
     if mode == "fill" and capacity > 0:
-        trip, room = new_trip(), capacity
-        for group in groups:
-            left = group["boxes"]
-            while left > 0:
-                if room == 0:
-                    trip, room = new_trip(), capacity
-                take = min(left, room)
-                stop = _add_stop(trip, group["marketplace"], group["destination"])
-                stop.planned_boxes += take
-                trip.planned_boxes += take
-                left -= take
-                room -= take
-            if group["boxes"] == 0:
-                _add_stop(trip, group["marketplace"], group["destination"])
+        for bin_ in _pack_orders(items, capacity):
+            trip = new_trip()
+            for item in bin_["items"]:
+                plan(trip, item)
+                if item["boxes"] > capacity:
+                    oversized.append(item["order"].number)
     else:
         trip = new_trip()
-        for group in groups:
-            stop = _add_stop(trip, group["marketplace"], group["destination"])
-            stop.planned_boxes = group["boxes"]
-            trip.planned_boxes += group["boxes"]
+        for item in items:
+            plan(trip, item)
+    # Направления без коробов — точкой в первый рейс, без плана.
+    first = created[0] if created else new_trip()
+    for group in groups:
+        if group["boxes"] == 0:
+            _add_stop(first, group["marketplace"], group["destination"])
     db.session.commit()
+    if oversized:
+        flash(f"Заявки больше вместимости машины едут отдельной машиной целиком: {', '.join(oversized)}", "warning")
     if len(created) == 1:
         flash(f"Рейс {created[0].number} создан: {created[0].route_label()} — статус «Поиск авто»", "success")
         return redirect(url_for("mvb.trip_detail", trip_id=created[0].id))
     flash(
-        f"Создано рейсов: {len(created)} ({', '.join(t.number for t in created)}) по {capacity} кор. — "
-        "все в статусе «Поиск авто»", "success",
+        f"Создано рейсов: {len(created)} ({', '.join(t.number for t in created)}) по {capacity} кор., "
+        "заявки не разбиты — все в статусе «Поиск авто»", "success",
     )
     return redirect(url_for("mvb.trips", status="searching"))
 
@@ -1047,7 +1079,7 @@ def _get_trip_or_404(trip_id):
     trip = db.session.get(MvbTrip, trip_id)
     if trip is None:
         abort(404)
-    if not _is_staff() and not (_is_line_driver() and trip.driver_id == current_user.id):
+    if not _is_staff() and not (_is_driver() and trip.driver_id == current_user.id):
         abort(404)
     return trip
 
@@ -1059,10 +1091,14 @@ def trip_detail(trip_id):
     if _is_staff():
         groups = {g["key"]: g["boxes"] for g in _ready_groups()}
         ready = {stop.id: groups.get(_direction_key(stop.marketplace, stop.destination), 0) for stop in trip.stops}
+    if _is_staff() and not trip.access_token:
+        trip.access_token = secrets.token_urlsafe(16)
+        db.session.commit()
     return render_template(
         "mvb/trip_detail.html", trip=trip, ready=ready,
+        driver_link=url_for("mvb.trip_public", token=trip.access_token, _external=True) if _is_staff() else None,
         vehicles=MvbVehicle.query.filter_by(is_active=True).order_by(MvbVehicle.plate).all() if _is_staff() else [],
-        drivers=_active_drivers("mvb_line_driver") if _is_staff() else [],
+        drivers=_active_drivers() if _is_staff() else [],
     )
 
 
@@ -1083,6 +1119,32 @@ def trip_add_stop(trip_id):
     return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
 
 
+def _apply_stop_result(trip, stop, action, comment):
+    """Итог на точке: «Сдано на СЦ» (deliver) или «Не сдано» с причиной
+    (reject — короба возвращаются на склад МВБ). Возвращает (категория,
+    сообщение) для flash."""
+    if trip.status != "departed" or stop.result:
+        return "warning", "Эта точка уже отмечена или рейс еще не в пути"
+    comment = (comment or "").strip()
+    if action == "reject" and not comment:
+        return "danger", "Укажите причину, почему не сдано"
+    now = datetime.utcnow()
+    stop.result = "delivered" if action == "deliver" else "rejected"
+    stop.delivered_at = now
+    stop.delivered_by_id = current_user.id if current_user.is_authenticated else None
+    stop.delivery_comment = comment or None
+    for box in stop.boxes:
+        if box.status == "shipped":
+            _move_box(box, "delivered" if action == "deliver" else "not_delivered", now)
+    if all(s.result for s in trip.stops):
+        trip.status = "delivered"
+        trip.delivered_at = now
+    db.session.commit()
+    if action == "deliver":
+        return "success", f"Сдано: {stop.label()} — {len(stop.boxes)} кор."
+    return "warning", f"Не сдано: {stop.label()} — {len(stop.boxes)} кор. везите обратно на склад МВБ"
+
+
 @bp.route("/trips/<int:trip_id>/stops/<int:stop_id>/<action>", methods=["POST"])
 def trip_stop_action(trip_id, stop_id, action):
     """Порядок точек (up/down), удаление пустой точки (remove) и итог
@@ -1095,30 +1157,10 @@ def trip_stop_action(trip_id, stop_id, action):
     now = datetime.utcnow()
 
     if action in ("deliver", "reject"):
-        if trip.status != "departed" or stop.result:
-            flash("Эта точка уже отмечена или рейс еще не в пути", "warning")
-        else:
-            comment = request.form.get("comment", "").strip()
-            if action == "reject" and not comment:
-                flash("Укажите причину, почему не сдано", "danger")
-                return redirect(url_for("mvb.routes") if _is_line_driver() else url_for("mvb.trip_detail", trip_id=trip.id))
-            stop.result = "delivered" if action == "deliver" else "rejected"
-            stop.delivered_at = now
-            stop.delivered_by_id = current_user.id
-            stop.delivery_comment = comment or None
-            for box in stop.boxes:
-                if box.status == "shipped":
-                    _move_box(box, "delivered" if action == "deliver" else "not_delivered", now)
-            if all(s.result for s in trip.stops):
-                trip.status = "delivered"
-                trip.delivered_at = now
-            db.session.commit()
-            if action == "deliver":
-                flash(f"Сдано: {stop.label()} — {len(stop.boxes)} кор.", "success")
-            else:
-                flash(f"Не сдано: {stop.label()} — {len(stop.boxes)} кор. везите обратно на склад МВБ", "warning")
-        if _is_line_driver():
-            return redirect(url_for("mvb.routes"))
+        category, message = _apply_stop_result(trip, stop, action, request.form.get("comment", ""))
+        flash(message, category)
+        if _is_driver():
+            return redirect(url_for("mvb.driver"))
         return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
 
     if not _is_staff():
@@ -1155,19 +1197,23 @@ def trip_plan(trip_id):
     driver_id = request.form.get("driver_id", type=int)
     trip.vehicle = vehicle
     driver = db.session.get(User, driver_id) if driver_id else (vehicle.driver if vehicle else None)
-    # Рейс на СЦ везет только водитель на СЦ (водители на забор — отдельно).
-    if driver is not None and driver.role != "mvb_line_driver":
-        if driver_id:
-            abort(400)
-        driver = None
+    if driver_id and (driver is None or driver.role != "mvb_driver"):
+        abort(400)
     trip.driver = driver
     trip.planned_arrival_at = _local_to_utc(request.form.get("planned_arrival_at"))
     trip.planned_load_start_at = _local_to_utc(request.form.get("planned_load_start_at"))
     trip.planned_load_end_at = _local_to_utc(request.form.get("planned_load_end_at"))
     trip.comment = request.form.get("comment", "").strip() or None
-    if vehicle and trip.status == "searching":
+    # Наемный водитель (обычно случайный) — без учетной записи.
+    trip.driver_name = request.form.get("driver_name", "").strip() or None
+    trip.driver_phone = request.form.get("driver_phone", "").strip() or None
+    trip.car_plate = request.form.get("car_plate", "").strip().upper() or None
+    trip.capacity_boxes = request.form.get("capacity_boxes", type=int) or None
+    if not trip.access_token:
+        trip.access_token = secrets.token_urlsafe(16)
+    if trip.has_transport() and trip.status == "searching":
         trip.status = "assigned"
-    if not vehicle and trip.status == "assigned":
+    if not trip.has_transport() and trip.status == "assigned":
         trip.status = "searching"
     db.session.commit()
     flash("План рейса сохранен", "success")
@@ -1207,6 +1253,8 @@ def trip_action(trip_id, action):
         _sync_wms_shipped({box.order for box in trip.boxes}, now)
     elif action == "cancel" and trip.status in TRIP_EDITABLE_STATUSES:
         trip.status = "cancelled"
+        for order in list(trip.planned_orders):
+            order.planned_trip = None
         for box in list(trip.boxes):
             # погруженные короба возвращаются на склад
             box.status = "received"
@@ -1218,8 +1266,8 @@ def trip_action(trip_id, action):
         return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
     db.session.commit()
     flash(f"Рейс {trip.number}: {trip.status_label}", "success")
-    if _is_line_driver():
-        return redirect(url_for("mvb.routes"))
+    if _is_driver():
+        return redirect(url_for("mvb.driver"))
     return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
 
 
@@ -1274,13 +1322,57 @@ def trip_scan(trip_id):
         else f"{boxes[0].barcode} погружен → {stop.label()}"
     )
     warnings = []
-    capacity = trip.vehicle.capacity_boxes if trip.vehicle else 0
+    capacity = trip.capacity()
     if capacity and count > capacity:
         warnings.append(f"{count} кор. больше вместимости авто ({capacity})")
     if stop.planned_boxes and len(stop.boxes) > stop.planned_boxes:
         warnings.append(f"на точку «{stop.label()}» по плану {stop.planned_boxes} кор., погружено {len(stop.boxes)}")
+    if order.planned_trip_id and order.planned_trip_id != trip.id:
+        warnings.append(f"заявка {order.number} запланирована в рейс {order.planned_trip.number}")
     warning = ("Внимание: " + "; ".join(warnings)) if warnings else None
     return jsonify(ok=True, already=False, message=message, count=count, warning=warning)
+
+
+# ---------- ссылка для водителя на СЦ (без входа) ----------
+#
+# На СЦ чаще всего едут случайные (наемные) водители — их не регистрируем:
+# оператор вносит ФИО/телефон/госномер в рейс и отправляет водителю ссылку
+# /mvb/t/<токен рейса>, где тот отмечает подачу и итог на каждой точке.
+
+
+def _trip_by_token_or_404(token):
+    trip = MvbTrip.query.filter_by(access_token=token).first() if token else None
+    if trip is None or trip.status == "cancelled":
+        abort(404)
+    return trip
+
+
+@bp.route("/t/<token>")
+def trip_public(token):
+    trip = _trip_by_token_or_404(token)
+    return render_template("mvb/trip_public.html", trip=trip, token=token)
+
+
+@bp.route("/t/<token>/arrive", methods=["POST"])
+def trip_public_arrive(token):
+    trip = _trip_by_token_or_404(token)
+    if trip.status == "assigned":
+        trip.status = "arrived"
+        trip.arrived_at = datetime.utcnow()
+        db.session.commit()
+        flash("Отмечено: авто на погрузке", "success")
+    return redirect(url_for("mvb.trip_public", token=token))
+
+
+@bp.route("/t/<token>/stops/<int:stop_id>/<action>", methods=["POST"])
+def trip_public_stop(token, stop_id, action):
+    trip = _trip_by_token_or_404(token)
+    stop = db.session.get(MvbTripStop, stop_id)
+    if stop is None or stop.trip_id != trip.id or action not in ("deliver", "reject"):
+        abort(404)
+    category, message = _apply_stop_result(trip, stop, action, request.form.get("comment", ""))
+    flash(message, category)
+    return redirect(url_for("mvb.trip_public", token=token))
 
 
 # ---------- свои короба из WMS ----------

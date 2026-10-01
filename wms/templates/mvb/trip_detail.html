@@ -86,15 +86,20 @@
       <h6>Авто и водитель</h6>
       {% if mvb_is_staff and trip.status not in ('departed', 'delivered', 'cancelled') %}
       <form method="post" action="{{ url_for('mvb.trip_plan', trip_id=trip.id) }}" class="row g-2">
+        <div class="col-12 small text-muted">Наемный водитель (без регистрации) — достаточно госномера; водителю отправьте ссылку ниже.</div>
+        <div class="col-md-3"><label class="form-label small">Госномер</label><input name="car_plate" class="form-control" value="{{ trip.car_plate or '' }}" placeholder="А123ВС77"></div>
+        <div class="col-md-3"><label class="form-label small">Вместимость, кор.</label><input type="number" min="1" name="capacity_boxes" class="form-control" value="{{ trip.capacity_boxes or '' }}"></div>
+        <div class="col-md-3"><label class="form-label small">ФИО водителя</label><input name="driver_name" class="form-control" value="{{ trip.driver_name or '' }}"></div>
+        <div class="col-md-3"><label class="form-label small">Телефон</label><input name="driver_phone" class="form-control" value="{{ trip.driver_phone or '' }}" placeholder="+7"></div>
         <div class="col-md-6">
-          <label class="form-label small">Авто</label>
+          <label class="form-label small">Или авто из справочника</label>
           <select name="vehicle_id" class="form-select">
-            <option value="">— поиск авто —</option>
+            <option value="">— нет —</option>
             {% for v in vehicles %}<option value="{{ v.id }}" {{ 'selected' if trip.vehicle_id == v.id }}>{{ v.title() }}{% if v.driver %} · {{ v.driver.display_name() }}{% endif %}</option>{% endfor %}
           </select>
         </div>
         <div class="col-md-6">
-          <label class="form-label small">Водитель (по умолчанию — закрепленный за авто)</label>
+          <label class="form-label small">Свой водитель (по умолчанию — закрепленный за авто)</label>
           <select name="driver_id" class="form-select">
             <option value="">—</option>
             {% for d in drivers %}<option value="{{ d.id }}" {{ 'selected' if trip.driver_id == d.id }}>{{ d.display_name() }}</option>{% endfor %}
@@ -107,9 +112,23 @@
         <div class="col-12"><button class="btn btn-outline-success">Сохранить план</button></div>
       </form>
       {% else %}
-        <div>{{ trip.vehicle.title() if trip.vehicle else '—' }}</div>
-        <div>{{ trip.driver.display_name() if trip.driver else '' }}</div>
+        <div>{{ trip.transport_label() or '—' }}{% if trip.capacity() %} · {{ trip.capacity() }} кор.{% endif %}</div>
+        <div>{{ trip.driver_label() }}{% if trip.driver_phone %} · <a href="tel:{{ trip.driver_phone }}">{{ trip.driver_phone }}</a>{% endif %}</div>
         {% if trip.comment %}<div class="text-muted">{{ trip.comment }}</div>{% endif %}
+      {% endif %}
+      {% if driver_link and trip.status not in ('delivered', 'cancelled') %}
+      <hr>
+      <label class="form-label small mb-1">Ссылка для водителя: подача и «Сдано / Не сдано» на каждой точке, без входа</label>
+      <div class="input-group">
+        <input id="driverLink" class="form-control" readonly value="{{ driver_link }}">
+        <button class="btn btn-outline-secondary" type="button" onclick="navigator.clipboard.writeText(document.getElementById('driverLink').value); this.textContent='Скопировано'">Копировать</button>
+      </div>
+      {% set share_text = 'Рейс ' ~ trip.number ~ ' МВБ Логистика: ' ~ driver_link %}
+      <div class="d-flex flex-wrap gap-2 mt-2">
+        <a class="btn btn-sm btn-success" target="_blank" href="https://wa.me/{{ (trip.driver_phone or '')|replace('+', '')|replace(' ', '')|replace('-', '') }}?text={{ share_text|urlencode }}">WhatsApp</a>
+        <a class="btn btn-sm btn-primary" target="_blank" href="https://t.me/share/url?url={{ driver_link|urlencode }}&text={{ ('Рейс ' ~ trip.number)|urlencode }}">Telegram</a>
+        {% if trip.driver_phone %}<a class="btn btn-sm btn-outline-secondary" href="sms:{{ trip.driver_phone }}?body={{ share_text|urlencode }}">SMS</a>{% endif %}
+      </div>
       {% endif %}
     </div>
   </div>
@@ -122,7 +141,28 @@
 {% set scan_placeholder = 'Штрихкод короба или паллеты' %}
 {% include "mvb/_scan_widget.html" %}
 {% elif trip.status == 'searching' %}
-<div class="alert alert-info">Выберите авто и время подачи — после этого откроется погрузка.</div>
+<div class="alert alert-info">Укажите госномер наемного авто или выберите авто из справочника — после этого откроется погрузка.</div>
+{% endif %}
+
+{% if trip.planned_orders %}
+<h5>Заявки в рейсе (целиком)</h5>
+<div class="table-responsive">
+<table class="table table-sm align-middle">
+  <thead><tr><th>Заявка</th><th>Клиент</th><th>Направление</th><th class="text-end">Коробов</th><th class="text-end">Погружено</th></tr></thead>
+  <tbody>
+  {% for o in trip.planned_orders %}
+    {% set loaded = o.boxes|selectattr('trip_id', 'equalto', trip.id)|list|length %}
+    <tr class="{{ 'table-success' if loaded == o.boxes|length else '' }}">
+      <td><a href="{{ url_for('mvb.order_detail', order_id=o.id) }}">{{ o.number }}</a></td>
+      <td>{{ o.client.name }}</td>
+      <td>{{ o.marketplace_label }}{% if o.destination %} · {{ o.destination }}{% endif %}</td>
+      <td class="text-end">{{ o.boxes|length }}</td>
+      <td class="text-end">{{ loaded }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
 {% endif %}
 
 <h5>Погружено <a class="btn btn-sm btn-outline-secondary ms-2" href="{{ url_for('mvb.trip_detail', trip_id=trip.id) }}">Обновить</a></h5>

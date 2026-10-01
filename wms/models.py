@@ -1,3 +1,4 @@
+import secrets
 from datetime import date, datetime
 
 from flask_login import UserMixin
@@ -74,8 +75,7 @@ SECTION_CODES = {code for code, _ in SECTIONS}
 # Роли раздела «МВБ Логистика» (отдельный вход, см. blueprints/mvb.py).
 MVB_ROLES = {
     "mvb_client": "Клиент",
-    "mvb_driver": "Водитель на забор",
-    "mvb_line_driver": "Водитель на СЦ",
+    "mvb_driver": "Водитель",
     "mvb_staff": "Склад МВБ (приемщик / оператор)",
     "mvb_admin": "Администратор МВБ",
 }
@@ -1647,6 +1647,8 @@ class MvbOrder(db.Model):
     # Заявка, созданная из перемещения WMS (свои короба со своими
     # штрихкодами, без переклейки этикеток).
     wms_movement_id = db.Column(db.Integer, db.ForeignKey("movement_documents.id"), index=True)
+    # Рейс, в который заявка запланирована целиком при компоновке отгрузки.
+    planned_trip_id = db.Column(db.Integer, db.ForeignKey("mvb_trips.id"), index=True)
     # Стоимость (руб.): считается по прайсу при оформлении, оператор может
     # поправить вручную.
     pickup_cost = db.Column(db.Float)
@@ -1656,6 +1658,7 @@ class MvbOrder(db.Model):
     driver = db.relationship("User", foreign_keys=[driver_id])
     created_by = db.relationship("User", foreign_keys=[created_by_id])
     wms_movement = db.relationship("MovementDocument")
+    planned_trip = db.relationship("MvbTrip", foreign_keys=[planned_trip_id], back_populates="planned_orders")
     boxes = db.relationship(
         "MvbBox", back_populates="order", order_by="MvbBox.seq", cascade="all, delete-orphan"
     )
@@ -1831,12 +1834,22 @@ class MvbTrip(db.Model):
     departed_at = db.Column(db.DateTime)
     delivered_at = db.Column(db.DateTime)
     comment = db.Column(db.Text)
+    # Наемный (случайный) водитель на СЦ — без учетной записи: данные
+    # вносит оператор, а водитель отмечает точки по ссылке с access_token.
+    driver_name = db.Column(db.String(200))
+    driver_phone = db.Column(db.String(50))
+    car_plate = db.Column(db.String(30))
+    capacity_boxes = db.Column(db.Integer)
+    access_token = db.Column(db.String(64), unique=True, index=True, default=lambda: secrets.token_urlsafe(16))
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
     vehicle = db.relationship("MvbVehicle")
     driver = db.relationship("User", foreign_keys=[driver_id])
     boxes = db.relationship("MvbBox", back_populates="trip", order_by="MvbBox.loaded_at")
+    planned_orders = db.relationship(
+        "MvbOrder", foreign_keys="MvbOrder.planned_trip_id", back_populates="planned_trip", order_by="MvbOrder.id"
+    )
     stops = db.relationship(
         "MvbTripStop", back_populates="trip", order_by="MvbTripStop.seq", cascade="all, delete-orphan"
     )
@@ -1847,6 +1860,22 @@ class MvbTrip(db.Model):
 
     def route_label(self):
         return " → ".join(stop.label() for stop in self.stops) or "маршрут не задан"
+
+    def has_transport(self):
+        return bool(self.vehicle is not None or self.car_plate)
+
+    def transport_label(self):
+        if self.vehicle:
+            return self.vehicle.title()
+        return self.car_plate or ""
+
+    def capacity(self):
+        return self.capacity_boxes or (self.vehicle.capacity_boxes if self.vehicle else 0) or 0
+
+    def driver_label(self):
+        if self.driver:
+            return self.driver.display_name()
+        return self.driver_name or ""
 
     def stop_for(self, marketplace, destination):
         key = (destination or "").strip().lower()
