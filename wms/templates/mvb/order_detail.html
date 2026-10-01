@@ -46,12 +46,46 @@
   {% endif %}
 </div>
 
+{% if order.status == 'confirmed' and order.delivery_method == 'pickup' and mvb_is_staff %}
+<form method="post" action="{{ url_for('mvb.order_assign_driver', order_id=order.id) }}" class="card p-3 mb-3 d-flex flex-row flex-wrap gap-2 align-items-center">
+  <b>Водитель на забор:</b>
+  <select name="driver_id" class="form-select w-auto">
+    <option value="">— не назначен —</option>
+    {% for d in drivers %}<option value="{{ d.id }}" {{ 'selected' if order.driver_id == d.id }}>{{ d.display_name() }}</option>{% endfor %}
+  </select>
+  <button class="btn btn-outline-success">Назначить</button>
+</form>
+{% elif order.driver %}
+<div class="mb-3"><b>Водитель на забор:</b> {{ order.driver.display_name() }}</div>
+{% endif %}
+
+{% if order.status == 'confirmed' and order.delivery_method == 'self' %}
+<div class="card p-3 mb-3">
+  <h6>Пропуск на склад (самопривоз)</h6>
+  <form method="post" action="{{ url_for('mvb.order_pass', order_id=order.id) }}" class="row g-2">
+    <div class="col-md-4"><input name="pass_driver_name" class="form-control" placeholder="ФИО водителя" value="{{ order.pass_driver_name or '' }}"></div>
+    <div class="col-md-3"><input name="pass_car_plate" class="form-control" placeholder="Госномер авто" value="{{ order.pass_car_plate or '' }}"></div>
+    <div class="col-md-3"><input name="pass_phone" class="form-control" placeholder="Телефон" value="{{ order.pass_phone or '' }}"></div>
+    <div class="col-md-2"><button class="btn btn-outline-success w-100">Сохранить</button></div>
+  </form>
+  {% if order.pass_token %}
+  {% set pass_url = url_for('mvb.pass_page', token=order.pass_token, _external=True) %}
+  <div class="input-group mt-2">
+    <input class="form-control" id="passUrl" value="{{ pass_url }}" readonly>
+    <button type="button" class="btn btn-outline-secondary" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('passUrl').value); this.textContent='Скопировано'">Копировать</button>
+    <a class="btn btn-outline-primary" target="_blank" href="{{ pass_url }}">Открыть</a>
+  </div>
+  <div class="form-text">Отправьте ссылку водителю — по ней его пропустят на склад.</div>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if order.status == 'draft' %}
   <div class="alert alert-info">Это черновик. После оформления каждому из {{ order.box_count }} коробов будет присвоен свой штрихкод — распечатайте этикетки и наклейте на каждый короб. Короб без штрихкода не принимается.</div>
 {% elif order.boxes %}
 <div class="table-responsive">
 <table class="table table-sm align-middle">
-  <thead><tr><th>№</th><th>Штрихкод</th><th>Статус</th><th>Забран</th><th>На складе</th><th>Отгружен на СЦ</th><th>Сдан на СЦ</th><th></th></tr></thead>
+  <thead><tr><th>№</th><th>Штрихкод</th><th>Статус</th><th>Забран</th><th>На складе</th><th>Погружен</th><th>Отгружен на СЦ</th><th>Сдан на СЦ</th><th></th></tr></thead>
   <tbody>
   {% for b in order.boxes %}
     <tr>
@@ -60,6 +94,7 @@
       <td>{{ b.status_label }}</td>
       <td>{{ (b.picked_up_at|msk).strftime('%d.%m %H:%M') if b.picked_up_at else '' }}</td>
       <td>{{ (b.received_at|msk).strftime('%d.%m %H:%M') if b.received_at else '' }}</td>
+      <td>{{ (b.loaded_at|msk).strftime('%d.%m %H:%M') if b.loaded_at else '' }}{% if b.trip and mvb_is_staff %} <a href="{{ url_for('mvb.trip_detail', trip_id=b.trip.id) }}">{{ b.trip.number }}</a>{% endif %}</td>
       <td>{{ (b.shipped_at|msk).strftime('%d.%m %H:%M') if b.shipped_at else '' }}</td>
       <td>{{ (b.delivered_at|msk).strftime('%d.%m %H:%M') if b.delivered_at else '' }}</td>
       <td><a target="_blank" href="{{ url_for('mvb.order_labels_pdf', order_id=order.id, seq=b.seq) }}" title="Этикетка">🖨</a></td>

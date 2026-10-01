@@ -22,11 +22,17 @@
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.orders') }}">Заявки</a></li>
         {% endif %}
         {% if mvb_can_scan('pickup') %}
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.driver') }}">Забор</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.driver') }}">Заявки на забор</a></li>
         {% endif %}
         {% for mode, info in SCAN_MODES.items() if mvb_can_scan(mode) %}
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.scan', mode=mode) }}">📷 {{ info.title }}</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.scan', mode=mode) }}">📷 {{ info.nav }}</a></li>
         {% endfor %}
+        {% if mvb_is_staff %}
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.dispatch') }}">К отправке</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.pallets') }}">Паллеты</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.trips') }}">Рейсы</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.vehicles') }}">Транспорт</a></li>
+        {% endif %}
         {% if current_user.can_manage_mvb() %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.admin_clients') }}">Клиенты</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.admin_users') }}">Пользователи</a></li>

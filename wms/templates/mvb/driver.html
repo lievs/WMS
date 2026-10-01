@@ -5,12 +5,33 @@
   <h3 class="mb-0">Заявки на забор</h3>
   <a class="btn btn-success btn-lg" href="{{ url_for('mvb.scan', mode='pickup') }}">📷 Сканировать короба</a>
 </div>
+{% if trips %}
+<h5>Мои рейсы на СЦ</h5>
+{% for t in trips %}
+  <div class="card p-3 mb-2 border-success">
+    <div class="d-flex justify-content-between flex-wrap gap-2 align-items-center">
+      <div>
+        <b>{{ t.number }}</b> · {{ t.marketplace_label }}{% if t.destination %} · {{ t.destination }}{% endif %} · {{ t.status_label }}<br>
+        <span class="text-muted">Подача: {{ (t.planned_arrival_at|msk).strftime('%d.%m %H:%M') if t.planned_arrival_at else 'не назначена' }}{% if t.vehicle %} · {{ t.vehicle.plate }}{% endif %} · коробов: {{ t.boxes|length }}</span>
+      </div>
+      <div class="d-flex gap-2">
+        {% if t.status == 'assigned' %}
+        <form method="post" action="{{ url_for('mvb.trip_action', trip_id=t.id, action='arrive') }}"><button class="btn btn-outline-success">Я на месте</button></form>
+        {% elif t.status == 'departed' %}
+        <form method="post" action="{{ url_for('mvb.trip_action', trip_id=t.id, action='deliver') }}" onsubmit="return confirm('Отметить, что груз сдан на СЦ?')"><button class="btn btn-success">Сдано на СЦ</button></form>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+{% endfor %}
+<h5 class="mt-4">Забор у клиентов</h5>
+{% endif %}
 {% for o in orders %}
   {% set c = o.status_counts() %}
   <div class="card p-3 mb-2">
     <div class="d-flex justify-content-between flex-wrap gap-2">
       <div>
-        <b>{{ o.number }}</b> · {{ o.client.name }}{% if o.client.phone %} · <a href="tel:{{ o.client.phone }}">{{ o.client.phone }}</a>{% endif %}<br>
+        <b>{{ o.number }}</b>{% if o.driver %} <span class="badge bg-success">{{ o.driver.display_name() }}</span>{% endif %} · {{ o.client.name }}{% if o.client.phone %} · <a href="tel:{{ o.client.phone }}">{{ o.client.phone }}</a>{% endif %}<br>
         {{ o.pickup_address or '—' }}<br>
         <span class="text-muted">{{ o.planned_date.strftime('%d.%m.%Y') if o.planned_date else 'дата не указана' }}{% if o.time_from %} {{ o.time_from }}{% if o.time_to %}–{{ o.time_to }}{% endif %}{% endif %} · {{ o.marketplace_label }}{% if o.destination %} · {{ o.destination }}{% endif %}</span>
       </div>

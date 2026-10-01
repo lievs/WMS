@@ -1,0 +1,33 @@
+{% extends "mvb/base.html" %}
+{% block title %}К отправке{% endblock %}
+{% block content %}
+<h3 class="mb-1">Готово к отправке на СЦ</h3>
+<p class="text-muted">Принятые на складе и еще не погруженные короба по направлениям. Сверху — направления с самыми давними коробами (FIFO).</p>
+<div class="table-responsive">
+<table class="table align-middle">
+  <thead><tr><th>Направление</th><th class="text-end">Коробов</th><th>Паллеты</th><th>Клиенты</th><th>Ждет с</th><th>Рейсы</th><th></th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td><b>{{ MVB_MARKETPLACES[r.marketplace] }}</b>{% if r.destination %} · {{ r.destination }}{% endif %}</td>
+      <td class="text-end fs-5">{{ r.boxes }}</td>
+      <td>{{ r.pallets|sort|join(', ') or '—' }}</td>
+      <td>{{ r.clients|sort|join(', ') }}</td>
+      <td>{{ (r.oldest|msk).strftime('%d.%m %H:%M') if r.oldest else '' }}</td>
+      <td>{% for t in r.trips %}<a href="{{ url_for('mvb.trip_detail', trip_id=t.id) }}">{{ t.number }}</a> ({{ t.status_label }}){% if not loop.last %}<br>{% endif %}{% else %}—{% endfor %}</td>
+      <td>
+        <form method="post" action="{{ url_for('mvb.trip_new') }}" class="d-flex gap-1">
+          <input type="hidden" name="marketplace" value="{{ r.marketplace }}">
+          <input type="hidden" name="destination" value="{{ r.destination }}">
+          <input type="hidden" name="planned_boxes" value="{{ r.boxes }}">
+          <button class="btn btn-sm btn-success text-nowrap">Сформировать рейс</button>
+        </form>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="text-muted">Нет коробов, ожидающих отправки</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

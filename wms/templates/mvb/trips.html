@@ -1,0 +1,36 @@
+{% extends "mvb/base.html" %}
+{% block title %}Рейсы{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+  <h3 class="mb-0">Рейсы на СЦ</h3>
+  <a class="btn btn-outline-success" href="{{ url_for('mvb.dispatch') }}">Сформировать из «К отправке»</a>
+</div>
+<form method="get" class="mb-3">
+  <select name="status" class="form-select w-auto" onchange="this.form.submit()">
+    <option value="active" {{ 'selected' if status == 'active' }}>Активные</option>
+    <option value="all" {{ 'selected' if status == 'all' }}>Все</option>
+    {% for code, label in MVB_TRIP_STATUSES.items() %}<option value="{{ code }}" {{ 'selected' if status == code }}>{{ label }}</option>{% endfor %}
+  </select>
+</form>
+<div class="table-responsive">
+<table class="table table-hover align-middle">
+  <thead><tr><th>Рейс</th><th>Направление</th><th>Статус</th><th>Авто / водитель</th><th>Подача (план / факт)</th><th>Погрузка (план / факт)</th><th class="text-end">Коробов</th></tr></thead>
+  <tbody>
+  {% macro dt(v) %}{{ (v|msk).strftime('%d.%m %H:%M') if v else '—' }}{% endmacro %}
+  {% for t in trips %}
+    <tr style="cursor:pointer" onclick="location.href='{{ url_for('mvb.trip_detail', trip_id=t.id) }}'">
+      <td><a href="{{ url_for('mvb.trip_detail', trip_id=t.id) }}">{{ t.number }}</a></td>
+      <td>{{ t.marketplace_label }}{% if t.destination %} · {{ t.destination }}{% endif %}</td>
+      <td>{{ t.status_label }}</td>
+      <td>{{ t.vehicle.plate if t.vehicle else '—' }}{% if t.driver %} · {{ t.driver.display_name() }}{% endif %}</td>
+      <td>{{ dt(t.planned_arrival_at) }} / {{ dt(t.arrived_at) }}</td>
+      <td>{{ dt(t.planned_load_start_at) }}–{{ dt(t.planned_load_end_at) }} / {{ dt(t.load_started_at) }}–{{ dt(t.load_finished_at) }}</td>
+      <td class="text-end">{{ t.boxes|length }}{% if t.planned_boxes %} / {{ t.planned_boxes }}{% endif %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="text-muted">Рейсов нет</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}
