@@ -6,7 +6,7 @@
 <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
   <div>
     <h3 class="mb-1">Рейс {{ trip.number }} <span class="badge bg-success">{{ trip.status_label }}</span></h3>
-    <div class="text-muted">{{ trip.marketplace_label }}{% if trip.destination %} · {{ trip.destination }}{% endif %} · погружено {{ trip.boxes|length }}{% if trip.planned_boxes %} из {{ trip.planned_boxes }} план.{% endif %}{% if mvb_is_staff and trip.status in ('searching','assigned','arrived','loading') %} · на складе этого направления ждут: {{ ready_count }}{% endif %}</div>
+    <div class="text-muted">{{ trip.route_label() }} · погружено {{ trip.boxes|length }}{% if trip.planned_boxes %} из {{ trip.planned_boxes }} план.{% endif %}</div>
   </div>
   {% if mvb_is_staff %}
   <div class="d-flex flex-wrap gap-2">
@@ -19,13 +19,49 @@
     {% if trip.status in ('assigned', 'arrived', 'loading') %}
       <form method="post" action="{{ url_for('mvb.trip_action', trip_id=trip.id, action='depart') }}" onsubmit="return confirm('Завершить погрузку и отправить рейс?')"><button class="btn btn-success">Погрузка завершена — отправить</button></form>
     {% endif %}
-    {% if trip.status == 'departed' %}
-      <form method="post" action="{{ url_for('mvb.trip_action', trip_id=trip.id, action='deliver') }}" onsubmit="return confirm('Отметить, что груз сдан на СЦ?')"><button class="btn btn-success">Сдано на СЦ</button></form>
-    {% endif %}
     {% if trip.status in ('searching', 'assigned', 'arrived', 'loading') %}
       <form method="post" action="{{ url_for('mvb.trip_action', trip_id=trip.id, action='cancel') }}" onsubmit="return confirm('Отменить рейс? Погруженные короба вернутся на склад.')"><button class="btn btn-outline-danger">Отменить</button></form>
     {% endif %}
   </div>
+  {% endif %}
+</div>
+
+<div class="card p-3 mb-3">
+  <h6>Маршрут</h6>
+  <ol class="list-group list-group-numbered mb-2">
+  {% for stop in trip.stops %}
+    <li class="list-group-item d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <div class="me-auto">
+        <b>{{ stop.label() }}</b>
+        <span class="text-muted">· погружено {{ stop.boxes|length }}{% if ready.get(stop.id) %} · ждут на складе {{ ready[stop.id] }}{% endif %}</span>
+      </div>
+      {% if stop.delivered_at %}
+        <span class="text-success">✓ сдано {{ dt(stop.delivered_at) }}</span>
+      {% elif trip.status == 'departed' %}
+        <span class="text-muted me-2">в пути</span>
+        {% if mvb_is_staff %}
+        <form method="post" action="{{ url_for('mvb.trip_stop_action', trip_id=trip.id, stop_id=stop.id, action='deliver') }}" onsubmit="return confirm('Отметить сдачу на СЦ {{ stop.label() }}?')"><button class="btn btn-sm btn-outline-success">Сдано на СЦ</button></form>
+        {% endif %}
+      {% elif mvb_is_staff and trip.status in ('searching','assigned','arrived','loading') %}
+        <div class="d-flex gap-1">
+          {% for act, icon in [('up', '↑'), ('down', '↓'), ('remove', '✕')] %}
+          <form method="post" action="{{ url_for('mvb.trip_stop_action', trip_id=trip.id, stop_id=stop.id, action=act) }}"><button class="btn btn-sm btn-outline-secondary" title="{{ {'up': 'Выше', 'down': 'Ниже', 'remove': 'Убрать точку'}[act] }}">{{ icon }}</button></form>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </li>
+  {% else %}
+    <li class="list-group-item text-muted">Точек нет — добавьте СЦ</li>
+  {% endfor %}
+  </ol>
+  {% if mvb_is_staff and trip.status in ('searching','assigned','arrived','loading') %}
+  <form method="post" action="{{ url_for('mvb.trip_add_stop', trip_id=trip.id) }}" class="d-flex flex-wrap gap-2">
+    <select name="marketplace" class="form-select w-auto">
+      {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
+    </select>
+    <input name="destination" class="form-control w-auto" placeholder="СЦ, например Коледино">
+    <button class="btn btn-outline-success">+ Точка</button>
+  </form>
   {% endif %}
 </div>
 
@@ -39,7 +75,7 @@
         <tr><td>Начало погрузки</td><td>{{ dt(trip.planned_load_start_at) }}</td><td>{{ dt(trip.load_started_at) }}</td></tr>
         <tr><td>Конец погрузки</td><td>{{ dt(trip.planned_load_end_at) }}</td><td>{{ dt(trip.load_finished_at) }}</td></tr>
         <tr><td>Отправлен</td><td></td><td>{{ dt(trip.departed_at) }}</td></tr>
-        <tr><td>Сдан на СЦ</td><td></td><td>{{ dt(trip.delivered_at) }}</td></tr>
+        <tr><td>Маршрут завершен</td><td></td><td>{{ dt(trip.delivered_at) }}</td></tr>
       </table>
     </div>
   </div>
@@ -79,7 +115,7 @@
 
 {% if mvb_is_staff and trip.status in ('assigned', 'arrived', 'loading') %}
 <h5>📷 Погрузка</h5>
-<p class="text-muted">Сканируйте короба или паллету целиком. Первый скан сам отметит начало погрузки.</p>
+<p class="text-muted">Кладовщик сканирует погружаемые короба или паллету целиком — короб сам попадает на свою точку маршрута. Первый скан отмечает начало погрузки.</p>
 {% set scan_url = url_for('mvb.trip_scan', trip_id=trip.id) %}
 {% set scan_placeholder = 'Штрихкод короба или паллеты' %}
 {% include "mvb/_scan_widget.html" %}
@@ -90,11 +126,12 @@
 <h5>Погружено <a class="btn btn-sm btn-outline-secondary ms-2" href="{{ url_for('mvb.trip_detail', trip_id=trip.id) }}">Обновить</a></h5>
 <div class="table-responsive">
 <table class="table table-sm align-middle">
-  <thead><tr><th>Штрихкод</th><th>Паллета</th><th>Клиент</th><th>Заявка</th><th>Погружен</th><th>Статус</th></tr></thead>
+  <thead><tr><th>Штрихкод</th><th>Точка</th><th>Паллета</th><th>Клиент</th><th>Заявка</th><th>Погружен</th><th>Статус</th></tr></thead>
   <tbody>
   {% for b in trip.boxes %}
     <tr>
       <td class="font-monospace text-nowrap">{{ b.barcode }}</td>
+      <td>{{ b.trip_stop.label() if b.trip_stop else '' }}</td>
       <td>{{ b.pallet.number if b.pallet else '' }}</td>
       <td>{{ b.order.client.name }}</td>
       <td><a href="{{ url_for('mvb.order_detail', order_id=b.order.id) }}">{{ b.order.number }}</a></td>
@@ -102,7 +139,7 @@
       <td>{{ b.status_label }}</td>
     </tr>
   {% else %}
-    <tr><td colspan="6" class="text-muted">Пока ничего не погружено</td></tr>
+    <tr><td colspan="7" class="text-muted">Пока ничего не погружено</td></tr>
   {% endfor %}
   </tbody>
 </table>

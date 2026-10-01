@@ -23,6 +23,9 @@
   </div>
 </div>
 
+{% if order.wms_movement %}
+<div class="alert alert-secondary">Свои короба из перемещения WMS {{ order.wms_movement.number }} — сканируются по прежним этикеткам WMS{% if order.wms_movement.shipped_at %}; в WMS отмечено «Транспорт забрал»{% endif %}.</div>
+{% endif %}
 <div class="row g-3 mb-3">
   <div class="col-md-6">
     <div class="card p-3 h-100">
@@ -57,27 +60,6 @@
 </form>
 {% elif order.driver %}
 <div class="mb-3"><b>Водитель на забор:</b> {{ order.driver.display_name() }}</div>
-{% endif %}
-
-{% if order.status == 'confirmed' and order.delivery_method == 'self' %}
-<div class="card p-3 mb-3">
-  <h6>Пропуск на склад (самопривоз)</h6>
-  <form method="post" action="{{ url_for('mvb.order_pass', order_id=order.id) }}" class="row g-2">
-    <div class="col-md-4"><input name="pass_driver_name" class="form-control" placeholder="ФИО водителя" value="{{ order.pass_driver_name or '' }}"></div>
-    <div class="col-md-3"><input name="pass_car_plate" class="form-control" placeholder="Госномер авто" value="{{ order.pass_car_plate or '' }}"></div>
-    <div class="col-md-3"><input name="pass_phone" class="form-control" placeholder="Телефон" value="{{ order.pass_phone or '' }}"></div>
-    <div class="col-md-2"><button class="btn btn-outline-success w-100">Сохранить</button></div>
-  </form>
-  {% if order.pass_token %}
-  {% set pass_url = url_for('mvb.pass_page', token=order.pass_token, _external=True) %}
-  <div class="input-group mt-2">
-    <input class="form-control" id="passUrl" value="{{ pass_url }}" readonly>
-    <button type="button" class="btn btn-outline-secondary" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('passUrl').value); this.textContent='Скопировано'">Копировать</button>
-    <a class="btn btn-outline-primary" target="_blank" href="{{ pass_url }}">Открыть</a>
-  </div>
-  <div class="form-text">Отправьте ссылку водителю — по ней его пропустят на склад.</div>
-  {% endif %}
-</div>
 {% endif %}
 
 {% if order.status == 'draft' %}

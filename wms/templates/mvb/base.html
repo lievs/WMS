@@ -28,6 +28,7 @@
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.scan', mode=mode) }}">📷 {{ info.nav }}</a></li>
         {% endfor %}
         {% if mvb_is_staff %}
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.wms_movements') }}">Из WMS</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.dispatch') }}">К отправке</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.pallets') }}">Паллеты</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.trips') }}">Рейсы</a></li>

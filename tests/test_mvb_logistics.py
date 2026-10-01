@@ -4,7 +4,12 @@
 from flask import g
 
 from wms.extensions import db
-from wms.models import MvbBox, MvbClient, MvbOrder, MvbPallet, MvbTrip, MvbVehicle, User
+from datetime import datetime
+
+from wms.models import (
+    Box, MovementDocument, MovementLine, MvbBox, MvbClient, MvbOrder, MvbPallet, MvbTrip, MvbVehicle,
+    User, Warehouse,
+)
 
 
 def _user(username, role, client=None, password="password123"):
@@ -54,9 +59,21 @@ def _vehicle(capacity=10, driver=None):
     return v
 
 
+def _new_trip(http, *directions):
+    """Рейс-маршрут по направлениям [(маркетплейс, СЦ), ...] — как кнопка
+    «Сформировать рейс» на странице «К отправке»."""
+    http.post("/mvb/trips/new", data={"dir": [f"{m}|{d}" for m, d in directions]})
+    return MvbTrip.query.order_by(MvbTrip.id.desc()).first()
+
+
+def _deliver_all(http, trip):
+    for stop in list(trip.stops):
+        http.post(f"/mvb/trips/{trip.id}/stops/{stop.id}/deliver")
+
+
 def _trip(http, marketplace="wb", destination="Коледино", driver=None, capacity=10):
     """Рейс (вызывать под пользователем склада): создан и авто назначено."""
-    http.post("/mvb/trips/new", data={"marketplace": marketplace, "destination": destination})
+    _new_trip(http, (marketplace, destination))
     trip = MvbTrip.query.order_by(MvbTrip.id.desc()).first()
     vehicle = _vehicle(capacity, driver)
     http.post(f"/mvb/trips/{trip.id}/plan", data={
@@ -185,7 +202,7 @@ def test_box_scanned_through_all_stages(db, client):
     client.post(f"/mvb/trips/{trip.id}/depart")
 
     _login(client, driver)
-    client.post(f"/mvb/trips/{trip.id}/deliver")
+    _deliver_all(client, trip)
 
     db.session.refresh(box)
     assert box.status == "delivered"
@@ -309,9 +326,8 @@ def test_trip_lifecycle_with_plan_and_fact(db, client):
     driver = _user("driver1", "mvb_driver")
     order = _received_order(client, client_user, staff)
 
-    client.post("/mvb/trips/new", data={"marketplace": "wb", "destination": "Коледино", "planned_boxes": "3"})
-    trip = MvbTrip.query.one()
-    assert trip.status == "searching"
+    trip = _new_trip(client, ("wb", "Коледино"))
+    assert trip.status == "searching" and trip.planned_boxes == 3
     # без авто погрузка закрыта
     assert client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": order.boxes[0].barcode}).status_code == 409
 
@@ -344,7 +360,7 @@ def test_trip_lifecycle_with_plan_and_fact(db, client):
 
     _login(client, driver)
     assert client.get("/mvb/driver").status_code == 200
-    client.post(f"/mvb/trips/{trip.id}/deliver")
+    _deliver_all(client, trip)
     db.session.refresh(trip)
     assert trip.status == "delivered"
     assert {b.status for b in order.boxes} == {"delivered"}
@@ -433,21 +449,6 @@ def test_driver_sees_assigned_and_unassigned_pickups_only(db, client):
     assert db.session.get(MvbOrder, free.id).driver_id is None
 
 
-def test_self_delivery_pass_link_is_public(db, client):
-    client_user = _user("client1", "mvb_client", _mvb_client())
-    _login(client, client_user)
-    order = _confirmed_order(client, delivery_method="self", pickup_address="")
-    assert order.pass_token
-    client.post(f"/mvb/orders/{order.id}/pass", data={
-        "pass_driver_name": "Петров Петр", "pass_car_plate": "в777ор77", "pass_phone": "+7900",
-    })
-    client.post("/mvb/logout")
-    g.pop("_login_user", None)
-    html = client.get(f"/mvb/pass/{order.pass_token}").get_data(as_text=True)
-    assert "Петров Петр" in html and "В777ОР77" in html and order.number in html
-    assert client.get("/mvb/pass/wrong-token").status_code == 404
-
-
 def test_vehicles_page_staff_only(db, client):
     _login(client, _user("staff1", "mvb_staff"))
     client.post("/mvb/vehicles", data={"plate": "а001аа77", "capacity_boxes": "40"})
@@ -459,6 +460,170 @@ def test_vehicles_page_staff_only(db, client):
 def test_stage2_pages_render(db, client_logged_in):
     for url in ("/mvb/dispatch", "/mvb/trips", "/mvb/trips?status=all", "/mvb/pallets", "/mvb/vehicles"):
         assert client_logged_in.get(url).status_code == 200, url
-    client_logged_in.post("/mvb/trips/new", data={"marketplace": "wb", "destination": "Коледино"})
-    trip = MvbTrip.query.one()
+    trip = _new_trip(client_logged_in, ("wb", "Коледино"), ("ozon", "Хоругвино"))
+    assert len(trip.stops) == 2
     assert client_logged_in.get(f"/mvb/trips/{trip.id}").status_code == 200
+
+
+# ---------- этап 3: маршрут по точкам, лента водителя, короба из WMS ----------
+
+
+def test_multi_stop_route_driver_delivers_each_point(db, client):
+    client_user = _user("client1", "mvb_client", _mvb_client())
+    staff = _user("staff1", "mvb_staff")
+    driver = _user("driver1", "mvb_driver")
+    wb = _received_order(client, client_user, staff, box_count="2")
+    oz = _received_order(client, client_user, staff, marketplace="ozon", destination="Хоругвино", box_count="1")
+    other = _received_order(client, client_user, staff, marketplace="wb", destination="Казань", box_count="1")
+
+    trip = _new_trip(client, ("wb", "Коледино"), ("ozon", "Хоругвино"))
+    assert [s.label() for s in trip.stops] == ["Wildberries · Коледино", "Ozon · Хоругвино"]
+    vehicle = _vehicle(10, driver)
+    client.post(f"/mvb/trips/{trip.id}/plan", data={"vehicle_id": str(vehicle.id)})
+    for box in wb.boxes + oz.boxes:
+        assert client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": box.barcode}).get_json()["ok"]
+    # направления нет в маршруте — отказ с подсказкой
+    r = client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": other.boxes[0].barcode})
+    assert r.status_code == 409 and "добавьте точку" in r.get_json()["message"]
+    # точку можно добавить и тогда короб грузится; пустая точка убирается при отправке
+    client.post(f"/mvb/trips/{trip.id}/stops", data={"marketplace": "wb", "destination": "Электросталь"})
+    db.session.refresh(trip)
+    assert len(trip.stops) == 3
+    client.post(f"/mvb/trips/{trip.id}/depart")
+    db.session.refresh(trip)
+    assert len(trip.stops) == 2 and trip.status == "departed"
+
+    first, second = trip.stops
+    _login(client, driver)
+    client.get("/mvb/driver")
+    client.post(f"/mvb/trips/{trip.id}/stops/{first.id}/deliver")
+    db.session.refresh(trip)
+    assert trip.status == "departed"
+    assert {b.status for b in wb.boxes} == {"delivered"} and oz.boxes[0].status == "shipped"
+    client.post(f"/mvb/trips/{trip.id}/stops/{second.id}/deliver")
+    db.session.refresh(trip)
+    assert trip.status == "delivered" and oz.boxes[0].status == "delivered"
+
+
+def test_stop_order_can_be_changed(db, client):
+    _login(client, _user("staff1", "mvb_staff"))
+    trip = _new_trip(client, ("wb", "Коледино"), ("ozon", "Хоругвино"))
+    second = trip.stops[1]
+    client.post(f"/mvb/trips/{trip.id}/stops/{second.id}/up")
+    db.session.refresh(trip)
+    assert trip.stops[0].id == second.id
+
+
+def test_driver_feed_shows_free_space_and_take(db, client):
+    client_user = _user("client1", "mvb_client", _mvb_client())
+    driver = _user("driver1", "mvb_driver")
+    _vehicle(capacity=5, driver=driver)
+    _login(client, client_user)
+    small = _confirmed_order(client, box_count="2")
+    big = _confirmed_order(client, box_count="8")
+
+    _login(client, driver)
+    client.get("/mvb/driver")
+    html = client.get("/mvb/driver").get_data(as_text=True)
+    assert "свободно <b>5</b>" in html
+    assert "✓ помещается" in html and "✗ не помещается" in html
+    assert "новая" in html
+
+    client.post(f"/mvb/driver/orders/{small.id}/take")
+    assert db.session.get(MvbOrder, small.id).driver_id == driver.id
+    for box in small.boxes:
+        data = client.post("/mvb/scan/pickup", data={"barcode": box.barcode}).get_json()
+    assert data["warning"] == "В машине 2 из 5 кор."
+    client.get("/mvb/driver")
+    assert "свободно <b>3</b>" in client.get("/mvb/driver").get_data(as_text=True)
+    assert big.number in html
+
+
+def test_driver_scan_of_free_order_assigns_it(db, client):
+    _login(client, _user("client1", "mvb_client", _mvb_client()))
+    order = _confirmed_order(client)
+    driver = _user("driver1", "mvb_driver")
+    _login(client, driver)
+    client.post("/mvb/scan/pickup", data={"barcode": order.boxes[0].barcode})
+    assert db.session.get(MvbOrder, order.id).driver_id == driver.id
+
+
+def _wms_movement(number="PER-000777", boxes=2, request_number="WB-1"):
+    sender = Warehouse(code=f"S-{number}", name="Основной склад", address="Москва, Складская 5")
+    dest = Warehouse(code=f"D-{number}", name="WB Коледино", marketplace="wb", marketplace_city="Коледино")
+    db.session.add_all([sender, dest])
+    db.session.flush()
+    doc = MovementDocument(
+        number=number, from_warehouse_id=sender.id, to_warehouse_id=dest.id, status="completed",
+        completed_at=datetime.utcnow(),
+        marketplace_request_number=request_number,
+        marketplace_request_created_at=datetime.utcnow() if request_number else None,
+    )
+    db.session.add(doc)
+    db.session.flush()
+    wms_boxes = []
+    for i in range(boxes):
+        box = Box(box_number=f"BOX-{number[-3:]}{i:03d}", warehouse_id=sender.id)
+        db.session.add(box)
+        db.session.flush()
+        db.session.add(MovementLine(document_id=doc.id, box_id=box.id))
+        wms_boxes.append(box)
+    db.session.commit()
+    return doc, wms_boxes
+
+
+def test_wms_movement_import_keeps_wms_barcodes(db, client):
+    _login(client, _user("staff1", "mvb_staff"))
+    doc, wms_boxes = _wms_movement()
+    assert doc.number in client.get("/mvb/wms").get_data(as_text=True)
+
+    client.post(f"/mvb/wms/{doc.id}/import", data={"delivery_method": "self"})
+    order = MvbOrder.query.filter_by(wms_movement_id=doc.id).one()
+    assert order.client.is_internal and order.marketplace == "wb" and order.destination == "Коледино"
+    assert [b.barcode for b in order.boxes] == [b.barcode_value for b in wms_boxes]
+    # повторно не импортируется
+    client.post(f"/mvb/wms/{doc.id}/import")
+    assert MvbOrder.query.filter_by(wms_movement_id=doc.id).count() == 1
+    # скан этикетки WMS (цифры) и ручной ввод номера BOX- находят короб МВБ
+    assert client.post("/mvb/scan/receive", data={"barcode": wms_boxes[0].barcode_value}).get_json()["ok"]
+    assert client.post("/mvb/scan/receive", data={"barcode": wms_boxes[1].box_number}).get_json()["ok"]
+
+
+def test_receive_scan_of_wms_box_auto_imports_movement_and_trip_marks_wms_shipped(db, client):
+    staff = _user("staff1", "mvb_staff")
+    _login(client, staff)
+    doc, wms_boxes = _wms_movement()
+
+    data = client.post("/mvb/scan/receive", data={"barcode": wms_boxes[0].barcode_value}).get_json()
+    assert data["ok"] and doc.number in data["message"]
+    order = MvbOrder.query.filter_by(wms_movement_id=doc.id).one()
+    client.post("/mvb/scan/receive", data={"barcode": wms_boxes[1].barcode_value})
+
+    trip = _trip(client)
+    for box in wms_boxes:
+        assert client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": box.barcode_value}).get_json()["ok"]
+    client.post(f"/mvb/trips/{trip.id}/depart")
+    assert db.session.get(MovementDocument, doc.id).shipped_at is not None
+    assert {b.status for b in order.boxes} == {"shipped"}
+
+
+def test_wms_shipped_not_set_without_marketplace_request_or_partial(db, client):
+    _login(client, _user("staff1", "mvb_staff"))
+    doc, wms_boxes = _wms_movement(request_number=None)
+    client.post(f"/mvb/wms/{doc.id}/import")
+    for box in wms_boxes:
+        client.post("/mvb/scan/receive", data={"barcode": box.barcode_value})
+    trip = _trip(client)
+    for box in wms_boxes:
+        client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": box.barcode_value})
+    client.post(f"/mvb/trips/{trip.id}/depart")
+    assert db.session.get(MovementDocument, doc.id).shipped_at is None
+
+    doc2, boxes2 = _wms_movement(number="PER-000888")
+    client.post(f"/mvb/wms/{doc2.id}/import")
+    for box in boxes2:
+        client.post("/mvb/scan/receive", data={"barcode": box.barcode_value})
+    trip2 = _trip(client)
+    client.post(f"/mvb/trips/{trip2.id}/scan", data={"barcode": boxes2[0].barcode_value})
+    client.post(f"/mvb/trips/{trip2.id}/depart")
+    assert db.session.get(MovementDocument, doc2.id).shipped_at is None  # уехал не весь

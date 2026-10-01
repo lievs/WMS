@@ -14,13 +14,13 @@
 </form>
 <div class="table-responsive">
 <table class="table table-hover align-middle">
-  <thead><tr><th>Рейс</th><th>Направление</th><th>Статус</th><th>Авто / водитель</th><th>Подача (план / факт)</th><th>Погрузка (план / факт)</th><th class="text-end">Коробов</th></tr></thead>
+  <thead><tr><th>Рейс</th><th>Маршрут</th><th>Статус</th><th>Авто / водитель</th><th>Подача (план / факт)</th><th>Погрузка (план / факт)</th><th class="text-end">Коробов</th></tr></thead>
   <tbody>
   {% macro dt(v) %}{{ (v|msk).strftime('%d.%m %H:%M') if v else '—' }}{% endmacro %}
   {% for t in trips %}
     <tr style="cursor:pointer" onclick="location.href='{{ url_for('mvb.trip_detail', trip_id=t.id) }}'">
       <td><a href="{{ url_for('mvb.trip_detail', trip_id=t.id) }}">{{ t.number }}</a></td>
-      <td>{{ t.marketplace_label }}{% if t.destination %} · {{ t.destination }}{% endif %}</td>
+      <td>{{ t.route_label() }}</td>
       <td>{{ t.status_label }}</td>
       <td>{{ t.vehicle.plate if t.vehicle else '—' }}{% if t.driver %} · {{ t.driver.display_name() }}{% endif %}</td>
       <td>{{ dt(t.planned_arrival_at) }} / {{ dt(t.arrived_at) }}</td>

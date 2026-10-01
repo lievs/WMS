@@ -5,42 +5,107 @@
   <h3 class="mb-0">Заявки на забор</h3>
   <a class="btn btn-success btn-lg" href="{{ url_for('mvb.scan', mode='pickup') }}">📷 Сканировать короба</a>
 </div>
+
+{% if vehicle %}
+<div class="card p-3 mb-3 {{ 'border-danger' if free is not none and free <= 0 else 'border-success' }}">
+  <div class="d-flex justify-content-between flex-wrap gap-2">
+    <div><b>{{ vehicle.plate }}</b>{% if vehicle.model %} · {{ vehicle.model }}{% endif %}</div>
+    <div class="fs-5">В машине <b>{{ load }}</b>{% if vehicle.capacity_boxes %} из {{ vehicle.capacity_boxes }} · свободно <b>{{ [free, 0]|max }}</b>{% endif %}</div>
+  </div>
+</div>
+{% elif current_user.role == 'mvb_driver' %}
+<div class="alert alert-warning">За вами не закреплена машина — свободное место не считается. Обратитесь к складу МВБ (раздел «Транспорт»).</div>
+{% endif %}
+
 {% if trips %}
 <h5>Мои рейсы на СЦ</h5>
 {% for t in trips %}
   <div class="card p-3 mb-2 border-success">
-    <div class="d-flex justify-content-between flex-wrap gap-2 align-items-center">
+    <div class="d-flex justify-content-between flex-wrap gap-2 align-items-center mb-2">
       <div>
-        <b>{{ t.number }}</b> · {{ t.marketplace_label }}{% if t.destination %} · {{ t.destination }}{% endif %} · {{ t.status_label }}<br>
+        <b>{{ t.number }}</b> · {{ t.status_label }}<br>
         <span class="text-muted">Подача: {{ (t.planned_arrival_at|msk).strftime('%d.%m %H:%M') if t.planned_arrival_at else 'не назначена' }}{% if t.vehicle %} · {{ t.vehicle.plate }}{% endif %} · коробов: {{ t.boxes|length }}</span>
       </div>
-      <div class="d-flex gap-2">
-        {% if t.status == 'assigned' %}
-        <form method="post" action="{{ url_for('mvb.trip_action', trip_id=t.id, action='arrive') }}"><button class="btn btn-outline-success">Я на месте</button></form>
-        {% elif t.status == 'departed' %}
-        <form method="post" action="{{ url_for('mvb.trip_action', trip_id=t.id, action='deliver') }}" onsubmit="return confirm('Отметить, что груз сдан на СЦ?')"><button class="btn btn-success">Сдано на СЦ</button></form>
-        {% endif %}
-      </div>
+      {% if t.status == 'assigned' %}
+      <form method="post" action="{{ url_for('mvb.trip_action', trip_id=t.id, action='arrive') }}"><button class="btn btn-outline-success">Я на погрузке</button></form>
+      {% endif %}
     </div>
+    <ol class="list-group list-group-numbered">
+      {% for stop in t.stops %}
+      <li class="list-group-item d-flex justify-content-between align-items-center gap-2 flex-wrap">
+        <div class="me-auto">
+          <a target="_blank" href="https://yandex.ru/maps/?text={{ (stop.marketplace_label ~ ' ' ~ (stop.destination or ''))|urlencode }}">📍 {{ stop.label() }}</a>
+          <div class="small text-muted">коробов: {{ stop.boxes|length }}</div>
+        </div>
+        {% if stop.delivered_at %}
+          <span class="text-success">✓ сдано {{ (stop.delivered_at|msk).strftime('%H:%M') }}</span>
+        {% elif t.status == 'departed' %}
+          <form method="post" action="{{ url_for('mvb.trip_stop_action', trip_id=t.id, stop_id=stop.id, action='deliver') }}" onsubmit="return confirm('Сдано на СЦ {{ stop.label() }}?')"><button class="btn btn-success">Сдано на СЦ</button></form>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
   </div>
 {% endfor %}
 <h5 class="mt-4">Забор у клиентов</h5>
 {% endif %}
-{% for o in orders %}
-  {% set c = o.status_counts() %}
-  <div class="card p-3 mb-2">
+
+<div id="newOrdersBanner" class="alert alert-info d-none">Появились новые заявки на забор</div>
+{% for r in rows %}
+  {% set o = r.order %}
+  <div class="card p-3 mb-2 mvb-order {{ 'border-primary' if r.mine else '' }}" data-order-id="{{ o.id }}">
     <div class="d-flex justify-content-between flex-wrap gap-2">
       <div>
-        <b>{{ o.number }}</b>{% if o.driver %} <span class="badge bg-success">{{ o.driver.display_name() }}</span>{% endif %} · {{ o.client.name }}{% if o.client.phone %} · <a href="tel:{{ o.client.phone }}">{{ o.client.phone }}</a>{% endif %}<br>
-        {{ o.pickup_address or '—' }}<br>
+        <b>{{ o.number }}</b>
+        {% if r.mine %}<span class="badge bg-primary">моя</span>{% endif %}
+        {% if r.is_new %}<span class="badge bg-warning text-dark">новая</span>{% endif %}
+        <span class="badge bg-light text-dark mvb-seen-badge d-none">только что</span>
+        · {{ o.client.name }}{% if o.client.phone %} · <a href="tel:{{ o.client.phone }}">{{ o.client.phone }}</a>{% endif %}<br>
+        {% if o.pickup_address %}<a target="_blank" href="https://yandex.ru/maps/?text={{ o.pickup_address|urlencode }}">📍 {{ o.pickup_address }}</a>{% else %}адрес не указан{% endif %}<br>
         <span class="text-muted">{{ o.planned_date.strftime('%d.%m.%Y') if o.planned_date else 'дата не указана' }}{% if o.time_from %} {{ o.time_from }}{% if o.time_to %}–{{ o.time_to }}{% endif %}{% endif %} · {{ o.marketplace_label }}{% if o.destination %} · {{ o.destination }}{% endif %}</span>
       </div>
       <div class="text-end">
-        <div class="fs-5">Забрано {{ o.box_count - c.created }} из {{ o.box_count }}</div>
+        <div class="fs-5">{{ r.remaining }} кор.{% if r.remaining != o.box_count %} <span class="text-muted fs-6">(из {{ o.box_count }})</span>{% endif %}</div>
+        {% if r.fits is true %}<div class="text-success">✓ помещается</div>
+        {% elif r.fits is false %}<div class="text-danger">✗ не помещается</div>{% endif %}
+        {% if current_user.role == 'mvb_driver' and not current_user.is_admin %}
+          {% if r.mine %}
+          <form method="post" action="{{ url_for('mvb.driver_release', order_id=o.id) }}" class="mt-1"><button class="btn btn-sm btn-outline-secondary">Отказаться</button></form>
+          {% else %}
+          <form method="post" action="{{ url_for('mvb.driver_take', order_id=o.id) }}" class="mt-1"><button class="btn {{ 'btn-success' if r.fits is not false else 'btn-outline-success' }}">Заберу</button></form>
+          {% endif %}
+        {% elif o.driver %}
+          <div class="small text-muted">{{ o.driver.display_name() }}</div>
+        {% endif %}
       </div>
     </div>
   </div>
 {% else %}
   <div class="text-muted">Заявок на забор нет.</div>
 {% endfor %}
+<p class="text-muted small mt-3">Список обновляется автоматически раз в минуту.</p>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  // Подсветка заявок, появившихся с прошлого просмотра, + автообновление.
+  const KEY = "mvbDriverLastOrderId";
+  let last = 0;
+  try { last = parseInt(localStorage.getItem(KEY) || "0", 10); } catch (e) {}
+  let fresh = 0;
+  document.querySelectorAll(".mvb-order").forEach((el) => {
+    if (last && parseInt(el.dataset.orderId, 10) > last) {
+      fresh += 1;
+      el.classList.add("border-warning", "border-3");
+      el.querySelector(".mvb-seen-badge").classList.remove("d-none");
+    }
+  });
+  if (fresh) {
+    document.getElementById("newOrdersBanner").classList.remove("d-none");
+    if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+  }
+  try { localStorage.setItem(KEY, String(Math.max(last, {{ max_order_id }}))); } catch (e) {}
+  setInterval(() => { if (!document.hidden) location.reload(); }, 60000);
+})();
+</script>
 {% endblock %}

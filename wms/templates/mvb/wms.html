@@ -1,0 +1,38 @@
+{% extends "mvb/base.html" %}
+{% block title %}Короба из WMS{% endblock %}
+{% block content %}
+<h3 class="mb-1">Свои короба из WMS</h3>
+<p class="text-muted">Собранные перемещения WMS на склады Wildberries и Ozon. «Передать в МВБ» создает заявку с теми же коробами и теми же штрихкодами — этикетки не переклеиваются. Можно и без этой кнопки: при приемке на складе МВБ скан этикетки короба WMS сам передаст его перемещение.</p>
+<div class="table-responsive">
+<table class="table align-middle">
+  <thead><tr><th>Перемещение</th><th>Откуда → куда</th><th class="text-end">Коробов</th><th>Собрано</th><th>Заявка на МП</th><th>МВБ</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    {% set d = r.doc %}
+    <tr>
+      <td>{{ d.number }}</td>
+      <td>{{ d.from_warehouse.name }} → {{ d.to_warehouse.name }}</td>
+      <td class="text-end">{{ r.boxes }}</td>
+      <td>{{ (d.completed_at|msk).strftime('%d.%m %H:%M') if d.completed_at else '' }}</td>
+      <td>{{ d.marketplace_request_number or '—' }}</td>
+      <td>
+        {% if r.order %}
+          <a href="{{ url_for('mvb.order_detail', order_id=r.order.id) }}">{{ r.order.number }}</a> · {{ r.order.progress_label() }}
+        {% else %}
+          <form method="post" action="{{ url_for('mvb.wms_import', doc_id=d.id) }}" class="d-flex gap-1">
+            <select name="delivery_method" class="form-select form-select-sm w-auto">
+              <option value="self">Привезем сами</option>
+              <option value="pickup">Забор водителем</option>
+            </select>
+            <button class="btn btn-sm btn-success text-nowrap">Передать в МВБ</button>
+          </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="text-muted">Нет собранных перемещений на маркетплейсы, ожидающих отправки</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

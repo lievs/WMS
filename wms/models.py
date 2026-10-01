@@ -1607,6 +1607,8 @@ class MvbClient(db.Model):
     phone = db.Column(db.String(50))
     # Адрес забора по умолчанию — подставляется в новую заявку.
     address = db.Column(db.String(500))
+    # Служебный клиент «Свои короба (WMS)» для заявок из перемещений WMS.
+    is_internal = db.Column(db.Boolean, nullable=False, default=False)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
@@ -1638,16 +1640,14 @@ class MvbOrder(db.Model):
     confirmed_at = db.Column(db.DateTime)
     # Водитель, назначенный на забор (для способа "pickup").
     driver_id = db.Column(db.Integer, db.ForeignKey("users.id"))
-    # Пропуск на склад для самопривоза: ссылка /mvb/pass/<token> открывается
-    # без входа (охрана / приемщик), данные водителя заполняет клиент.
-    pass_token = db.Column(db.String(40), unique=True)
-    pass_driver_name = db.Column(db.String(200))
-    pass_car_plate = db.Column(db.String(30))
-    pass_phone = db.Column(db.String(50))
+    # Заявка, созданная из перемещения WMS (свои короба со своими
+    # штрихкодами, без переклейки этикеток).
+    wms_movement_id = db.Column(db.Integer, db.ForeignKey("movement_documents.id"), index=True)
 
     client = db.relationship("MvbClient")
     driver = db.relationship("User", foreign_keys=[driver_id])
     created_by = db.relationship("User", foreign_keys=[created_by_id])
+    wms_movement = db.relationship("MovementDocument")
     boxes = db.relationship(
         "MvbBox", back_populates="order", order_by="MvbBox.seq", cascade="all, delete-orphan"
     )
@@ -1697,10 +1697,16 @@ class MvbBox(db.Model):
     loaded_at = db.Column(db.DateTime)
     shipped_at = db.Column(db.DateTime)
     delivered_at = db.Column(db.DateTime)
+    # Водитель, забравший короб (по нему считается загрузка машины в пути).
+    picked_up_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), index=True)
+    # Короб WMS, если короб пришел из перемещения WMS (штрихкод тот же).
+    wms_box_id = db.Column(db.Integer, db.ForeignKey("boxes.id"), index=True)
     pallet_id = db.Column(db.Integer, db.ForeignKey("mvb_pallets.id"), index=True)
     trip_id = db.Column(db.Integer, db.ForeignKey("mvb_trips.id"), index=True)
+    trip_stop_id = db.Column(db.Integer, db.ForeignKey("mvb_trip_stops.id"), index=True)
 
     order = db.relationship("MvbOrder", back_populates="boxes")
+    trip_stop = db.relationship("MvbTripStop", back_populates="boxes")
     pallet = db.relationship("MvbPallet", back_populates="boxes")
     trip = db.relationship("MvbTrip", back_populates="boxes")
     events = db.relationship(
@@ -1782,22 +1788,22 @@ MVB_TRIP_STATUSES = {
     "assigned": "Авто найдено",
     "arrived": "Авто подано",
     "loading": "Погрузка",
-    "departed": "В пути на СЦ",
-    "delivered": "Сдано на СЦ",
+    "departed": "В пути",
+    "delivered": "Маршрут завершен",
     "cancelled": "Отменен",
 }
 
 
 class MvbTrip(db.Model):
-    """Рейс на СЦ: поиск авто → авто найдено (время подачи) → подано →
-    погрузка (план/факт начала и конца) → в пути → сдано на СЦ."""
+    """Рейс-маршрут по одной или нескольким точкам (СЦ): поиск авто → авто
+    найдено (время подачи) → подано → погрузка (кладовщик сканирует короба,
+    план/факт начала и конца) → в пути → на каждой точке водитель отмечает
+    «Сдано на СЦ» → рейс завершен, когда сданы все точки."""
 
     __tablename__ = "mvb_trips"
 
     id = db.Column(db.Integer, primary_key=True)
     number = db.Column(db.String(30), unique=True, nullable=False)
-    marketplace = db.Column(db.String(10), nullable=False)
-    destination = db.Column(db.String(200))
     planned_boxes = db.Column(db.Integer, nullable=False, default=0)
     status = db.Column(db.String(20), nullable=False, default="searching", index=True)
     vehicle_id = db.Column(db.Integer, db.ForeignKey("mvb_vehicles.id"))
@@ -1817,11 +1823,44 @@ class MvbTrip(db.Model):
     vehicle = db.relationship("MvbVehicle")
     driver = db.relationship("User", foreign_keys=[driver_id])
     boxes = db.relationship("MvbBox", back_populates="trip", order_by="MvbBox.loaded_at")
+    stops = db.relationship(
+        "MvbTripStop", back_populates="trip", order_by="MvbTripStop.seq", cascade="all, delete-orphan"
+    )
+
+    @property
+    def status_label(self):
+        return MVB_TRIP_STATUSES.get(self.status, self.status)
+
+    def route_label(self):
+        return " → ".join(stop.label() for stop in self.stops) or "маршрут не задан"
+
+    def stop_for(self, marketplace, destination):
+        key = (destination or "").strip().lower()
+        for stop in self.stops:
+            if stop.marketplace == marketplace and (stop.destination or "").strip().lower() == key:
+                return stop
+        return None
+
+
+class MvbTripStop(db.Model):
+    """Точка маршрута рейса: СЦ маркетплейса, куда сдаются короба."""
+
+    __tablename__ = "mvb_trip_stops"
+
+    id = db.Column(db.Integer, primary_key=True)
+    trip_id = db.Column(db.Integer, db.ForeignKey("mvb_trips.id"), nullable=False, index=True)
+    seq = db.Column(db.Integer, nullable=False, default=1)
+    marketplace = db.Column(db.String(10), nullable=False)
+    destination = db.Column(db.String(200))
+    delivered_at = db.Column(db.DateTime)
+    delivered_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+
+    trip = db.relationship("MvbTrip", back_populates="stops")
+    boxes = db.relationship("MvbBox", back_populates="trip_stop", order_by="MvbBox.loaded_at")
 
     @property
     def marketplace_label(self):
         return MVB_MARKETPLACES.get(self.marketplace, self.marketplace)
 
-    @property
-    def status_label(self):
-        return MVB_TRIP_STATUSES.get(self.status, self.status)
+    def label(self):
+        return f"{self.marketplace_label} · {self.destination}" if self.destination else self.marketplace_label
