@@ -361,6 +361,24 @@ def order_detail(order_id):
     )
 
 
+@bp.route("/orders/<int:order_id>/slot", methods=["POST"])
+def order_slot(order_id):
+    """Дата слота на СЦ меняется и у оформленной заявки (слот могут
+    перенести), пока короба не отправлены на СЦ."""
+    order = _get_order_or_404(order_id)
+    if order.status == "cancelled" or any(b.status in ("shipped", "delivered") for b in order.boxes):
+        flash("Слот уже не изменить — короба отправлены на СЦ", "warning")
+        return redirect(url_for("mvb.order_detail", order_id=order.id))
+    try:
+        order.slot_date = date.fromisoformat(request.form.get("slot_date", "").strip())
+    except ValueError:
+        flash("Укажите дату слота на СЦ", "danger")
+        return redirect(url_for("mvb.order_detail", order_id=order.id))
+    db.session.commit()
+    flash(f"Слот на СЦ: {order.slot_date.strftime('%d.%m.%Y')}", "success")
+    return redirect(url_for("mvb.order_detail", order_id=order.id))
+
+
 @bp.route("/orders/<int:order_id>/edit", methods=["GET", "POST"])
 def order_edit(order_id):
     order = _get_order_or_404(order_id)

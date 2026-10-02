@@ -834,6 +834,10 @@ def test_slot_date_required_and_separates_trips(db, client):
     assert data["ok"] and "слот заявки 09.10" in data["warning"]
     assert "07.10.2026" in client.get(f"/mvb/t/{trips[0].access_token}").get_data(as_text=True)
 
+    # слот оформленной заявки можно перенести, пока короба не уехали на СЦ
+    client.post(f"/mvb/orders/{late.id}/slot", data={"slot_date": "2026-10-12"})
+    assert db.session.get(MvbOrder, late.id).slot_date.isoformat() == "2026-10-12"
+
 
 def test_order_bigger_than_truck_goes_whole(db, client):
     client_user = _user("client1", "mvb_client", _mvb_client())
