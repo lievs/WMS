@@ -68,6 +68,13 @@ PERIOD_DAYS = 14
 GOOGLE_SYNC_AT_KEY = "google_sheets_last_sync_at"
 GOOGLE_SYNC_ERROR_KEY = "google_sheets_last_error"
 GOOGLE_SYNC_SHEETS_KEY = "google_sheets_last_names"
+# Площадки, для которых на последней синхронизации не нашлось подходящего
+# листа "Распределение" — план этой площадки НЕ обновился (см. чат: раньше
+# это было видно только в одноразовом flash-сообщении, которое легко
+# пропустить — особенно если синхронизация запущена кнопкой из самой
+# Google Таблицы, а не с этой страницы). Персистентно, чтобы было видно
+# при каждом заходе на дашборд, а не только сразу после нажатия кнопки.
+GOOGLE_SYNC_MISSING_KEY = "google_sheets_last_missing_marketplaces"
 GOOGLE_SYNC_TOKEN_KEY = "google_sheets_trigger_token"
 _google_sync_lock = threading.Lock()
 
@@ -400,7 +407,10 @@ def _google_sync_status():
     values = {
         row.key: row.value
         for row in AppSetting.query.filter(
-            AppSetting.key.in_((GOOGLE_SYNC_AT_KEY, GOOGLE_SYNC_ERROR_KEY, GOOGLE_SYNC_SHEETS_KEY))
+            AppSetting.key.in_((
+                GOOGLE_SYNC_AT_KEY, GOOGLE_SYNC_ERROR_KEY, GOOGLE_SYNC_SHEETS_KEY,
+                GOOGLE_SYNC_MISSING_KEY,
+            ))
         ).all()
     }
     return {
@@ -408,6 +418,7 @@ def _google_sync_status():
         "last_sync_at": values.get(GOOGLE_SYNC_AT_KEY),
         "last_error": values.get(GOOGLE_SYNC_ERROR_KEY),
         "sheet_names": values.get(GOOGLE_SYNC_SHEETS_KEY),
+        "missing_marketplaces": values.get(GOOGLE_SYNC_MISSING_KEY),
     }
 
 
@@ -422,6 +433,7 @@ def sync_google_plans_and_movements(uploaded_by_id=None):
     workbook, sheet_names = load_distribution_workbook(current_app)
     summary = []
     found_any = False
+    missing_marketplaces = []
     for marketplace in MARKETPLACES:
         parsed = parse_plan_sheet(workbook, marketplace)
         workbook.seek(0)
@@ -432,11 +444,15 @@ def sync_google_plans_and_movements(uploaded_by_id=None):
             # выглядела так, будто всё обновилось, хотя эта площадка не
             # обновилась совсем (см. чат: "ошибка не ушла и новые позиции
             # не подтягивает"). Теперь явно говорим, что для площадки не
-            # нашлось подходящего листа — план остался как был.
+            # нашлось подходящего листа — план остался как был, и
+            # запоминаем это персистентно (см. GOOGLE_SYNC_MISSING_KEY) —
+            # одноразовое сообщение легко пропустить, особенно если
+            # синхронизация запущена кнопкой из самой Google Таблицы.
             summary.append(
                 f"{MARKETPLACE_LABELS[marketplace]}: лист «Распределение» не найден — "
                 f"план НЕ обновлен, остался прежний"
             )
+            missing_marketplaces.append(MARKETPLACE_LABELS[marketplace])
             continue
         found_any = True
         created, unmatched = _apply_plan(marketplace, parsed, uploaded_by_id=uploaded_by_id)
@@ -451,6 +467,7 @@ def sync_google_plans_and_movements(uploaded_by_id=None):
     db.session.commit()
     exported = write_wms_movement_sheet(current_app)
     updated_cells = write_distribution_facts(current_app, workbook)
+    _set_sync_setting(GOOGLE_SYNC_MISSING_KEY, ", ".join(missing_marketplaces))
     _set_sync_setting(GOOGLE_SYNC_AT_KEY, datetime.now().strftime("%d.%m.%Y %H:%M:%S"))
     _set_sync_setting(GOOGLE_SYNC_ERROR_KEY, "")
     _set_sync_setting(GOOGLE_SYNC_SHEETS_KEY, ", ".join(sheet_names))

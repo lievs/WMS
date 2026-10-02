@@ -330,6 +330,10 @@ def test_sync_reports_missing_sheet_per_marketplace_and_leaves_old_plan(db, monk
     assert ShipmentPlanLine.query.filter_by(plan_id=old_plan.id).count() == 1
     assert ShipmentPlanLine.query.get(old_line.id).barcode == "OLDBARCODE"
 
+    # Персистентная отметка — видна на дашборде при каждом заходе, не
+    # только в одноразовом flash-сообщении этого конкретного запроса.
+    assert sp._google_sync_status()["missing_marketplaces"] == "ОЗОН"
+
 
 def test_google_button_setup_uses_public_https_address(client_logged_in, app):
     app.config["WMS_PUBLIC_URL"] = "https://wms.wmsmeviar.ru"
