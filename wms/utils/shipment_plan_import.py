@@ -128,8 +128,14 @@ def _find_plan_sheets(wb, marketplace):
     return result
 
 
-def _find_header_row(ws, max_scan_rows=40):
-    """Возвращает (row_idx, barcode_col) — строку и колонку с "Баркод"."""
+def _find_header_row(ws, max_scan_rows=150):
+    """Возвращает (row_idx, barcode_col) — строку и колонку с "Баркод".
+
+    150 строк — с запасом: на реальном листе встречались большие блоки
+    расчетных сводок ("Расчетные данные" / "План / факт склада" / "Детали
+    поставок") перед самой таблицей, из-за которых заголовок уезжал на
+    60-ю строку — со старым лимитом (40) лист не распознавался вовсе, и
+    синхронизация для этой площадки тихо пропускала его (см. чат)."""
     max_row = min(ws.max_row, max_scan_rows)
     for r in range(1, max_row + 1):
         for c in range(1, ws.max_column + 1):

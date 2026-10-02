@@ -182,6 +182,25 @@ def test_parse_returns_none_when_only_copy_sheet_matches():
     assert parse_plan_sheet(data, "ozon") is None
 
 
+def test_parse_finds_header_row_deep_below_summary_blocks():
+    """Реальный лист ОЗОН: перед таблицей идут большие блоки сводных
+    расчетов ("Расчетные данные" / "План / факт склада" / "Детали
+    поставок"), из-за которых строка-заголовок оказывается на 60-й строке
+    — со старым лимитом поиска (40 строк) лист не распознавался вовсе, и
+    синхронизация этой площадки тихо пропускала его (см. чат: "новые
+    позиции не подтягивает")."""
+    rows = [[] for _ in range(59)]
+    rows.append(["Артикул", "Размер", "Баркод", "Москва"])
+    rows.append(["A1", "46", "1111", 5])
+    data = _sheet_to_bytes({"Распределение ОЗОН ФБО от 23.09": rows})
+
+    plan = parse_plan_sheet(data, "ozon")
+
+    assert plan is not None
+    assert plan.cities == ["Москва"]
+    assert len(plan.rows) == 1
+
+
 def test_parse_ignores_sheets_of_other_marketplace():
     data = _sheet_to_bytes(
         {
