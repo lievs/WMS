@@ -20,22 +20,12 @@
     {% endfor %}
   {% endwith %}
   <form method="post" class="card p-4">
-    <h6 class="text-muted">Компания</h6>
-    <div class="mb-2"><label class="form-label">Название компании или ИП *</label><input name="name" class="form-control" value="{{ form.name }}" required></div>
-    <div class="mb-2"><label class="form-label">ИНН *</label><input name="inn" class="form-control" value="{{ form.inn }}" inputmode="numeric" required></div>
-    <div class="mb-2"><label class="form-label">Контактное лицо *</label><input name="contact_name" class="form-control" value="{{ form.contact_name }}" required></div>
-    <div class="row g-2 mb-2">
-      <div class="col-sm-6"><label class="form-label">Телефон *</label><input name="phone" type="tel" class="form-control" value="{{ form.phone }}" placeholder="+7" required></div>
-      <div class="col-sm-6"><label class="form-label">E-mail</label><input name="email" type="email" class="form-control" value="{{ form.email }}"></div>
-    </div>
-    <div class="mb-3"><label class="form-label">Адрес забора коробов</label><input name="address" class="form-control" value="{{ form.address }}" placeholder="Можно указать позже в заявке"></div>
-    <h6 class="text-muted">Вход в кабинет</h6>
-    <div class="mb-2"><label class="form-label">Логин *</label><input name="username" class="form-control" value="{{ form.username }}" autocomplete="username" required></div>
-    <div class="row g-2 mb-3">
-      <div class="col-sm-6"><label class="form-label">Пароль *</label><input name="password" type="password" class="form-control" minlength="6" autocomplete="new-password" required></div>
-      <div class="col-sm-6"><label class="form-label">Повторите пароль *</label><input name="password2" type="password" class="form-control" minlength="6" autocomplete="new-password" required></div>
-    </div>
-    <button class="btn btn-success btn-lg w-100">Отправить заявку на регистрацию</button>
+    <div class="mb-2"><label class="form-label">Название компании *</label><input name="name" class="form-control form-control-lg" value="{{ form.name }}" required></div>
+    <div class="mb-2"><label class="form-label">Адрес забора коробов *</label><input name="address" class="form-control form-control-lg" value="{{ form.address }}" required></div>
+    <div class="mb-2"><label class="form-label">Телефон *</label><input name="phone" type="tel" class="form-control form-control-lg" value="{{ form.phone }}" placeholder="+7" required></div>
+    <div class="mb-2"><label class="form-label">Логин *</label><input name="username" class="form-control form-control-lg" value="{{ form.username }}" autocomplete="username" required></div>
+    <div class="mb-3"><label class="form-label">Пароль * <span class="text-muted small">(не короче 6 символов)</span></label><input name="password" type="password" class="form-control form-control-lg" minlength="6" autocomplete="new-password" required></div>
+    <button class="btn btn-success btn-lg w-100">Зарегистрироваться</button>
   </form>
   <div class="text-center mt-3">Уже зарегистрированы? <a href="{{ url_for('mvb.login') }}">Войти</a></div>
 </div>

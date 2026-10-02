@@ -191,25 +191,21 @@ def _client_login_block(user):
 
 @bp.route("/register", methods=["GET", "POST"])
 def register():
-    """Самостоятельная регистрация клиента: компания + логин; клиент ждет
+    """Самостоятельная регистрация клиента (название, адрес забора, телефон,
+    логин, пароль); клиент ждет
     подтверждения оператора (approval=pending), до этого войти нельзя."""
     if current_user.is_authenticated and (current_user.is_admin or current_user.role in MVB_ROLES):
         return redirect(url_for("mvb.index"))
-    form = {k: request.form.get(k, "").strip() for k in (
-        "name", "inn", "contact_name", "phone", "email", "address", "username",
-    )}
+    form = {k: request.form.get(k, "").strip() for k in ("name", "address", "phone", "username")}
     if request.method == "GET":
         return render_template("mvb/register.html", form=form)
 
     password = request.form.get("password", "")
     errors = []
     if not form["name"]:
-        errors.append("Укажите название компании или ИП")
-    inn = "".join(ch for ch in form["inn"] if ch.isdigit())
-    if len(inn) not in (10, 12):
-        errors.append("ИНН — 10 или 12 цифр")
-    if not form["contact_name"]:
-        errors.append("Укажите контактное лицо")
+        errors.append("Укажите название компании")
+    if not form["address"]:
+        errors.append("Укажите адрес забора")
     if sum(ch.isdigit() for ch in form["phone"]) < 10:
         errors.append("Укажите телефон")
     if not form["username"]:
@@ -218,18 +214,13 @@ def register():
         errors.append("Такой логин уже занят")
     if len(password) < 6:
         errors.append("Пароль — не короче 6 символов")
-    elif password != request.form.get("password2", ""):
-        errors.append("Пароли не совпадают")
     if errors:
         for error in errors:
             flash(error, "danger")
         return render_template("mvb/register.html", form=form)
 
-    client = MvbClient(
-        name=form["name"], inn=inn, contact_name=form["contact_name"], phone=form["phone"],
-        email=form["email"] or None, address=form["address"] or None, approval="pending",
-    )
-    user = User(username=form["username"], full_name=form["contact_name"], role="mvb_client", mvb_client=client)
+    client = MvbClient(name=form["name"], phone=form["phone"], address=form["address"], approval="pending")
+    user = User(username=form["username"], full_name=form["name"], role="mvb_client", mvb_client=client)
     user.set_password(password)
     db.session.add_all([client, user])
     db.session.commit()

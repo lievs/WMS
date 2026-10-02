@@ -945,9 +945,8 @@ def test_client_report_for_period(db, client):
 
 def _register(http, **overrides):
     data = {
-        "name": "ИП Новый", "inn": "7701234567", "contact_name": "Анна", "phone": "+7 900 123-45-67",
-        "email": "a@example.com", "address": "Москва, ул. Ленина 1", "username": "newclient",
-        "password": "secret1", "password2": "secret1",
+        "name": "ИП Новый", "address": "Москва, ул. Ленина 1", "phone": "+7 900 123-45-67",
+        "username": "newclient", "password": "secret1",
     }
     data.update(overrides)
     return http.post("/mvb/register", data=data)
@@ -971,7 +970,7 @@ def test_client_self_registration_needs_operator_approval(db, client):
     _login(client, staff)
     client.get("/mvb/registrations")
     page = client.get("/mvb/registrations").get_data(as_text=True)
-    assert "ИП Новый" in page and "7701234567" in page
+    assert "ИП Новый" in page and "+7 900 123-45-67" in page
     assert "Новые клиенты <span" in page
     client.post(f"/mvb/registrations/{new.id}/approve")
     assert db.session.get(MvbClient, new.id).approval == "approved"
@@ -986,9 +985,9 @@ def test_client_self_registration_needs_operator_approval(db, client):
 def test_registration_validation_and_reject(db, client):
     _user("taken", "mvb_client", _mvb_client())
     for overrides, message in [
-        ({"inn": "123"}, "ИНН"),
+        ({"address": ""}, "адрес забора"),
         ({"username": "Taken"}, "логин уже занят"),
-        ({"password2": "other"}, "Пароли не совпадают"),
+        ({"password": "123"}, "не короче 6"),
         ({"phone": "12"}, "телефон"),
     ]:
         html = _register(client, **overrides).get_data(as_text=True)
