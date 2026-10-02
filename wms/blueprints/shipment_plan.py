@@ -426,6 +426,17 @@ def sync_google_plans_and_movements(uploaded_by_id=None):
         parsed = parse_plan_sheet(workbook, marketplace)
         workbook.seek(0)
         if parsed is None:
+            # Раньше молча пропускалось — план этой площадки оставался
+            # нетронутым (старым), а в сообщении о синхронизации по ней не
+            # было вообще ни строки, из-за чего "успешная" синхронизация
+            # выглядела так, будто всё обновилось, хотя эта площадка не
+            # обновилась совсем (см. чат: "ошибка не ушла и новые позиции
+            # не подтягивает"). Теперь явно говорим, что для площадки не
+            # нашлось подходящего листа — план остался как был.
+            summary.append(
+                f"{MARKETPLACE_LABELS[marketplace]}: лист «Распределение» не найден — "
+                f"план НЕ обновлен, остался прежний"
+            )
             continue
         found_any = True
         created, unmatched = _apply_plan(marketplace, parsed, uploaded_by_id=uploaded_by_id)

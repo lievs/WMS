@@ -46,6 +46,9 @@
   <b>Google Таблица:</b> данные обновляются только вручную — кнопкой в таблице или кнопкой выше.
   {% if google_sync.last_sync_at %}Последнее успешное обновление: {{ google_sync.last_sync_at }}.{% endif %}
   {% if google_sync.last_error %}<br>Ошибка: {{ google_sync.last_error }}{% endif %}
+  {% if google_sync.sheet_names %}
+  <br><span class="small text-muted">Листы с «Распределение», найденные в таблице при последней синхронизации: {{ google_sync.sheet_names }}</span>
+  {% endif %}
 </div>
 {% endif %}
 
