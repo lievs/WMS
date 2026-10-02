@@ -140,6 +140,48 @@ def test_parse_merges_multiple_sheets_for_same_marketplace():
     assert len(plan.rows) == 2
 
 
+def test_parse_ignores_accidental_copy_sheets():
+    """"(копия)" — автоматическая пометка Google Таблиц при дублировании
+    листа (кто-то сделал копию проверить что-то и не убрал) — случайный
+    мусор, не отдельная категория. Раньше он подмешивался в план наравне с
+    настоящим листом (см. чат: "данные тянет из несуществующего листа" —
+    сама копия к моменту просмотра дашборда уже удалена, а в сводном
+    названии плана оставался ее след)."""
+    data = _sheet_to_bytes(
+        {
+            "Распределение ОЗОН ФБО от 23.09": [
+                ["Артикул", "Размер", "Баркод", "Москва"],
+                ["A1", "46", "1111", 5],
+            ],
+            "Распределение ОЗОН ФБО от 23.09 (копия)": [
+                ["Артикул", "Размер", "Баркод", "Казань"],
+                ["A2", "48", "2222", 999],
+            ],
+        }
+    )
+
+    plan = parse_plan_sheet(data, "ozon")
+
+    assert plan is not None
+    assert plan.sheet_name == "Распределение ОЗОН ФБО от 23.09"
+    assert set(plan.cities) == {"Москва"}
+    assert len(plan.rows) == 1
+    assert {row["barcode"] for row in plan.rows} == {"1111"}
+
+
+def test_parse_returns_none_when_only_copy_sheet_matches():
+    data = _sheet_to_bytes(
+        {
+            "Распределение ОЗОН ФБО от 23.09 (копия)": [
+                ["Артикул", "Размер", "Баркод", "Москва"],
+                ["A1", "46", "1111", 5],
+            ],
+        }
+    )
+
+    assert parse_plan_sheet(data, "ozon") is None
+
+
 def test_parse_ignores_sheets_of_other_marketplace():
     data = _sheet_to_bytes(
         {
