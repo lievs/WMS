@@ -46,6 +46,7 @@ def _create_order(http, **overrides):
         "delivery_method": "pickup",
         "pickup_address": "Москва, ул. Ленина, 1",
         "planned_date": "2026-10-05",
+        "slot_date": "2026-10-06",
         "time_from": "10:00",
         "time_to": "14:00",
     }
@@ -294,7 +295,7 @@ def test_pages_render(db, client_logged_in):
     rom = _mvb_client()
     client_logged_in.post("/mvb/orders/new", data={
         "client_id": str(rom.id), "marketplace": "ozon", "box_count": "2",
-        "delivery_method": "pickup", "pickup_address": "Москва",
+        "delivery_method": "pickup", "pickup_address": "Москва", "slot_date": "2026-10-07",
     })
     order = MvbOrder.query.one()
     for url in (
@@ -806,6 +807,32 @@ def test_fill_mode_packs_whole_orders(db, client):
     # отмена рейса освобождает заявки
     client.post(f"/mvb/trips/{trips[0].id}/cancel")
     assert db.session.get(MvbOrder, c.id).planned_trip_id is None
+
+
+def test_slot_date_required_and_separates_trips(db, client):
+    """Дата слота на СЦ обязательна; заявки с разными слотами в одну машину
+    не компонуются, ближайший слот — первым."""
+    client_user = _user("client1", "mvb_client", _mvb_client())
+    _login(client, client_user)
+    html = _create_order(client, slot_date="").get_data(as_text=True)
+    assert "Укажите дату слота" in html and MvbOrder.query.count() == 0
+
+    staff = _user("staff1", "mvb_staff")
+    late = _received_order(client, client_user, staff, box_count="2", slot_date="2026-10-09")
+    early = _received_order(client, client_user, staff, box_count="1", slot_date="2026-10-07")
+    assert early.slot_date.isoformat() == "2026-10-07"
+    html = client.get("/mvb/dispatch?capacity=10").get_data(as_text=True)
+    assert html.index("07.10.2026") < html.index("09.10.2026")
+    assert "нужно машин по 10 кор.: <b>2</b>" in html  # 3 кор. влезли бы в одну, но слоты разные
+    client.post("/mvb/trips/new", data={"dir": ["wb|Коледино"], "mode": "fill", "capacity": "10"})
+    trips = MvbTrip.query.order_by(MvbTrip.id).all()
+    assert [(t.slot_date.isoformat(), t.planned_boxes) for t in trips] == [("2026-10-07", 1), ("2026-10-09", 2)]
+
+    # короб с другим слотом грузится с предупреждением
+    client.post(f"/mvb/trips/{trips[0].id}/plan", data={"car_plate": "А1"})
+    data = client.post(f"/mvb/trips/{trips[0].id}/scan", data={"barcode": late.boxes[0].barcode}).get_json()
+    assert data["ok"] and "слот заявки 09.10" in data["warning"]
+    assert "07.10.2026" in client.get(f"/mvb/t/{trips[0].access_token}").get_data(as_text=True)
 
 
 def test_order_bigger_than_truck_goes_whole(db, client):

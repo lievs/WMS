@@ -6,7 +6,7 @@
 <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
   <div>
     <h3 class="mb-1">Рейс {{ trip.number }} <span class="badge bg-success">{{ trip.status_label }}</span></h3>
-    <div class="text-muted">{{ trip.route_label() }} · погружено {{ trip.boxes|length }}{% if trip.planned_boxes %} из {{ trip.planned_boxes }} план.{% endif %}</div>
+    <div class="text-muted">{% if trip.slot_date %}<b class="text-dark">Слот на СЦ: {{ trip.slot_date.strftime('%d.%m.%Y') }}</b> · {% endif %}{{ trip.route_label() }} · погружено {{ trip.boxes|length }}{% if trip.planned_boxes %} из {{ trip.planned_boxes }} план.{% endif %}</div>
   </div>
   {% if mvb_is_staff %}
   <div class="d-flex flex-wrap gap-2">

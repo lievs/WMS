@@ -1648,6 +1648,10 @@ class MvbOrder(db.Model):
     delivery_method = db.Column(db.String(10), nullable=False, default="pickup")
     pickup_address = db.Column(db.String(500))
     planned_date = db.Column(db.Date)
+    # Дата слота поставки на СЦ маркетплейса: к этой дате короба должны
+    # быть сданы; по ней компонуются рейсы (разные слоты в одну машину не
+    # попадают).
+    slot_date = db.Column(db.Date, index=True)
     time_from = db.Column(db.String(5))
     time_to = db.Column(db.String(5))
     comment = db.Column(db.Text)
@@ -1853,6 +1857,8 @@ class MvbTrip(db.Model):
     driver_phone = db.Column(db.String(50))
     car_plate = db.Column(db.String(30))
     capacity_boxes = db.Column(db.Integer)
+    # Дата слота на СЦ, под которую скомпонован рейс.
+    slot_date = db.Column(db.Date)
     access_token = db.Column(db.String(64), unique=True, index=True, default=lambda: secrets.token_urlsafe(16))
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)

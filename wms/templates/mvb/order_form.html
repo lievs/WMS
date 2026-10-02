@@ -43,6 +43,12 @@
       <input name="pickup_address" class="form-control" value="{{ val('pickup_address', default_address or '') }}">
       <div class="form-text">Обязателен для забора транспортной компанией.</div>
     </div>
+    <div class="col-sm-6">
+      <label class="form-label">Дата слота на СЦ *</label>
+      <input name="slot_date" type="date" class="form-control" value="{{ val('slot_date') }}" required>
+      <div class="form-text">Дата поставки, забронированная на складе маркетплейса.</div>
+    </div>
+    <div class="col-12"></div>
     <div class="col-sm-4">
       <label class="form-label">Дата забора / сдачи</label>
       <input name="planned_date" type="date" class="form-control" value="{{ val('planned_date') }}">

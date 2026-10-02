@@ -19,21 +19,22 @@
 </form>
 <div class="table-responsive">
 <table class="table table-hover align-middle">
-  <thead><tr><th>Рейс</th><th>Маршрут</th><th>Статус</th><th>Авто / водитель</th><th>Подача (план / факт)</th><th>Погрузка (план / факт)</th><th class="text-end">Коробов</th></tr></thead>
+  <thead><tr><th>Рейс</th><th>Слот</th><th>Маршрут</th><th>Статус</th><th>Авто / водитель</th><th>Подача (план / факт)</th><th>Погрузка (план / факт)</th><th class="text-end">Коробов</th></tr></thead>
   <tbody>
   {% macro dt(v) %}{{ (v|msk).strftime('%d.%m %H:%M') if v else '—' }}{% endmacro %}
   {% for t in trips %}
     <tr style="cursor:pointer" onclick="location.href='{{ url_for('mvb.trip_detail', trip_id=t.id) }}'">
       <td><a href="{{ url_for('mvb.trip_detail', trip_id=t.id) }}">{{ t.number }}</a></td>
+      <td class="text-nowrap">{{ t.slot_date.strftime('%d.%m.%Y') if t.slot_date else '—' }}</td>
       <td>{{ t.route_label() }}</td>
       <td>{{ t.status_label }}</td>
-      <td>{{ t.vehicle.plate if t.vehicle else '—' }}{% if t.driver %} · {{ t.driver.display_name() }}{% endif %}</td>
+      <td>{{ t.transport_label() or '—' }}{% if t.driver_label() %} · {{ t.driver_label() }}{% endif %}</td>
       <td>{{ dt(t.planned_arrival_at) }} / {{ dt(t.arrived_at) }}</td>
       <td>{{ dt(t.planned_load_start_at) }}–{{ dt(t.planned_load_end_at) }} / {{ dt(t.load_started_at) }}–{{ dt(t.load_finished_at) }}</td>
       <td class="text-end">{{ t.boxes|length }}{% if t.planned_boxes %} / {{ t.planned_boxes }}{% endif %}</td>
     </tr>
   {% else %}
-    <tr><td colspan="7" class="text-muted">Рейсов нет</td></tr>
+    <tr><td colspan="8" class="text-muted">Рейсов нет</td></tr>
   {% endfor %}
   </tbody>
 </table>

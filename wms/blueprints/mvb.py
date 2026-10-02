@@ -301,6 +301,10 @@ def _fill_order_from_form(order):
             planned_date = date.fromisoformat(raw_date)
         except ValueError:
             return "Некорректная дата"
+    try:
+        slot_date = date.fromisoformat(request.form.get("slot_date", "").strip())
+    except ValueError:
+        return "Укажите дату слота на СЦ"
     pickup_address = request.form.get("pickup_address", "").strip()
     if delivery_method == "pickup" and not pickup_address:
         return "Для забора укажите адрес"
@@ -311,6 +315,7 @@ def _fill_order_from_form(order):
     order.destination = request.form.get("destination", "").strip() or None
     order.pickup_address = pickup_address or None
     order.planned_date = planned_date
+    order.slot_date = slot_date
     order.time_from = _parse_time(request.form.get("time_from"))
     order.time_to = _parse_time(request.form.get("time_to"))
     order.comment = request.form.get("comment", "").strip() or None
@@ -986,14 +991,31 @@ def _direction_key(marketplace, destination):
     return f"{marketplace}|{(destination or '').strip()}"
 
 
+def _group_key(order):
+    """Группа отгрузки: направление (маркетплейс + СЦ) + дата слота."""
+    slot = order.slot_date.isoformat() if order.slot_date else ""
+    return f"{_direction_key(order.marketplace, order.destination)}|{slot}"
+
+
+def _selected_match(selected, order):
+    """Отмечена ли группа заявки: по полному ключу или по направлению целиком
+    (все слоты)."""
+    return _group_key(order) in selected or _direction_key(order.marketplace, order.destination) in selected
+
+
+def _slot_sort(slot_date):
+    return slot_date or date.max
+
+
 def _ready_groups():
-    """Принятые и еще не погруженные короба по направлениям (маркетплейс +
-    СЦ), самые давние сверху (FIFO)."""
+    """Принятые и еще не погруженные короба по направлениям и датам слота;
+    сверху ближайшие слоты, внутри — самые давние (FIFO)."""
     groups = {}
     for box in _ready_boxes_query().all():
-        key = _direction_key(box.order.marketplace, box.order.destination)
+        key = _group_key(box.order)
         group = groups.setdefault(key, {
-            "key": key, "marketplace": box.order.marketplace,
+            "key": key, "direction": _direction_key(box.order.marketplace, box.order.destination),
+            "marketplace": box.order.marketplace, "slot_date": box.order.slot_date,
             "destination": (box.order.destination or "").strip(), "boxes": 0,
             "oldest": box.received_at, "pallets": set(), "clients": set(),
         })
@@ -1001,7 +1023,7 @@ def _ready_groups():
         group["clients"].add(box.order.client.name)
         if box.pallet_id:
             group["pallets"].add(box.pallet.number)
-    return sorted(groups.values(), key=lambda g: g["oldest"])
+    return sorted(groups.values(), key=lambda g: (_slot_sort(g["slot_date"]), g["oldest"]))
 
 
 def _ready_order_items(selected=None):
@@ -1010,29 +1032,34 @@ def _ready_order_items(selected=None):
     самые давние направления, внутри — самые давние заявки."""
     items = {}
     for box in _ready_boxes_query().all():
-        key = _direction_key(box.order.marketplace, box.order.destination)
-        if selected is not None and key not in selected:
+        if selected is not None and not _selected_match(selected, box.order):
             continue
+        key = _group_key(box.order)
         item = items.setdefault(box.order_id, {
-            "order": box.order, "key": key, "marketplace": box.order.marketplace,
+            "order": box.order, "key": key, "slot_date": box.order.slot_date, "marketplace": box.order.marketplace,
             "destination": (box.order.destination or "").strip(), "boxes": 0, "oldest": box.received_at,
         })
         item["boxes"] += 1
     group_oldest = {}
     for item in items.values():
         group_oldest[item["key"]] = min(group_oldest.get(item["key"], item["oldest"]), item["oldest"])
-    return sorted(items.values(), key=lambda i: (group_oldest[i["key"]], i["key"], i["oldest"]))
+    return sorted(
+        items.values(), key=lambda i: (_slot_sort(i["slot_date"]), group_oldest[i["key"]], i["key"], i["oldest"])
+    )
 
 
 def _pack_orders(items, capacity):
     """Компоновка рейсов без разбиения заявок: каждая заявка целиком идет в
-    первую машину, где хватает места, иначе — в новую. Заявка больше
-    вместимости едет отдельной машиной (сверх вместимости)."""
+    первую машину с тем же слотом, где хватает места, иначе — в новую.
+    Заявка больше вместимости едет отдельной машиной (сверх вместимости)."""
     bins = []
     for item in items:
-        target = next((b for b in bins if b["boxes"] + item["boxes"] <= capacity), None)
+        target = next((
+            b for b in bins
+            if b["slot_date"] == item["slot_date"] and b["boxes"] + item["boxes"] <= capacity
+        ), None)
         if target is None:
-            target = {"items": [], "boxes": 0}
+            target = {"items": [], "boxes": 0, "slot_date": item["slot_date"]}
             bins.append(target)
         target["items"].append(item)
         target["boxes"] += item["boxes"]
@@ -1062,7 +1089,7 @@ def dispatch():
             open_trips.setdefault(_direction_key(stop.marketplace, stop.destination), []).append(trip)
     items = _ready_order_items()
     for row in rows:
-        row["trips"] = open_trips.get(row["key"], [])
+        row["trips"] = open_trips.get(row["direction"], [])
         row["orders"] = [i for i in items if i["key"] == row["key"]]
         row["vehicles"] = len(_pack_orders(row["orders"], capacity)) if capacity else None
     total = sum(r["boxes"] for r in rows)
@@ -1112,12 +1139,13 @@ def trip_new():
     if not _require_staff():
         return redirect(url_for("mvb.index"))
     selected = set(request.form.getlist("dir"))
-    groups = [g for g in _ready_groups() if g["key"] in selected]
+    groups = [g for g in _ready_groups() if g["key"] in selected or g["direction"] in selected]
     # Направление, для которого коробов уже нет (успели погрузить), все
     # равно можно добавить точкой — без плана.
-    known = {g["key"] for g in groups}
+    known = {g["key"] for g in groups} | {g["direction"] for g in groups}
     for key in selected - known:
-        marketplace, _, destination = key.partition("|")
+        marketplace, _, rest = key.partition("|")
+        destination = rest.split("|")[0]
         if marketplace in MVB_MARKETPLACES:
             groups.append({"key": key, "marketplace": marketplace, "destination": destination, "boxes": 0})
     if not groups:
@@ -1149,12 +1177,17 @@ def trip_new():
     if mode == "fill" and capacity > 0:
         for bin_ in _pack_orders(items, capacity):
             trip = new_trip()
+            trip.slot_date = bin_["slot_date"]
             for item in bin_["items"]:
                 plan(trip, item)
                 if item["boxes"] > capacity:
                     oversized.append(item["order"].number)
     else:
         trip = new_trip()
+        slots = {item["slot_date"] for item in items}
+        trip.slot_date = slots.pop() if len(slots) == 1 else None
+        if len(slots) > 0:
+            flash("В рейсе заявки с разными датами слота — проверьте, успеете ли сдать все", "warning")
         for item in items:
             plan(trip, item)
     # Направления без коробов — точкой в первый рейс, без плана.
@@ -1189,7 +1222,10 @@ def trip_detail(trip_id):
     trip = _get_trip_or_404(trip_id)
     ready = {}
     if _is_staff():
-        groups = {g["key"]: g["boxes"] for g in _ready_groups()}
+        groups = {}
+        for g in _ready_groups():
+            if trip.slot_date is None or g["slot_date"] in (None, trip.slot_date):
+                groups[g["direction"]] = groups.get(g["direction"], 0) + g["boxes"]
         ready = {stop.id: groups.get(_direction_key(stop.marketplace, stop.destination), 0) for stop in trip.stops}
     if _is_staff() and not trip.access_token:
         trip.access_token = secrets.token_urlsafe(16)
@@ -1427,6 +1463,8 @@ def trip_scan(trip_id):
         warnings.append(f"{count} кор. больше вместимости авто ({capacity})")
     if stop.planned_boxes and len(stop.boxes) > stop.planned_boxes:
         warnings.append(f"на точку «{stop.label()}» по плану {stop.planned_boxes} кор., погружено {len(stop.boxes)}")
+    if trip.slot_date and order.slot_date and order.slot_date != trip.slot_date:
+        warnings.append(f"слот заявки {order.slot_date.strftime('%d.%m')}, а рейса {trip.slot_date.strftime('%d.%m')}")
     if order.planned_trip_id and order.planned_trip_id != trip.id:
         warnings.append(f"заявка {order.number} запланирована в рейс {order.planned_trip.number}")
     warning = ("Внимание: " + "; ".join(warnings)) if warnings else None

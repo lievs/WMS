@@ -41,6 +41,7 @@
       <div><b>Куда:</b> {{ order.marketplace_label }}{% if order.destination %} · {{ order.destination }}{% endif %}</div>
       <div><b>Способ:</b> {{ order.delivery_label }}</div>
       {% if order.pickup_address %}<div><b>Адрес забора:</b> {{ order.pickup_address }}</div>{% endif %}
+      <div><b>Слот на СЦ:</b> {{ order.slot_date.strftime('%d.%m.%Y') if order.slot_date else '—' }}</div>
       <div><b>Дата / время:</b> {{ order.planned_date.strftime('%d.%m.%Y') if order.planned_date else '—' }}{% if order.time_from %} {{ order.time_from }}{% if order.time_to %}–{{ order.time_to }}{% endif %}{% endif %}</div>
       <div><b>Коробов:</b> {{ order.box_count }}</div>
       {% if order.status == 'confirmed' and not order.client.is_internal %}
