@@ -870,7 +870,7 @@ def test_sc_driver_link_without_login(db, client):
     assert trip.status == "assigned" and trip.capacity() == 10
     detail = client.get(f"/mvb/trips/{trip.id}").get_data(as_text=True)
     link = f"/mvb/t/{trip.access_token}"
-    assert link in detail and "wa.me" in detail
+    assert link in detail and "wa.me" not in detail
 
     client.post("/mvb/logout")
     assert client.get("/mvb/t/wrong-token").status_code == 404
@@ -1157,11 +1157,11 @@ def test_menu_by_role(db, client):
         "seller": (seller, ["Мои заявки"], ["Заявки в работе", "Приемка", "Скан забора", "Настройки"]),
         "driver": (_user("driver", "mvb_driver"), ["Заявки на забор", "Скан забора"], ["Заявки в работе", "Приемка", "Паллеты"]),
         "operator": (_user("operator", "mvb_staff"), ["Заявки в работе", "Клиенты", "Настройки", "Прайс", "Транспорт", "Пользователи", "Рейсы"], ["Приемка", "Скан забора", "Заявки на забор", "Паллеты"]),
-        "keeper": (_user("keeper", "mvb_storekeeper"), ["Приемка", "Паллеты", "Рейсы"], ["Заявки в работе", "Скан забора", "Настройки", "Клиенты"]),
+        "keeper": (_user("keeper", "mvb_storekeeper"), ["Приемка", "Паллеты", "Погрузка"], ["Заявки в работе", "Скан забора", "Настройки", "Клиенты", "Рейсы"]),
     }
     for name, (user, visible, hidden) in roles.items():
         _login(client, user)
-        page = client.get("/mvb/trips" if name in ("operator", "keeper") else "/mvb/").get_data(as_text=True)
+        page = client.get({"operator": "/mvb/trips", "keeper": "/mvb/pallets"}.get(name, "/mvb/")).get_data(as_text=True)
         if name in ("seller", "driver"):
             page = client.get(client.get("/mvb/").headers["Location"]).get_data(as_text=True)
         nav = page.split("</nav>")[0]
@@ -1388,3 +1388,42 @@ def test_pallet_page_lists_direction_boxes_and_highlights_scanned(db, client):
     assert f'data-barcode="{order.boxes[0].barcode}" class="table-success"' in page
     assert f'data-barcode="{order.boxes[1].barcode}" class=""' in page
     assert other.boxes[0].barcode not in page  # другое направление не показываем
+
+
+def test_operator_assigns_car_and_storekeeper_loads_by_plate(db, client):
+    """Оператор вносит авто (госномер, модель, ФИО, телефон, план) и жмет
+    «Назначить на рейс»; кладовщик выбирает авто по госномеру, «Начать
+    погрузку», сканирует паллету, «Завершить погрузку»."""
+    admin = _user("staff1", "mvb_admin")
+    order = _received_order(client, _user("c1", "mvb_client", _mvb_client()), admin, box_count="2")
+    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    pallet = MvbPallet.query.one()
+    for box in order.boxes:
+        client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
+
+    _login(client, _user("operator", "mvb_staff"))
+    trip = _new_trip(client, ("wb", "Коледино"))
+    page = client.get(f"/mvb/trips/{trip.id}").get_data(as_text=True)
+    assert "Назначить на рейс" in page and "WhatsApp" not in page and "Telegram" not in page
+    client.post(f"/mvb/trips/{trip.id}/plan", data={
+        "car_plate": "в123ор77", "car_model": "ГАЗель Next", "driver_name": "Иванов И.", "driver_phone": "+79990001122",
+        "planned_arrival_at": "2026-10-06T08:00", "planned_load_start_at": "2026-10-06T08:30",
+        "planned_load_end_at": "2026-10-06T09:00",
+    })
+    db.session.refresh(trip)
+    assert trip.status == "assigned" and trip.transport_label() == "В123ОР77 · ГАЗель Next"
+
+    _login(client, _user("keeper", "mvb_storekeeper"))
+    page = client.get("/mvb/loading").get_data(as_text=True)
+    assert "В123ОР77" in page and "Начать погрузку" in page
+    response = client.post("/mvb/loading", data={"trip_id": str(trip.id)})
+    assert response.headers["Location"].endswith(f"/mvb/loading/{trip.id}")
+    db.session.refresh(trip)
+    assert trip.status == "loading" and trip.load_started_at is not None
+    data = client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": pallet.number}).get_json()
+    assert data["ok"] and data["loaded"] == 2
+    assert "Завершить погрузку" in client.get(f"/mvb/loading/{trip.id}").get_data(as_text=True)
+    response = client.post(f"/mvb/trips/{trip.id}/depart", data={"back": "loading"})
+    assert response.headers["Location"].endswith("/mvb/loading")
+    db.session.refresh(trip)
+    assert trip.status == "departed" and {b.status for b in order.boxes} == {"shipped"}

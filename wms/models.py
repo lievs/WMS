@@ -1941,6 +1941,7 @@ class MvbTrip(db.Model):
     driver_name = db.Column(db.String(200))
     driver_phone = db.Column(db.String(50))
     car_plate = db.Column(db.String(30))
+    car_model = db.Column(db.String(100))
     capacity_boxes = db.Column(db.Integer)
     # Дата слота на СЦ, под которую скомпонован рейс.
     slot_date = db.Column(db.Date)
@@ -1969,9 +1970,9 @@ class MvbTrip(db.Model):
         return bool(self.vehicle is not None or self.car_plate)
 
     def transport_label(self):
-        if self.vehicle:
+        if self.vehicle and not self.car_plate:
             return self.vehicle.title()
-        return self.car_plate or ""
+        return " · ".join(x for x in (self.car_plate, self.car_model) if x)
 
     def capacity(self):
         return self.capacity_boxes or (self.vehicle.capacity_boxes if self.vehicle else 0) or 0

@@ -86,30 +86,16 @@
       <h6>Авто и водитель</h6>
       {% if mvb_is_operator and trip.status not in ('departed', 'delivered', 'cancelled') %}
       <form method="post" action="{{ url_for('mvb.trip_plan', trip_id=trip.id) }}" class="row g-2">
-        <div class="col-12 small text-muted">Наемный водитель (без регистрации) — достаточно госномера; водителю отправьте ссылку ниже.</div>
-        <div class="col-md-3"><label class="form-label small">Госномер</label><input name="car_plate" class="form-control" value="{{ trip.car_plate or '' }}" placeholder="А123ВС77"></div>
-        <div class="col-md-3"><label class="form-label small">Вместимость, кор.</label><input type="number" min="1" name="capacity_boxes" class="form-control" value="{{ trip.capacity_boxes or '' }}"></div>
+        <div class="col-md-3"><label class="form-label small">Госномер *</label><input name="car_plate" class="form-control" value="{{ trip.car_plate or '' }}" placeholder="А123ВС77" required></div>
+        <div class="col-md-3"><label class="form-label small">Модель авто</label><input name="car_model" class="form-control" value="{{ trip.car_model or '' }}" placeholder="ГАЗель Next"></div>
         <div class="col-md-3"><label class="form-label small">ФИО водителя</label><input name="driver_name" class="form-control" value="{{ trip.driver_name or '' }}"></div>
         <div class="col-md-3"><label class="form-label small">Телефон</label><input name="driver_phone" class="form-control" value="{{ trip.driver_phone or '' }}" placeholder="+7"></div>
-        <div class="col-md-6">
-          <label class="form-label small">Или авто из справочника</label>
-          <select name="vehicle_id" class="form-select">
-            <option value="">— нет —</option>
-            {% for v in vehicles %}<option value="{{ v.id }}" {{ 'selected' if trip.vehicle_id == v.id }}>{{ v.title() }}{% if v.driver %} · {{ v.driver.display_name() }}{% endif %}</option>{% endfor %}
-          </select>
-        </div>
-        <div class="col-md-6">
-          <label class="form-label small">Свой водитель (по умолчанию — закрепленный за авто)</label>
-          <select name="driver_id" class="form-select">
-            <option value="">—</option>
-            {% for d in drivers %}<option value="{{ d.id }}" {{ 'selected' if trip.driver_id == d.id }}>{{ d.display_name() }}</option>{% endfor %}
-          </select>
-        </div>
         <div class="col-md-4"><label class="form-label small">Подача (план)</label><input type="datetime-local" name="planned_arrival_at" class="form-control" value="{{ dtl(trip.planned_arrival_at) }}"></div>
         <div class="col-md-4"><label class="form-label small">Начало погрузки (план)</label><input type="datetime-local" name="planned_load_start_at" class="form-control" value="{{ dtl(trip.planned_load_start_at) }}"></div>
         <div class="col-md-4"><label class="form-label small">Конец погрузки (план)</label><input type="datetime-local" name="planned_load_end_at" class="form-control" value="{{ dtl(trip.planned_load_end_at) }}"></div>
-        <div class="col-12"><input name="comment" class="form-control" placeholder="Комментарий" value="{{ trip.comment or '' }}"></div>
-        <div class="col-12"><button class="btn btn-outline-success">Сохранить план</button></div>
+        {% if trip.driver_id %}<input type="hidden" name="driver_id" value="{{ trip.driver_id }}">{% endif %}
+        {% if trip.capacity_boxes %}<input type="hidden" name="capacity_boxes" value="{{ trip.capacity_boxes }}">{% endif %}
+        <div class="col-12"><button class="btn btn-success">Назначить на рейс</button></div>
       </form>
       {% else %}
         <div>{{ trip.transport_label() or '—' }}{% if trip.capacity() %} · {{ trip.capacity() }} кор.{% endif %}</div>
@@ -118,16 +104,10 @@
       {% endif %}
       {% if driver_link and trip.status not in ('delivered', 'cancelled') %}
       <hr>
-      <label class="form-label small mb-1">Ссылка для водителя: подача и «Сдано / Не сдано» на каждой точке, без входа</label>
+      <label class="form-label small mb-1">Ссылка для водителя (без входа): маршрут и «Сдан / Не сдан» по заявкам</label>
       <div class="input-group">
         <input id="driverLink" class="form-control" readonly value="{{ driver_link }}">
         <button class="btn btn-outline-secondary" type="button" onclick="navigator.clipboard.writeText(document.getElementById('driverLink').value); this.textContent='Скопировано'">Копировать</button>
-      </div>
-      {% set share_text = 'Рейс ' ~ trip.number ~ ' МВБ Логистика: ' ~ driver_link %}
-      <div class="d-flex flex-wrap gap-2 mt-2">
-        <a class="btn btn-sm btn-success" target="_blank" href="https://wa.me/{{ (trip.driver_phone or '')|replace('+', '')|replace(' ', '')|replace('-', '') }}?text={{ share_text|urlencode }}">WhatsApp</a>
-        <a class="btn btn-sm btn-primary" target="_blank" href="https://t.me/share/url?url={{ driver_link|urlencode }}&text={{ ('Рейс ' ~ trip.number)|urlencode }}">Telegram</a>
-        {% if trip.driver_phone %}<a class="btn btn-sm btn-outline-secondary" href="sms:{{ trip.driver_phone }}?body={{ share_text|urlencode }}">SMS</a>{% endif %}
       </div>
       {% endif %}
     </div>

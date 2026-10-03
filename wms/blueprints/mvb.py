@@ -1645,6 +1645,7 @@ def trip_plan(trip_id):
     trip.driver_name = request.form.get("driver_name", "").strip() or None
     trip.driver_phone = request.form.get("driver_phone", "").strip() or None
     trip.car_plate = request.form.get("car_plate", "").strip().upper() or None
+    trip.car_model = request.form.get("car_model", "").strip() or None
     trip.capacity_boxes = request.form.get("capacity_boxes", type=int) or None
     if not trip.access_token:
         trip.access_token = secrets.token_urlsafe(16)
@@ -1653,7 +1654,10 @@ def trip_plan(trip_id):
     if not trip.has_transport() and trip.status == "assigned":
         trip.status = "searching"
     db.session.commit()
-    flash("План рейса сохранен", "success")
+    if trip.has_transport():
+        flash(f"Авто {trip.transport_label()} назначено на рейс {trip.number} — отправьте водителю ссылку", "success")
+    else:
+        flash("Укажите госномер авто", "warning")
     return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
 
 
@@ -1677,6 +1681,8 @@ def trip_action(trip_id, action):
     elif action == "depart" and trip.status in ("assigned", "arrived", "loading"):
         if not trip.boxes:
             flash("В рейсе нет погруженных коробов", "danger")
+            if request.form.get("back") == "loading":
+                return redirect(url_for("mvb.loading_trip", trip_id=trip.id))
             return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
         trip.status = "departed"
         trip.load_finished_at = now
@@ -1704,9 +1710,14 @@ def trip_action(trip_id, action):
         flash("Это действие сейчас недоступно", "warning")
         return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
     db.session.commit()
-    flash(f"Рейс {trip.number}: {trip.status_label}", "success")
+    if action == "depart":
+        flash(f"Погрузка завершена: рейс {trip.number} ({trip.transport_label()}) в пути, коробов {len(trip.boxes)}", "success")
+    else:
+        flash(f"Рейс {trip.number}: {trip.status_label}", "success")
     if _is_driver():
         return redirect(url_for("mvb.driver"))
+    if request.form.get("back") == "loading":
+        return redirect(url_for("mvb.loading"))
     return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
 
 
@@ -1771,7 +1782,7 @@ def trip_scan(trip_id):
     if line.planned_trip_id and line.planned_trip_id != trip.id:
         warnings.append(f"заявка {order.number} ({line.short_label()}) запланирована в рейс {line.planned_trip.number}")
     warning = ("Внимание: " + "; ".join(warnings)) if warnings else None
-    return jsonify(ok=True, already=False, message=message, count=count, warning=warning)
+    return jsonify(ok=True, already=False, message=message, count=count, warning=warning, loaded=len(trip.boxes))
 
 
 # ---------- ссылка для водителя на СЦ (без входа) ----------
@@ -1779,6 +1790,46 @@ def trip_scan(trip_id):
 # На СЦ чаще всего едут случайные (наемные) водители — их не регистрируем:
 # оператор вносит ФИО/телефон/госномер в рейс и отправляет водителю ссылку
 # /mvb/t/<токен рейса>, где тот отмечает подачу и итог на каждой точке.
+
+
+LOADING_STATUSES = ("assigned", "arrived", "loading")
+
+
+@bp.route("/loading", methods=["GET", "POST"])
+def loading():
+    """Погрузка для кладовщика: выбрать авто по госномеру → «Начать
+    погрузку» → скан паллет и коробов → «Завершить погрузку»."""
+    if not _require_staff():
+        return redirect(url_for("mvb.index"))
+    if request.method == "POST":
+        trip = db.session.get(MvbTrip, request.form.get("trip_id", type=int))
+        if trip is None or trip.status not in LOADING_STATUSES:
+            flash("Выберите авто из списка", "danger")
+            return redirect(url_for("mvb.loading"))
+        if trip.status != "loading":
+            now = datetime.utcnow()
+            trip.status = "loading"
+            trip.arrived_at = trip.arrived_at or now
+            trip.load_started_at = now
+            db.session.commit()
+        return redirect(url_for("mvb.loading_trip", trip_id=trip.id))
+    trips = (
+        MvbTrip.query.filter(MvbTrip.status.in_(LOADING_STATUSES))
+        .order_by(MvbTrip.planned_load_start_at.is_(None), MvbTrip.planned_load_start_at, MvbTrip.id)
+        .all()
+    )
+    return render_template("mvb/loading.html", trips=trips)
+
+
+@bp.route("/loading/<int:trip_id>")
+def loading_trip(trip_id):
+    if not _require_staff():
+        return redirect(url_for("mvb.index"))
+    trip = _get_trip_or_404(trip_id)
+    if trip.status not in LOADING_STATUSES:
+        flash(f"Рейс {trip.number}: {trip.status_label}", "info")
+        return redirect(url_for("mvb.loading"))
+    return render_template("mvb/loading_trip.html", trip=trip)
 
 
 def _trip_by_token_or_404(token):
