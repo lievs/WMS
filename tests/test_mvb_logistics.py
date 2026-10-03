@@ -1039,3 +1039,8 @@ def test_registration_validation_and_reject(db, client):
     _login(client, other)
     client.post(f"/mvb/registrations/{new.id}/approve")
     assert db.session.get(MvbClient, new.id).approval == "rejected"
+
+
+def test_wms_home_has_mvb_button_for_admin(db, client_logged_in):
+    html = client_logged_in.get("/").get_data(as_text=True)
+    assert "МВБ Логистика" in html and 'href="/mvb/"' in html
