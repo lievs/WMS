@@ -20,6 +20,11 @@
         <button class="btn btn-outline-danger">Отменить</button>
       </form>
     {% endif %}
+    {% if mvb_can_manage %}
+      <form method="post" action="{{ url_for('mvb.order_delete', order_id=order.id) }}" onsubmit="return confirm('Удалить заявку {{ order.number }} совсем? Короба и их история удалятся без возможности восстановления.')">
+        <button class="btn btn-danger">🗑 Удалить</button>
+      </form>
+    {% endif %}
   </div>
 </div>
 

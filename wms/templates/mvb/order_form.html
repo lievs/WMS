@@ -40,29 +40,33 @@
     <div class="direction-row border rounded p-2 mb-2" data-n="{{ n + 1 }}">
       <div class="small fw-bold mb-1">Направление {{ n + 1 }}</div>
       <div class="row g-2">
-        <div class="col-12 col-md-3">
+        <div class="col-12 col-md-4">
           <label class="form-label small mb-0">Куда</label>
-          <select name="line_marketplace" class="form-select">
+          <select name="line_marketplace" class="form-select js-mp">
             {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}" {{ 'selected' if (r.mp or 'wb') == code }}>{{ label }}</option>{% endfor %}
           </select>
         </div>
+        {% if mvb_destinations %}
         <div class="col-12 col-md-4">
-          <label class="form-label small mb-0">Город (СЦ) *</label>
-          {% if mvb_cities %}
-          <select name="line_destination" class="form-select" required>
-            <option value="">— выберите —</option>
-            {% for name in mvb_cities %}<option value="{{ name }}" {{ 'selected' if (r.dest or '')|lower == name|lower }}>{{ name }}</option>{% endfor %}
-            {% if r.dest and r.dest|lower not in mvb_cities|map('lower')|list %}<option value="{{ r.dest }}" selected>{{ r.dest }}</option>{% endif %}
-          </select>
-          {% else %}
-          <input name="line_destination" class="form-control" value="{{ r.dest or '' }}" placeholder="например, Коледино" required>
-          {% endif %}
+          <label class="form-label small mb-0">Город *</label>
+          <select class="form-select js-city" required></select>
         </div>
-        <div class="col-7 col-md-3">
+        <div class="col-12 col-md-4 js-ff-wrap">
+          <label class="form-label small mb-0">Фулфилмент *</label>
+          <select class="form-select js-ff"></select>
+        </div>
+        <input type="hidden" name="line_destination" class="js-dest" value="{{ r.dest or '' }}" data-initial="{{ r.dest or '' }}">
+        {% else %}
+        <div class="col-12 col-md-4">
+          <label class="form-label small mb-0">Город (СЦ) / фулфилмент *</label>
+          <input name="line_destination" class="form-control" value="{{ r.dest or '' }}" placeholder="например, Коледино" required>
+        </div>
+        {% endif %}
+        <div class="col-7 col-md-6">
           <label class="form-label small mb-0">Дата слота *</label>
           <input name="line_slot" type="date" class="form-control" value="{{ r.slot or '' }}" required>
         </div>
-        <div class="col-5 col-md-2">
+        <div class="col-5 col-md-6">
           <label class="form-label small mb-0">Коробов *</label>
           <input name="line_boxes" type="number" min="1" max="500" inputmode="numeric" class="form-control" value="{{ r.boxes or '' }}" required>
         </div>
@@ -124,6 +128,46 @@
   countSelect.addEventListener("change", refreshRows);
   document.querySelectorAll("input[name=line_boxes]").forEach(el => el.addEventListener("input", refreshRows));
   refreshRows();
+
+  // Пункты назначения из прайса: куда → город → (для ФФ) название.
+  {% set dd = [] %}{% for d in mvb_destinations %}{% set _ = dd.append({'mp': d.marketplace, 'city': d.city, 'value': d.value}) %}{% endfor %}
+  const DESTS = {{ dd|tojson }};
+  function option(value, text, selected) {
+    const o = document.createElement("option");
+    o.value = value; o.textContent = text; o.selected = !!selected;
+    return o;
+  }
+  rows.forEach(row => {
+    const mp = row.querySelector(".js-mp"), city = row.querySelector(".js-city");
+    const ff = row.querySelector(".js-ff"), ffWrap = row.querySelector(".js-ff-wrap"), dest = row.querySelector(".js-dest");
+    if (!city) return;
+    const initial = DESTS.find(d => d.mp === mp.value && d.value.toLowerCase() === (dest.dataset.initial || "").toLowerCase());
+    function sync() {
+      dest.value = mp.value === "ff" ? ff.value : city.value;
+    }
+    function fillFf(selected) {
+      ff.innerHTML = "";
+      ff.appendChild(option("", "— выберите —"));
+      DESTS.filter(d => d.mp === "ff" && d.city === city.value)
+        .forEach(d => ff.appendChild(option(d.value, d.value, d.value === selected)));
+      sync();
+    }
+    function fillCities(selectedCity, selectedFf) {
+      city.innerHTML = "";
+      city.appendChild(option("", "— выберите —"));
+      [...new Set(DESTS.filter(d => d.mp === mp.value).map(d => d.city))]
+        .forEach(c => city.appendChild(option(c, c, c === selectedCity)));
+      const isFf = mp.value === "ff";
+      ffWrap.classList.toggle("d-none", !isFf);
+      ff.required = isFf && !row.classList.contains("d-none");
+      if (isFf) fillFf(selectedFf); else sync();
+    }
+    mp.addEventListener("change", () => fillCities());
+    city.addEventListener("change", () => (mp.value === "ff" ? fillFf() : sync()));
+    ff.addEventListener("change", sync);
+    countSelect.addEventListener("change", () => { ff.required = mp.value === "ff" && !row.classList.contains("d-none"); });
+    fillCities(initial ? initial.city : null, initial ? initial.value : null);
+  });
   if (clientSelect) {
     clientSelect.addEventListener("change", () => {
       const opt = clientSelect.selectedOptions[0];

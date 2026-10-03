@@ -2032,8 +2032,8 @@ class MvbTripStop(db.Model):
     @property
     def address(self):
         """Адрес СЦ из списка городов (если внесен)."""
-        city = MvbCity.find(self.destination)
-        return city.address_for(self.marketplace) if city else None
+        dest = MvbDestination.find(self.marketplace, self.destination)
+        return dest.address if dest else None
 
     def map_query(self):
         return self.address or f"{self.marketplace_label} {self.destination or ''}".strip()
@@ -2050,35 +2050,62 @@ MVB_PRICE_KINDS = {"pickup": "Забор груза", "sc": "Отправка н
 
 
 class MvbCity(db.Model):
-    """Города (СЦ) отправки МВБ: из этого списка выбирают направление в
-    заявке; у города может быть свой прайс отправки на СЦ. Список ведет
-    оператор в «Прайсе»."""
+    """Устаревший список городов (до разделения на WB / Ozon / ФФ) —
+    остается только для переноса в MvbDestination при запуске."""
 
     __tablename__ = "mvb_cities"
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False, unique=True)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
-    # Адреса СЦ в городе — для маршрута водителя (у WB и Ozon свои склады;
-    # «общий» — для фулфилмента и если адрес маркетплейса не указан).
     address_wb = db.Column(db.String(300))
     address_ozon = db.Column(db.String(300))
     address = db.Column(db.String(300))
 
-    def address_for(self, marketplace):
-        specific = {"wb": self.address_wb, "ozon": self.address_ozon}.get(marketplace)
-        return specific or self.address
+
+class MvbDestination(db.Model):
+    """Пункт назначения МВБ (ведет оператор в «Прайсе»): куда (WB, Ozon или
+    фулфилмент), город, для ФФ — его название, и адрес для маршрута
+    водителя. Из этого списка выбирают направление в заявке; у пункта может
+    быть свой прайс отправки."""
+
+    __tablename__ = "mvb_destinations"
+
+    id = db.Column(db.Integer, primary_key=True)
+    marketplace = db.Column(db.String(10), nullable=False, index=True)
+    city = db.Column(db.String(120), nullable=False)
+    ff_name = db.Column(db.String(120))
+    address = db.Column(db.String(300))
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+
+    @property
+    def value(self):
+        """Что пишется в направление заявки: город, а для ФФ — название."""
+        return self.ff_name if self.marketplace == "ff" and self.ff_name else self.city
+
+    def label(self):
+        short = MvbOrderLine.SHORT_MARKETPLACES.get(self.marketplace, self.marketplace)
+        if self.marketplace == "ff":
+            return f"{short} {self.ff_name} ({self.city})"
+        return f"{short} {self.city}"
 
     @staticmethod
-    def active_names():
-        return [c.name for c in MvbCity.query.filter_by(is_active=True).order_by(MvbCity.name).all()]
+    def active():
+        return (
+            MvbDestination.query.filter_by(is_active=True)
+            .order_by(MvbDestination.marketplace, MvbDestination.city, MvbDestination.ff_name)
+            .all()
+        )
 
     @staticmethod
-    def find(name):
-        name = (name or "").strip()
-        if not name:
+    def find(marketplace, value):
+        value = (value or "").strip().lower()
+        if not value:
             return None
-        return MvbCity.query.filter(db.func.lower(MvbCity.name) == name.lower()).first()
+        for dest in MvbDestination.query.filter_by(marketplace=marketplace).all():
+            if dest.value.lower() == value:
+                return dest
+        return None
 
 
 class MvbPriceTier(db.Model):
@@ -2092,35 +2119,29 @@ class MvbPriceTier(db.Model):
     kind = db.Column(db.String(10), nullable=False, index=True)
     min_boxes = db.Column(db.Integer, nullable=False, default=1)
     price_per_box = db.Column(db.Float, nullable=False, default=0)
-    # Отправка на СЦ: прайс конкретного города; пусто — общий прайс (для
-    # городов без своего прайса).
+    # Отправка на СЦ: прайс конкретного пункта назначения; пусто — общий
+    # прайс (для пунктов без своего прайса). city_id — устаревшая привязка
+    # к городу (переносится в destination_id).
     city_id = db.Column(db.Integer, db.ForeignKey("mvb_cities.id"), index=True)
+    destination_id = db.Column(db.Integer, db.ForeignKey("mvb_destinations.id"), index=True)
 
-    city = db.relationship("MvbCity")
+    destination = db.relationship("MvbDestination")
 
     @staticmethod
-    def price_for(kind, boxes, city_id=None):
+    def price_for(kind, boxes, destination_id=None):
         """Цена за короб для количества boxes: ступень с наибольшим
-        «от N», не превышающим boxes. Для города со своим прайсом — по нему,
+        «от N», не превышающим boxes. Для пункта со своим прайсом — по нему,
         иначе по общему. None — прайс не заполнен."""
-        def best(city):
-            return (
-                MvbPriceTier.query.filter(
-                    MvbPriceTier.kind == kind, MvbPriceTier.min_boxes <= boxes,
-                    MvbPriceTier.city_id == city if city else MvbPriceTier.city_id.is_(None),
-                )
-                .order_by(MvbPriceTier.min_boxes.desc())
-                .first()
-            )
-
-        tier = None
-        if city_id and MvbPriceTier.query.filter_by(kind=kind, city_id=city_id).first() is not None:
-            tier = best(city_id)
+        own = destination_id and MvbPriceTier.query.filter_by(kind=kind, destination_id=destination_id).first()
+        query = MvbPriceTier.query.filter(MvbPriceTier.kind == kind, MvbPriceTier.min_boxes <= boxes)
+        if own:
+            query = query.filter(MvbPriceTier.destination_id == destination_id)
         else:
-            tier = best(None)
+            query = query.filter(MvbPriceTier.destination_id.is_(None))
+        tier = query.order_by(MvbPriceTier.min_boxes.desc()).first()
         return tier.price_per_box if tier else None
 
     @staticmethod
-    def cost_for(kind, boxes, city_id=None):
-        price = MvbPriceTier.price_for(kind, boxes, city_id)
+    def cost_for(kind, boxes, destination_id=None):
+        price = MvbPriceTier.price_for(kind, boxes, destination_id)
         return None if price is None else round(price * boxes, 2)

@@ -1129,6 +1129,9 @@ def test_wms_movements_from_one_warehouse_become_one_order_for_drivers(db, clien
     _login(client, _user("operator", "mvb_staff"))
     doc1, boxes1 = _wms_movement("PER-000701", boxes=2)
     doc2, boxes2 = _wms_movement("PER-000702", boxes=1)
+    from datetime import date as _date
+
+    doc1.delivery_slot_date = _date(2026, 10, 9)
     doc2.from_warehouse_id = doc1.from_warehouse_id
     doc2.to_warehouse.marketplace = "ozon"
     doc2.to_warehouse.marketplace_city = "Хоругвино"
@@ -1138,6 +1141,7 @@ def test_wms_movements_from_one_warehouse_become_one_order_for_drivers(db, clien
     assert order.delivery_method == "pickup" and order.pickup_address == "Москва, Складская 5"
     assert [(l.short_label(), l.box_count) for l in order.lines] == [("WB Коледино", 2), ("OZON Хоругвино", 1)]
     assert [b.barcode for b in order.lines[1].boxes] == [boxes2[0].barcode_value]
+    assert order.lines[0].slot_date == doc1.delivery_slot_date
     # заявка из WMS падает в заявки водителям
     _login(client, _user("driver", "mvb_driver"))
     assert order.number in client.get("/mvb/driver").get_data(as_text=True)
@@ -1266,44 +1270,67 @@ def test_fulfillment_as_destination_for_orders_pallets_and_trips(db, client):
     assert [s.label() for s in trip.stops] == ["Фулфилмент · Север"]
 
 
-def test_cities_list_in_prices_and_sc_price_by_city(db, client):
-    """Города отправки задает оператор в прайсе; в заявке город выбирается
-    из списка, отправка на СЦ считается по прайсу города (иначе — общий)."""
-    from wms.models import MvbCity
+def test_destinations_in_prices_and_sc_price_by_destination(db, client):
+    """Пункты назначения задает оператор в прайсе: WB / Ozon / ФФ → город →
+    (для ФФ) название; в заявке выбирают из списка, отправка на СЦ — по
+    прайсу пункта (иначе общий)."""
+    from wms.models import MvbDestination
 
     _login(client, _user("operator", "mvb_staff"))
-    for name in ("Коледино", "Казань"):
-        client.post("/mvb/prices", data={"action": "city_add", "name": name})
-    client.post("/mvb/prices", data={"action": "city_add", "name": "коледино"})  # дубль не добавится
-    assert sorted(MvbCity.active_names()) == ["Казань", "Коледино"]
-    kazan = MvbCity.find("казань")
+    for mp, city, ff in [("wb", "Коледино", ""), ("wb", "Казань", ""), ("ozon", "Казань", ""), ("ff", "Москва", "ФФ Север")]:
+        client.post("/mvb/prices", data={"action": "dest_add", "marketplace": mp, "city": city, "ff_name": ff})
+    client.post("/mvb/prices", data={"action": "dest_add", "marketplace": "wb", "city": "коледино"})  # дубль
+    client.post("/mvb/prices", data={"action": "dest_add", "marketplace": "ff", "city": "Москва"})  # без названия ФФ
+    assert sorted(d.label() for d in MvbDestination.active()) == [
+        "OZON Казань", "WB Казань", "WB Коледино", "ФФ ФФ Север (Москва)",
+    ]
+    kazan_wb = MvbDestination.find("wb", "казань")
     client.post("/mvb/prices", data={"kind": "pickup", "min_boxes": "1", "price_per_box": "50"})
     client.post("/mvb/prices", data={"kind": "sc", "min_boxes": "1", "price_per_box": "100"})
-    client.post("/mvb/prices", data={"kind": "sc", "min_boxes": "1", "price_per_box": "300", "city_id": str(kazan.id)})
+    client.post("/mvb/prices", data={"kind": "sc", "min_boxes": "1", "price_per_box": "300",
+                                     "destination_id": str(kazan_wb.id)})
     page = client.get("/mvb/prices").get_data(as_text=True)
-    assert "Города отправки" in page and "Отправка на СЦ — Казань" in page
-    assert MvbPriceTier.price_for("sc", 5, kazan.id) == 300
-    assert MvbPriceTier.price_for("sc", 5, MvbCity.find("Коледино").id) == 100
+    assert "Пункты назначения" in page and "Отправка на СЦ — WB Казань" in page
+    assert MvbPriceTier.price_for("sc", 5, kazan_wb.id) == 300
+    assert MvbPriceTier.price_for("sc", 5, MvbDestination.find("ozon", "Казань").id) == 100
 
     _login(client, _user("seller", "mvb_client", _mvb_client()))
     form = client.get("/mvb/orders/new").get_data(as_text=True)
-    assert '<option value="Казань"' in form
-    # город не из списка — нельзя
+    import json as _json
+    dests = _json.loads(form.split("const DESTS = ", 1)[1].split(";", 1)[0])
+    assert {"mp": "ff", "city": "Москва", "value": "ФФ Север"} in dests
+    # Ozon Коледино в списке нет — нельзя
     html = client.post("/mvb/orders/new", data=_multi_order_form(
-        line_destination=["Коледино", "Хоругвино"])).get_data(as_text=True)
-    assert "не из списка городов" in html and MvbOrder.query.count() == 0
-    client.post("/mvb/orders/new", data=_multi_order_form(line_destination=["коледино", "Казань"]))
+        line_marketplace=["wb", "ozon"], line_destination=["Коледино", "Коледино"])).get_data(as_text=True)
+    assert "нет в списке пунктов назначения" in html and MvbOrder.query.count() == 0
+    client.post("/mvb/orders/new", data=_multi_order_form(
+        line_marketplace=["wb", "ff"], line_destination=["казань", "ФФ Север"]))
     order = MvbOrder.query.one()
-    assert [l.destination for l in order.lines] == ["Коледино", "Казань"]
+    assert [l.short_label() for l in order.lines] == ["WB Казань", "ФФ ФФ Север"]
     client.post(f"/mvb/orders/{order.id}/confirm")
     order = db.session.get(MvbOrder, order.id)
-    assert order.sc_cost == 3 * 100 + 2 * 300 and order.pickup_cost == 5 * 50
+    assert order.sc_cost == 3 * 300 + 2 * 100 and order.pickup_cost == 5 * 50
 
-    # скрытый город из списка пропадает
+    # скрытый пункт из списка пропадает
     _login(client, User.query.filter_by(username="operator").one())
-    client.post("/mvb/prices", data={"action": "city_toggle", "city_id": str(kazan.id)})
-    assert MvbCity.active_names() == ["Коледино"]
+    client.post("/mvb/prices", data={"action": "dest_toggle", "destination_id": str(kazan_wb.id)})
+    assert "WB Казань" not in [d.label() for d in MvbDestination.active()]
 
+
+def test_old_cities_migrate_to_destinations(db, client):
+    from wms import _ensure_mvb_destinations
+    from wms.models import MvbCity, MvbDestination
+
+    city = MvbCity(name="Казань", address_wb="Казань, ул. WB 1", address_ozon="Казань, ул. Ozon 2")
+    db.session.add(city)
+    db.session.flush()
+    db.session.add(MvbPriceTier(kind="sc", min_boxes=1, price_per_box=250, city_id=city.id))
+    db.session.commit()
+    _ensure_mvb_destinations()
+    _ensure_mvb_destinations()
+    wb, oz = MvbDestination.find("wb", "Казань"), MvbDestination.find("ozon", "Казань")
+    assert wb.address == "Казань, ул. WB 1" and oz.address == "Казань, ул. Ozon 2"
+    assert MvbPriceTier.price_for("sc", 3, wb.id) == 250 and MvbCity.query.count() == 0
 
 def test_pickup_done_button_requires_all_boxes(db, client):
     """После скана коробов на заборе — «Готово»; пока не все короба
@@ -1331,15 +1358,14 @@ def test_pickup_done_button_requires_all_boxes(db, client):
 def test_sc_addresses_route_and_driver_sees_only_address_and_count(db, client):
     """Адреса СЦ в списке городов — маршрут водителю; на точке — адрес,
     сколько сдать и «Сдан на СЦ»."""
-    from wms.models import MvbCity
+    from wms.models import MvbDestination
 
     staff = _user("staff1", "mvb_admin")
     _login(client, staff)
     client.post("/mvb/prices", data={
-        "action": "city_add", "name": "Коледино", "address_wb": "Подольск, Коледино, ул. Троицкая 20",
+        "action": "dest_add", "marketplace": "wb", "city": "Коледино", "address": "Подольск, Коледино, ул. Троицкая 20",
     })
-    city = MvbCity.find("Коледино")
-    assert city.address_for("wb") == "Подольск, Коледино, ул. Троицкая 20" and city.address_for("ozon") is None
+    assert MvbDestination.find("wb", "Коледино").address == "Подольск, Коледино, ул. Троицкая 20"
     a = _received_order(client, _user("c1", "mvb_client", _mvb_client("ИП А")), staff, box_count="2")
     b = _received_order(client, _user("c2", "mvb_client", _mvb_client("ИП Б")), staff, box_count="1")
     driver = _user("driver", "mvb_driver")
@@ -1421,3 +1447,49 @@ def test_operator_assigns_car_and_storekeeper_loads_by_plate(db, client):
     client.post("/mvb/logout")
     page = client.get(f"/mvb/t/{trip.access_token}").get_data(as_text=True)
     assert "Сдать: <b>1</b> пал." in page and "Сдан на СЦ" in page
+
+
+def test_admin_deletes_orders_trips_and_pallets(db, client):
+    client_user = _user("client1", "mvb_client", _mvb_client())
+    operator = _user("oper1", "mvb_staff")
+    admin = _user("boss1", "mvb_admin")
+    order = _received_order(client, client_user, admin)
+    second = _received_order(client, client_user, admin, box_count="2")
+    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    pallet = MvbPallet.query.one()
+    for box in second.boxes:
+        client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
+    trip = _trip(client)
+    client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": order.boxes[0].barcode})
+    client.post(f"/mvb/trips/{trip.id}/depart")
+    assert order.boxes[0].status == "shipped"
+    assert "🗑 Удалить" in client.get(f"/mvb/trips/{trip.id}").get_data(as_text=True)
+
+    # оператор и клиент удалять не могут
+    for user in (operator, client_user):
+        _login(client, user)
+        client.post(f"/mvb/orders/{order.id}/delete")
+        client.post(f"/mvb/trips/{trip.id}/delete")
+        client.post(f"/mvb/pallets/{pallet.id}/delete")
+    assert db.session.get(MvbOrder, order.id) and db.session.get(MvbTrip, trip.id) and db.session.get(MvbPallet, pallet.id)
+    _login(client, operator)
+    assert "🗑 Удалить" not in client.get(f"/mvb/orders/{order.id}").get_data(as_text=True)
+
+    _login(client, admin)
+    client.post(f"/mvb/trips/{trip.id}/delete")
+    db.session.expire_all()
+    assert db.session.get(MvbTrip, trip.id) is None
+    box = db.session.get(MvbBox, order.boxes[0].id)
+    assert box.status == "received" and box.trip_id is None and box.trip_stop_id is None
+
+    client.post(f"/mvb/pallets/{pallet.id}/delete")
+    db.session.expire_all()
+    assert db.session.get(MvbPallet, pallet.id) is None
+    assert {b.pallet_id for b in second.boxes} == {None}
+
+    box_ids = [b.id for b in order.boxes]
+    client.post(f"/mvb/orders/{order.id}/delete")
+    db.session.expire_all()
+    assert db.session.get(MvbOrder, order.id) is None
+    assert MvbBox.query.filter(MvbBox.id.in_(box_ids)).count() == 0
+    assert "удалена" in client.get("/mvb/orders").get_data(as_text=True)

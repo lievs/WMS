@@ -1,6 +1,6 @@
 {% extends "mvb/base.html" %}
 {% block title %}Прайс{% endblock %}
-{% macro tier_table(kind, rows, city_id=None) %}
+{% macro tier_table(kind, rows, dest_id=None) %}
 <table class="table table-sm align-middle">
   <thead><tr><th>От коробов</th><th>Цена за короб, руб.</th><th></th></tr></thead>
   <tbody>
@@ -11,7 +11,7 @@
       <td class="d-flex gap-1">
         <form method="post" id="tier-{{ t.id }}">
           <input type="hidden" name="tier_id" value="{{ t.id }}"><input type="hidden" name="kind" value="{{ kind }}">
-          {% if city_id %}<input type="hidden" name="city_id" value="{{ city_id }}">{% endif %}
+          {% if dest_id %}<input type="hidden" name="destination_id" value="{{ dest_id }}">{% endif %}
           <button class="btn btn-sm btn-outline-primary">Сохранить</button>
         </form>
         <form method="post">
@@ -27,7 +27,7 @@
 </table>
 <form method="post" class="d-flex flex-wrap gap-2">
   <input type="hidden" name="kind" value="{{ kind }}">
-  {% if city_id %}<input type="hidden" name="city_id" value="{{ city_id }}">{% endif %}
+  {% if dest_id %}<input type="hidden" name="destination_id" value="{{ dest_id }}">{% endif %}
   <input name="min_boxes" type="number" min="1" class="form-control w-auto" placeholder="от, кор." style="max-width:110px" required>
   <input name="price_per_box" class="form-control w-auto" placeholder="руб. за короб" style="max-width:140px" required>
   <button class="btn btn-success">+ Ступень</button>
@@ -38,26 +38,29 @@
 <p class="text-muted">Цена за короб с градацией по количеству коробов: «от N коробов — X руб. за короб». Отправка на СЦ считается по каждому направлению заявки по прайсу его города (если у города нет своего прайса — по общему). Стоимость ставится при оформлении заявки, оператор может её поправить.</p>
 
 <div class="card p-3 mb-3">
-  <h5>Города отправки</h5>
-  <p class="text-muted small mb-2">Из этого списка клиент выбирает город (СЦ) для каждого направления заявки; по адресам СЦ водителю строится маршрут. Скрытый город в заявке не выбрать, но старые заявки с ним сохраняются.{% if not cities %} Пока список пуст, город в заявке вписывают вручную.{% endif %}</p>
+  <h5>Пункты назначения</h5>
+  <p class="text-muted small mb-2">Сначала куда — WB, Ozon или фулфилмент, затем город, для ФФ — его название. Из этого списка клиент выбирает направление в заявке; по адресу водителю строится маршрут. Скрытый пункт в заявке не выбрать, старые заявки с ним сохраняются.{% if not destinations %} Пока список пуст, направление в заявке вписывают вручную.{% endif %}</p>
+  {% if destinations %}
   <div class="table-responsive">
   <table class="table table-sm align-middle">
-    <thead><tr><th>Город</th><th>Адрес СЦ Wildberries</th><th>Адрес СЦ Ozon</th><th>Адрес (ФФ / общий)</th><th></th></tr></thead>
+    <thead><tr><th>Куда</th><th>Город</th><th>Название ФФ</th><th>Адрес</th><th></th></tr></thead>
     <tbody>
-    {% for c in cities %}
-      <tr class="{{ '' if c.is_active else 'text-muted table-light' }}">
-        <td><input form="city-{{ c.id }}" name="name" class="form-control form-control-sm" value="{{ c.name }}" style="min-width:120px"></td>
-        <td><input form="city-{{ c.id }}" name="address_wb" class="form-control form-control-sm" value="{{ c.address_wb or '' }}" style="min-width:180px"></td>
-        <td><input form="city-{{ c.id }}" name="address_ozon" class="form-control form-control-sm" value="{{ c.address_ozon or '' }}" style="min-width:180px"></td>
-        <td><input form="city-{{ c.id }}" name="address" class="form-control form-control-sm" value="{{ c.address or '' }}" style="min-width:180px"></td>
+    {% for d in destinations %}
+      <tr class="{{ '' if d.is_active else 'text-muted table-light' }}">
+        <td><select form="dest-{{ d.id }}" name="marketplace" class="form-select form-select-sm js-dest-mp" style="min-width:120px">
+          {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}" {{ 'selected' if d.marketplace == code }}>{{ label }}</option>{% endfor %}
+        </select></td>
+        <td><input form="dest-{{ d.id }}" name="city" class="form-control form-control-sm" value="{{ d.city }}" style="min-width:120px"></td>
+        <td><input form="dest-{{ d.id }}" name="ff_name" class="form-control form-control-sm js-dest-ff" value="{{ d.ff_name or '' }}" style="min-width:120px"></td>
+        <td><input form="dest-{{ d.id }}" name="address" class="form-control form-control-sm" value="{{ d.address or '' }}" style="min-width:220px"></td>
         <td class="text-nowrap">
-          <form method="post" id="city-{{ c.id }}" class="d-inline">
-            <input type="hidden" name="action" value="city_rename"><input type="hidden" name="city_id" value="{{ c.id }}">
+          <form method="post" id="dest-{{ d.id }}" class="d-inline">
+            <input type="hidden" name="action" value="dest_save"><input type="hidden" name="destination_id" value="{{ d.id }}">
             <button class="btn btn-sm btn-outline-primary">Сохранить</button>
           </form>
           <form method="post" class="d-inline">
-            <input type="hidden" name="action" value="city_toggle"><input type="hidden" name="city_id" value="{{ c.id }}">
-            <button class="btn btn-sm btn-outline-secondary">{{ 'Скрыть' if c.is_active else 'Вернуть' }}</button>
+            <input type="hidden" name="action" value="dest_toggle"><input type="hidden" name="destination_id" value="{{ d.id }}">
+            <button class="btn btn-sm btn-outline-secondary">{{ 'Скрыть' if d.is_active else 'Вернуть' }}</button>
           </form>
         </td>
       </tr>
@@ -65,13 +68,16 @@
     </tbody>
   </table>
   </div>
+  {% endif %}
   <form method="post" class="row g-2">
-    <input type="hidden" name="action" value="city_add">
-    <div class="col-md-2"><input name="name" class="form-control" placeholder="Город *" required></div>
-    <div class="col-md-3"><input name="address_wb" class="form-control" placeholder="Адрес СЦ Wildberries"></div>
-    <div class="col-md-3"><input name="address_ozon" class="form-control" placeholder="Адрес СЦ Ozon"></div>
-    <div class="col-md-2"><input name="address" class="form-control" placeholder="Адрес (ФФ / общий)"></div>
-    <div class="col-md-2"><button class="btn btn-success w-100">+ Город</button></div>
+    <input type="hidden" name="action" value="dest_add">
+    <div class="col-md-2"><select name="marketplace" class="form-select js-dest-mp">
+      {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
+    </select></div>
+    <div class="col-md-2"><input name="city" class="form-control" placeholder="Город *" required></div>
+    <div class="col-md-2"><input name="ff_name" class="form-control js-dest-ff" placeholder="Название ФФ *"></div>
+    <div class="col-md-4"><input name="address" class="form-control" placeholder="Адрес (для маршрута)"></div>
+    <div class="col-md-2"><button class="btn btn-success w-100">+ Добавить</button></div>
   </form>
 </div>
 
@@ -85,17 +91,32 @@
   <div class="col-lg-6">
     <div class="card p-3 h-100">
       <h5>{{ kinds['sc'] }} — общий</h5>
-      <div class="small text-muted mb-1">Для городов без своего прайса.</div>
+      <div class="small text-muted mb-1">Для пунктов без своего прайса.</div>
       {% call tier_table('sc', tiers['sc']) %}Не заполнено{% endcall %}
     </div>
   </div>
-  {% for c in cities if c.is_active or city_tiers[c.id] %}
+  {% for d in destinations if d.is_active or dest_tiers[d.id] %}
   <div class="col-lg-6">
     <div class="card p-3 h-100">
-      <h5>{{ kinds['sc'] }} — {{ c.name }}</h5>
-      {% call tier_table('sc', city_tiers[c.id], c.id) %}Своего прайса нет — считается по общему{% endcall %}
+      <h5>{{ kinds['sc'] }} — {{ d.label() }}</h5>
+      {% call tier_table('sc', dest_tiers[d.id], d.id) %}Своего прайса нет — считается по общему{% endcall %}
     </div>
   </div>
   {% endfor %}
 </div>
+{% endblock %}
+{% block scripts %}
+<script>
+  // Название ФФ нужно только для фулфилмента.
+  document.querySelectorAll(".js-dest-mp").forEach(sel => {
+    const ff = sel.closest("tr, form").querySelector(".js-dest-ff");
+    if (!ff) return;
+    const update = () => {
+      const isFf = sel.value === "ff";
+      ff.disabled = !isFf; ff.required = isFf;
+      if (!isFf) ff.placeholder = "—"; else ff.placeholder = "Название ФФ *";
+    };
+    sel.addEventListener("change", update); update();
+  });
+</script>
 {% endblock %}

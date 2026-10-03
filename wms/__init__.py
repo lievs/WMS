@@ -283,6 +283,30 @@ def _ensure_mvb_lines():
         db.session.commit()
 
 
+def _ensure_mvb_destinations():
+    """МВБ: старый список городов (общий для WB / Ozon) переносится в пункты
+    назначения с выбором маркетплейса; прайс города — на пункт WB."""
+    from .models import MvbCity, MvbDestination, MvbPriceTier
+
+    cities = MvbCity.query.all()
+    if not cities:
+        return
+    for city in cities:
+        wb = MvbDestination(marketplace="wb", city=city.name, address=city.address_wb or city.address,
+                            is_active=city.is_active)
+        db.session.add(wb)
+        if city.address_ozon:
+            db.session.add(MvbDestination(marketplace="ozon", city=city.name, address=city.address_ozon,
+                                          is_active=city.is_active))
+        db.session.flush()
+        for tier in MvbPriceTier.query.filter_by(city_id=city.id).all():
+            tier.destination_id = wb.id
+            tier.city_id = None
+        db.session.delete(city)
+    db.session.commit()
+    print(f"[schema] МВБ: города перенесены в пункты назначения — {len(cities)}")
+
+
 def _register_sqlite_tuning():
     """SQLite-специфичные настройки:
     - LOWER/UPPER на Python-реализации (сравнение LIKE/ILIKE по умолчанию
@@ -420,6 +444,7 @@ def create_app(config_class=Config):
         _ensure_columns()
         _ensure_indexes()
         _ensure_mvb_lines()
+        _ensure_mvb_destinations()
         _bootstrap_admin()
         bootstrap_categories()
 

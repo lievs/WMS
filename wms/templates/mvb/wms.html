@@ -6,7 +6,7 @@
 <form method="post" action="{{ url_for('mvb.wms_import') }}">
 <div class="table-responsive">
 <table class="table align-middle">
-  <thead><tr><th></th><th>Перемещение</th><th>Откуда → куда</th><th class="text-end">Коробов</th><th>Собрано</th><th>Заявка на МП</th><th>МВБ</th></tr></thead>
+  <thead><tr><th></th><th>Перемещение</th><th>Откуда → куда</th><th class="text-end">Коробов</th><th>Слот (дата поставки)</th><th>Собрано</th><th>Заявка на МП</th><th>МВБ</th></tr></thead>
   <tbody>
   {% for r in rows %}
     {% set d = r.doc %}
@@ -15,6 +15,7 @@
       <td>{{ d.number }}</td>
       <td>{{ d.from_warehouse.name }} → {{ d.to_warehouse.name }}</td>
       <td class="text-end">{{ r.boxes }}</td>
+      <td>{{ d.delivery_slot_date.strftime('%d.%m.%Y') if d.delivery_slot_date else '—' }}</td>
       <td>{{ (d.completed_at|msk).strftime('%d.%m %H:%M') if d.completed_at else '' }}</td>
       <td>{{ d.marketplace_request_number or '—' }}</td>
       <td>
@@ -24,7 +25,7 @@
       </td>
     </tr>
   {% else %}
-    <tr><td colspan="7" class="text-muted">Нет собранных перемещений на маркетплейсы, ожидающих отправки</td></tr>
+    <tr><td colspan="8" class="text-muted">Нет собранных перемещений на маркетплейсы, ожидающих отправки</td></tr>
   {% endfor %}
   </tbody>
 </table>

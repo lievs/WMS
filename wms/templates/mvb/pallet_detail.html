@@ -6,7 +6,12 @@
     <h3 class="mb-1">Паллета {{ pallet.number }}</h3>
     <div class="text-muted">{{ pallet.marketplace_label }}{% if pallet.destination %} · {{ pallet.destination }}{% endif %} · коробов: {{ pallet.boxes|length }}</div>
   </div>
-  <div><a class="btn btn-outline-success" target="_blank" href="{{ url_for('mvb.pallet_label_pdf', pallet_id=pallet.id) }}">🖨 Этикетка паллеты</a></div>
+  <div class="d-flex flex-wrap gap-2 align-items-start">
+    <a class="btn btn-outline-success" target="_blank" href="{{ url_for('mvb.pallet_label_pdf', pallet_id=pallet.id) }}">🖨 Этикетка паллеты</a>
+    {% if mvb_can_manage %}
+    <form method="post" action="{{ url_for('mvb.pallet_delete', pallet_id=pallet.id) }}" onsubmit="return confirm('Удалить паллету {{ pallet.number }}? Короба останутся на складе без паллеты.')"><button class="btn btn-danger">🗑 Удалить</button></form>
+    {% endif %}
+  </div>
 </div>
 <p class="text-muted">Сканируйте короба, которые ставите на эту паллету. Подходят только принятые на складе короба этого направления.</p>
 {% set scan_url = url_for('mvb.pallet_scan', pallet_id=pallet.id) %}

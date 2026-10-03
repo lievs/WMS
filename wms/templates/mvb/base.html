@@ -63,7 +63,7 @@
     </div>
   </div>
 </nav>
-<datalist id="mvb-city-list">{% for name in mvb_cities %}<option value="{{ name }}">{% endfor %}</datalist>
+<datalist id="mvb-city-list">{% for d in mvb_destinations %}<option value="{{ d.value }}">{{ d.label() }}</option>{% endfor %}</datalist>
 <div class="container-fluid px-3 px-md-4 app-content">
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, message in messages %}

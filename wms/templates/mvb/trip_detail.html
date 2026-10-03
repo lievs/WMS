@@ -22,6 +22,9 @@
     {% if mvb_is_operator and trip.status in ('searching', 'assigned', 'arrived', 'loading') %}
       <form method="post" action="{{ url_for('mvb.trip_action', trip_id=trip.id, action='cancel') }}" onsubmit="return confirm('Отменить рейс? Погруженные короба вернутся на склад.')"><button class="btn btn-outline-danger">Отменить</button></form>
     {% endif %}
+    {% if mvb_can_manage %}
+      <form method="post" action="{{ url_for('mvb.trip_delete', trip_id=trip.id) }}" onsubmit="return confirm('Удалить рейс {{ trip.number }} совсем? Несданные короба вернутся на склад.')"><button class="btn btn-danger">🗑 Удалить</button></form>
+    {% endif %}
   </div>
   {% endif %}
 </div>
