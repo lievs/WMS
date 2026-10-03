@@ -40,7 +40,7 @@
       <div><b>Статус:</b> {{ order.progress_label() }}</div>
       <div><b>Способ:</b> {{ order.delivery_label }}</div>
       {% if order.pickup_address %}<div><b>Адрес забора:</b> {{ order.pickup_address }}</div>{% endif %}
-      <div><b>Дата / время:</b> {{ order.planned_date.strftime('%d.%m.%Y') if order.planned_date else '—' }}{% if order.time_from %} {{ order.time_from }}{% if order.time_to %}–{{ order.time_to }}{% endif %}{% endif %}</div>
+      <div><b>Дата забора / сдачи:</b> {{ order.planned_date.strftime('%d.%m.%Y') if order.planned_date else '—' }}{% if order.time_from %} {{ order.time_from }}{% if order.time_to %}–{{ order.time_to }}{% endif %}{% endif %}</div>
       <div><b>Коробов всего:</b> {{ order.box_count }}{% if order.lines|length > 1 %} · направлений {{ order.lines|length }}{% endif %}</div>
       {% if order.status == 'confirmed' and not order.client.is_internal %}
       <div><b>Стоимость:</b>
