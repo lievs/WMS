@@ -127,19 +127,22 @@
 <div class="card p-3 mb-3">
   <!-- Поиск идет по запросу к БД (см. movement._apply_movement_search), а
        не JS-фильтром по уже загруженным строкам — находит совпадение по
-       ВСЕМ перемещениям, а не только на текущей странице (см. чат). -->
-  <form method="get" action="{{ url_for('movement.list_documents') }}" class="d-flex flex-wrap gap-2">
+       ВСЕМ перемещениям, а не только на текущей странице (см. чат).
+       id нужен, чтобы поля фильтров над колонками таблицы ниже (см.
+       movementFiltersForm) ссылались на эту же форму через form= —
+       отдельная форма на каждое поле задваивала бы отправку и теряла бы
+       значения других фильтров при сбросе страницы. -->
+  <form method="get" action="{{ url_for('movement.list_documents') }}" id="movementFiltersForm" class="d-flex flex-wrap gap-2">
     <input type="text" name="q" class="form-control" style="max-width:360px"
            placeholder="Поиск: номер, короб, склад, автор, № заявки на МП — можно несколько слов, например «191 москва»"
            value="{{ request.args.get('q', '') }}">
-    <select name="mp_request" class="form-select" style="max-width:200px">
-      <option value="">Заявка на МП: все</option>
-      <option value="yes" {% if request.args.get('mp_request') == 'yes' %}selected{% endif %}>Есть заявка</option>
-      <option value="no" {% if request.args.get('mp_request') == 'no' %}selected{% endif %}>Нет заявки</option>
-    </select>
     <button type="submit" class="btn btn-primary">Найти</button>
-    {% if request.args.get('q') or request.args.get('mp_request') %}
-      <a class="btn btn-outline-secondary" href="{{ url_for('movement.list_documents') }}">Сбросить</a>
+    {% set has_filters = request.args.get('q') or request.args.get('mp_request') or request.args.get('number')
+       or request.args.get('from_warehouse_id') or request.args.get('to_warehouse_id')
+       or request.args.get('created_by_id') or request.args.get('status')
+       or request.args.get('date_from') or request.args.get('date_to') %}
+    {% if has_filters %}
+      <a class="btn btn-outline-secondary" href="{{ url_for('movement.list_documents') }}">✕ Сбросить все фильтры</a>
     {% endif %}
   </form>
 </div>
@@ -177,6 +180,77 @@
     <table class="table">
       <thead>
         <tr><th></th><th>Номер</th><th>Дата</th><th>Откуда</th><th>Куда</th><th>Коробов</th><th>Кол-во товара</th><th>Автор</th><th>Статус</th><th>Приемка</th><th class="text-center">1С</th><th class="text-center">Заявка на МП</th><th>№ заявки на МП</th><th title="Дата слота, забронированного на маркетплейсе — печатается на стикерах отправления вместо сегодняшней даты">Дата поставки</th>{% if current_user.is_admin %}<th class="text-center">Отгружено</th>{% endif %}<th></th></tr>
+        <!-- Фильтры над колонками (см. чат) — отдельный вид фильтра от
+             общего поиска выше: каждое поле бьет по своей колонке точным
+             совпадением (или диапазоном для дат), а не подстрокой сразу по
+             многим полям. Все поля отправляются в ту же форму
+             movementFiltersForm (см. выше) через form= — здесь не может
+             быть своего <form>, эта строка лежит внутри waybillsForm. -->
+        <tr class="movement-filter-row">
+          <th></th>
+          <th>
+            <input type="text" name="number" form="movementFiltersForm" class="form-control form-control-sm"
+                   placeholder="№…" value="{{ request.args.get('number', '') }}" data-submit-on-enter>
+          </th>
+          <th>
+            <div class="d-flex flex-column gap-1">
+              <input type="date" name="date_from" form="movementFiltersForm" class="form-control form-control-sm" title="С даты"
+                     value="{{ request.args.get('date_from', '') }}" onchange="this.form.submit()">
+              <input type="date" name="date_to" form="movementFiltersForm" class="form-control form-control-sm" title="По дату"
+                     value="{{ request.args.get('date_to', '') }}" onchange="this.form.submit()">
+            </div>
+          </th>
+          <th>
+            <select name="from_warehouse_id" form="movementFiltersForm" class="form-select form-select-sm" onchange="this.form.submit()">
+              <option value="">Все</option>
+              {% for wh in from_warehouses %}
+              <option value="{{ wh.id }}" {% if request.args.get('from_warehouse_id') == wh.id|string %}selected{% endif %}>{{ wh.name }}</option>
+              {% endfor %}
+            </select>
+          </th>
+          <th>
+            <select name="to_warehouse_id" form="movementFiltersForm" class="form-select form-select-sm" onchange="this.form.submit()">
+              <option value="">Все</option>
+              {% for wh in to_warehouses %}
+              <option value="{{ wh.id }}" {% if request.args.get('to_warehouse_id') == wh.id|string %}selected{% endif %}>
+                {{ wh.marketplace_label() + ' ' if wh.marketplace else '' }}{{ wh.name }}
+              </option>
+              {% endfor %}
+            </select>
+          </th>
+          <th></th>
+          <th></th>
+          <th>
+            <select name="created_by_id" form="movementFiltersForm" class="form-select form-select-sm" onchange="this.form.submit()">
+              <option value="">Все</option>
+              {% for user in authors %}
+              <option value="{{ user.id }}" {% if request.args.get('created_by_id') == user.id|string %}selected{% endif %}>{{ user.display_name() }}</option>
+              {% endfor %}
+            </select>
+          </th>
+          <th>
+            <select name="status" form="movementFiltersForm" class="form-select form-select-sm" onchange="this.form.submit()">
+              <option value="">Все</option>
+              <option value="draft" {% if request.args.get('status') == 'draft' %}selected{% endif %}>На сборке</option>
+              <option value="collected" {% if request.args.get('status') == 'collected' %}selected{% endif %}>Собрано</option>
+              <option value="completed" {% if request.args.get('status') == 'completed' %}selected{% endif %}>Завершено</option>
+              <option value="merged" {% if request.args.get('status') == 'merged' %}selected{% endif %}>Объединено</option>
+            </select>
+          </th>
+          <th></th>
+          <th></th>
+          <th>
+            <select name="mp_request" form="movementFiltersForm" class="form-select form-select-sm" onchange="this.form.submit()">
+              <option value="">Все</option>
+              <option value="yes" {% if request.args.get('mp_request') == 'yes' %}selected{% endif %}>Есть заявка</option>
+              <option value="no" {% if request.args.get('mp_request') == 'no' %}selected{% endif %}>Нет заявки</option>
+            </select>
+          </th>
+          <th></th>
+          <th></th>
+          {% if current_user.is_admin %}<th></th>{% endif %}
+          <th></th>
+        </tr>
       </thead>
       <tbody>
       {% for d in documents %}
@@ -345,8 +419,9 @@
     <div class="text-muted small">Страница {{ pagination.page }} из {{ pagination.pages }} · всего перемещений: {{ pagination.total }}</div>
     <div class="d-flex gap-2">
       {% set search_args = {} %}
-      {% if request.args.get("q") %}{% set _ = search_args.update({"q": request.args.get("q")}) %}{% endif %}
-      {% if request.args.get("mp_request") %}{% set _ = search_args.update({"mp_request": request.args.get("mp_request")}) %}{% endif %}
+      {% for param in ("q", "mp_request", "number", "from_warehouse_id", "to_warehouse_id", "created_by_id", "status", "date_from", "date_to") %}
+        {% if request.args.get(param) %}{% set _ = search_args.update({param: request.args.get(param)}) %}{% endif %}
+      {% endfor %}
       {% if pagination.has_prev %}
         {% if request.endpoint == 'movement.route_box' %}
           <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('movement.route_box', page=pagination.prev_num, box_number=route_box_number, **search_args) }}">&larr; Назад</a>

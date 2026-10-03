@@ -413,6 +413,42 @@ def export_movement_summary_to_excel(documents) -> bytes:
         box_count, item_qty = daily[day]
         ws2.append([day.strftime("%Y-%m-%d"), box_count, item_qty])
 
+    # Сводная таблица "сколько коробов куда и когда поехало" (см. чат) —
+    # строки это дни отгрузки (shipped_at), колонки — склады назначения;
+    # в отличие от "Отгрузки по дням" выше (только итог за день без
+    # разбивки по направлению), здесь видно именно распределение по
+    # городам/складам день за днем. Тот же критерий включения, что и у
+    # "Отгрузки по дням" — только документы с отметкой об отгрузке.
+    destinations_box_counts = {}  # (day, warehouse_name) -> кол-во коробов
+    destination_names = []
+    seen_destinations = set()
+    for doc in documents:
+        if not doc.shipped_at or not doc.to_warehouse:
+            continue
+        day = doc.shipped_at.date()
+        name = doc.to_warehouse.name
+        if name not in seen_destinations:
+            seen_destinations.add(name)
+            destination_names.append(name)
+        key = (day, name)
+        destinations_box_counts[key] = destinations_box_counts.get(key, 0) + doc.lines.count()
+    destination_names.sort()
+
+    ws3 = wb.create_sheet("Куда и когда (короба)")
+    headers3 = ["Дата отгрузки"] + destination_names + ["Итого"]
+    _style_header(ws3, headers3)
+    column_totals = [0] * len(destination_names)
+    for day in sorted({d for d, _ in destinations_box_counts}):
+        row_counts = [destinations_box_counts.get((day, name), 0) for name in destination_names]
+        for i, count in enumerate(row_counts):
+            column_totals[i] += count
+        ws3.append([day.strftime("%Y-%m-%d")] + row_counts + [sum(row_counts)])
+    if destination_names:
+        ws3.append(["Итого"] + column_totals + [sum(column_totals)])
+        last_row = ws3.max_row
+        for cell in ws3[last_row]:
+            cell.font = Font(bold=True)
+
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()

@@ -182,7 +182,7 @@ def test_summary_export_has_daily_shipments_sheet(db, client_logged_in):
     resp = client_logged_in.get("/movement/export-summary.xlsx")
     wb = openpyxl.load_workbook(io.BytesIO(resp.data))
 
-    assert wb.sheetnames == ["Перемещения (сводно)", "Отгрузки по дням"]
+    assert wb.sheetnames == ["Перемещения (сводно)", "Отгрузки по дням", "Куда и когда (короба)"]
     ws2 = wb["Отгрузки по дням"]
     header = [c.value for c in ws2[1]]
     assert header == ["Дата отгрузки", "Кол-во коробов", "Кол-во товара, шт"]
@@ -191,6 +191,38 @@ def test_summary_export_has_daily_shipments_sheet(db, client_logged_in):
     assert rows["2026-09-01"] == (3, 10)  # 2 короба + 1 короб = 3; (3+2)+5 = 10 шт
     assert rows["2026-09-02"] == (1, 4)
     assert len(rows) == 2  # неотгруженный документ (MSUM-D4) не попал
+
+
+def test_summary_export_has_destination_pivot_sheet(db, client_logged_in):
+    """Третья страница файла — сводная таблица "куда и когда поехало":
+    строки это дни отгрузки, колонки — склады назначения, значения — кол-во
+    коробов (см. чат: "сколько коробов куда и когда поехало"). Документы без
+    отметки об отгрузке в эту страницу не попадают, как и в "Отгрузки по
+    дням" выше."""
+    day1 = datetime(2026, 9, 1, 10, 0)
+    day2 = datetime(2026, 9, 2, 11, 0)
+    _make_movement_with_boxes("MSUM-P1", [3, 2], receiver_code="WH-MSUM-P-MSK", shipped_at=day1)
+    _make_movement_with_boxes("MSUM-P2", [5], receiver_code="WH-MSUM-P-KZN", shipped_at=day1)
+    _make_movement_with_boxes("MSUM-P3", [4], receiver_code="WH-MSUM-P-MSK", shipped_at=day2)
+    _make_movement_with_boxes("MSUM-P4-NOSHIP", [10], receiver_code="WH-MSUM-P-MSK")
+
+    msk = Warehouse.query.filter_by(code="WH-MSUM-P-MSK").first()
+    msk.name = "Москва"
+    kzn = Warehouse.query.filter_by(code="WH-MSUM-P-KZN").first()
+    kzn.name = "Казань"
+    db.session.commit()
+
+    resp = client_logged_in.get("/movement/export-summary.xlsx")
+    wb = openpyxl.load_workbook(io.BytesIO(resp.data))
+    ws3 = wb["Куда и когда (короба)"]
+
+    header = [c.value for c in ws3[1]]
+    assert header == ["Дата отгрузки", "Казань", "Москва", "Итого"]
+
+    rows = {row[0]: row[1:] for row in ws3.iter_rows(min_row=2, values_only=True) if row[0]}
+    assert rows["2026-09-01"] == (1, 2, 3)  # 1 короб в Казань, 2 короба (MSUM-P1) в Москву
+    assert rows["2026-09-02"] == (0, 1, 1)
+    assert rows["Итого"] == (1, 3, 4)
 
 
 def test_summary_export_date_range_filters_by_shipped_at(db, client_logged_in):
