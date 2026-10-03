@@ -1770,6 +1770,17 @@ class MvbOrderLine(db.Model):
     order = db.relationship("MvbOrder", back_populates="lines")
     boxes = db.relationship("MvbBox", back_populates="line", order_by="MvbBox.seq")
     planned_trip = db.relationship("MvbTrip", back_populates="planned_lines")
+
+    @property
+    def pass_trip(self):
+        """Рейс, который везет направление (для пропуска водителя на СЦ):
+        в который погружены его короба, иначе запланированный."""
+        for box in self.boxes:
+            if box.trip is not None and box.trip.status != "cancelled":
+                return box.trip
+        if self.planned_trip is not None and self.planned_trip.status != "cancelled":
+            return self.planned_trip
+        return None
     wms_movement = db.relationship("MovementDocument")
 
     SHORT_MARKETPLACES = {"wb": "WB", "ozon": "OZON", "ff": "ФФ"}
@@ -1996,6 +2007,10 @@ class MvbTrip(db.Model):
         if self.driver:
             return self.driver.display_name()
         return self.driver_name or ""
+
+    def pass_ready(self):
+        """Данные для пропуска на СЦ готовы: есть водитель и госномер."""
+        return bool(self.driver_label() and self.transport_label())
 
     def stop_for(self, marketplace, destination):
         key = (destination or "").strip().lower()

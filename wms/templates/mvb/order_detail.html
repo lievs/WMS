@@ -97,6 +97,31 @@
 </table>
 </div>
 
+{% if order.status == 'confirmed' %}
+<div class="card p-3 mb-3">
+  <h5 class="mb-1">Данные водителя для пропуска</h5>
+  <div class="small text-muted mb-2">Для заказа пропуска в личном кабинете маркетплейса.</div>
+  {% for l in order.lines %}
+    {% set t = l.pass_trip %}
+    <div class="{{ 'border-top pt-2 mt-2' if not loop.first }}">
+      {% if order.lines|length > 1 %}<div class="fw-bold mb-1">{{ l.short_label() }}{% if l.slot_date %} · слот {{ l.slot_date.strftime('%d.%m.%Y') }}{% endif %}</div>{% endif %}
+      {% if t and t.pass_ready() %}
+        {% set pass_text %}Водитель: {{ t.driver_label() }}{% if t.driver_phone %}, тел. {{ t.driver_phone }}{% endif %}; авто: {{ t.transport_label() }}{% if t.slot_date %}; дата поставки: {{ t.slot_date.strftime('%d.%m.%Y') }}{% endif %}{% endset %}
+        <div>Водитель: <b>{{ t.driver_label() }}</b></div>
+        {% if t.driver_phone %}<div>Телефон: <b>{{ t.driver_phone }}</b></div>{% endif %}
+        {% if t.car_plate %}<div>Госномер: <b>{{ t.car_plate }}</b></div>{% endif %}
+        {% if t.car_model %}<div>Модель авто: <b>{{ t.car_model }}</b></div>{% endif %}
+        {% if not t.car_plate %}<div>Авто: <b>{{ t.transport_label() }}</b></div>{% endif %}
+        {% if t.planned_arrival_at %}<div class="text-muted small">Подача на погрузку: {{ (t.planned_arrival_at|msk).strftime('%d.%m.%Y %H:%M') }}</div>{% endif %}
+        <button type="button" class="btn btn-sm btn-outline-secondary mt-1 js-copy" data-text="{{ pass_text|trim }}">Скопировать</button>
+      {% else %}
+        <div class="text-muted fst-italic">Здесь появятся данные водителя для пропуска</div>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 {% if order.status == 'confirmed' and order.delivery_method == 'pickup' and mvb_is_operator %}
 <form method="post" action="{{ url_for('mvb.order_assign_driver', order_id=order.id) }}" class="card p-3 mb-3 d-flex flex-row flex-wrap gap-2 align-items-center">
   <b>Водитель на забор:</b>
@@ -150,4 +175,13 @@
 </div>
 {% endfor %}
 {% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+  document.querySelectorAll(".js-copy").forEach(btn => btn.addEventListener("click", () => {
+    const done = () => { btn.textContent = "Скопировано ✓"; setTimeout(() => btn.textContent = "Скопировать", 1500); };
+    if (navigator.clipboard) navigator.clipboard.writeText(btn.dataset.text).then(done);
+    else { const t = document.createElement("textarea"); t.value = btn.dataset.text; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); done(); }
+  }));
+</script>
 {% endblock %}

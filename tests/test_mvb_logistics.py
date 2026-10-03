@@ -1588,3 +1588,25 @@ def test_pallet_cost_shared_by_box_share(db, client):
     # отчет
     page = client.get("/mvb/reports?date_from=2000-01-01&date_to=2100-01-01").get_data(as_text=True)
     assert "Палетирование" in page
+
+
+def test_client_sees_driver_data_for_pass(db, client):
+    """В заявке клиента — данные водителя для пропуска; пока рейс не
+    назначен — заглушка."""
+    seller = _user("seller", "mvb_client", _mvb_client())
+    staff = _user("staff1", "mvb_admin")
+    order = _received_order(client, seller, staff, box_count="2")
+    _login(client, seller)
+    page = client.get(f"/mvb/orders/{order.id}").get_data(as_text=True)
+    assert "Здесь появятся данные водителя для пропуска" in page
+
+    _login(client, staff)
+    trip = _new_trip(client, ("wb", "Коледино"))
+    client.post(f"/mvb/trips/{trip.id}/plan", data={
+        "car_plate": "А777АА09", "car_model": "Газель", "driver_name": "Иванов Иван", "driver_phone": "+79991112233",
+        "planned_arrival_at": "2026-10-06T09:00",
+    })
+    _login(client, seller)
+    page = client.get(f"/mvb/orders/{order.id}").get_data(as_text=True)
+    assert "Здесь появятся данные водителя" not in page
+    assert "Иванов Иван" in page and "А777АА09" in page and "Газель" in page and "+79991112233" in page
