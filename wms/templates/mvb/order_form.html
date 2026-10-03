@@ -47,8 +47,16 @@
           </select>
         </div>
         <div class="col-12 col-md-4">
-          <label class="form-label small mb-0">СЦ / склад / фулфилмент *</label>
-          <input name="line_destination" class="form-control" value="{{ r.dest or '' }}" placeholder="Коледино или название ФФ" required>
+          <label class="form-label small mb-0">Город (СЦ) *</label>
+          {% if mvb_cities %}
+          <select name="line_destination" class="form-select" required>
+            <option value="">— выберите —</option>
+            {% for name in mvb_cities %}<option value="{{ name }}" {{ 'selected' if (r.dest or '')|lower == name|lower }}>{{ name }}</option>{% endfor %}
+            {% if r.dest and r.dest|lower not in mvb_cities|map('lower')|list %}<option value="{{ r.dest }}" selected>{{ r.dest }}</option>{% endif %}
+          </select>
+          {% else %}
+          <input name="line_destination" class="form-control" value="{{ r.dest or '' }}" placeholder="например, Коледино" required>
+          {% endif %}
         </div>
         <div class="col-7 col-md-3">
           <label class="form-label small mb-0">Дата слота *</label>

@@ -1669,6 +1669,8 @@ class MvbOrder(db.Model):
     wms_movement_id = db.Column(db.Integer, db.ForeignKey("movement_documents.id"), index=True)
     # Рейс, в который заявка запланирована целиком при компоновке отгрузки.
     planned_trip_id = db.Column(db.Integer, db.ForeignKey("mvb_trips.id"), index=True)
+    # Водитель нажал «Готово» после скана всех коробов на заборе.
+    pickup_done_at = db.Column(db.DateTime)
     # Стоимость (руб.): считается по прайсу при оформлении, оператор может
     # поправить вручную.
     pickup_cost = db.Column(db.Float)
@@ -2021,6 +2023,29 @@ class MvbTripStop(db.Model):
 MVB_PRICE_KINDS = {"pickup": "Забор груза", "sc": "Отправка на СЦ"}
 
 
+class MvbCity(db.Model):
+    """Города (СЦ) отправки МВБ: из этого списка выбирают направление в
+    заявке; у города может быть свой прайс отправки на СЦ. Список ведет
+    оператор в «Прайсе»."""
+
+    __tablename__ = "mvb_cities"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, unique=True)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+
+    @staticmethod
+    def active_names():
+        return [c.name for c in MvbCity.query.filter_by(is_active=True).order_by(MvbCity.name).all()]
+
+    @staticmethod
+    def find(name):
+        name = (name or "").strip()
+        if not name:
+            return None
+        return MvbCity.query.filter(db.func.lower(MvbCity.name) == name.lower()).first()
+
+
 class MvbPriceTier(db.Model):
     """Прайс МВБ: цена за короб с градацией по количеству коробов в заявке
     («от N коробов — X руб. за короб»). kind: pickup — забор, sc — отправка
@@ -2032,19 +2057,35 @@ class MvbPriceTier(db.Model):
     kind = db.Column(db.String(10), nullable=False, index=True)
     min_boxes = db.Column(db.Integer, nullable=False, default=1)
     price_per_box = db.Column(db.Float, nullable=False, default=0)
+    # Отправка на СЦ: прайс конкретного города; пусто — общий прайс (для
+    # городов без своего прайса).
+    city_id = db.Column(db.Integer, db.ForeignKey("mvb_cities.id"), index=True)
+
+    city = db.relationship("MvbCity")
 
     @staticmethod
-    def price_for(kind, boxes):
+    def price_for(kind, boxes, city_id=None):
         """Цена за короб для количества boxes: ступень с наибольшим
-        «от N», не превышающим boxes. None — прайс не заполнен."""
-        tier = (
-            MvbPriceTier.query.filter(MvbPriceTier.kind == kind, MvbPriceTier.min_boxes <= boxes)
-            .order_by(MvbPriceTier.min_boxes.desc())
-            .first()
-        )
+        «от N», не превышающим boxes. Для города со своим прайсом — по нему,
+        иначе по общему. None — прайс не заполнен."""
+        def best(city):
+            return (
+                MvbPriceTier.query.filter(
+                    MvbPriceTier.kind == kind, MvbPriceTier.min_boxes <= boxes,
+                    MvbPriceTier.city_id == city if city else MvbPriceTier.city_id.is_(None),
+                )
+                .order_by(MvbPriceTier.min_boxes.desc())
+                .first()
+            )
+
+        tier = None
+        if city_id and MvbPriceTier.query.filter_by(kind=kind, city_id=city_id).first() is not None:
+            tier = best(city_id)
+        else:
+            tier = best(None)
         return tier.price_per_box if tier else None
 
     @staticmethod
-    def cost_for(kind, boxes):
-        price = MvbPriceTier.price_for(kind, boxes)
+    def cost_for(kind, boxes, city_id=None):
+        price = MvbPriceTier.price_for(kind, boxes, city_id)
         return None if price is None else round(price * boxes, 2)

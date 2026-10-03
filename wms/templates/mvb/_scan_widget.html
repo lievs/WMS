@@ -42,6 +42,7 @@ document.addEventListener("DOMContentLoaded", function () {
     li.className = `list-group-item list-group-item-${cls}`;
     li.innerHTML = `${esc(code)} — ${esc(data.message)}`;
     log.prepend(li);
+    document.dispatchEvent(new CustomEvent("mvb:scanned", {detail: data}));
     if (navigator.vibrate) navigator.vibrate(data.ok ? 60 : [100, 60, 100]);
   }
 

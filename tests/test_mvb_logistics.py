@@ -1108,7 +1108,7 @@ def test_one_order_many_directions_with_own_box_counters(db, client):
     _login(client, _user("driver", "mvb_driver"))
     client.get("/mvb/driver")
     feed = client.get("/mvb/driver").get_data(as_text=True)
-    assert feed.count(order.number) >= 1 and "5 кор." in feed and "WB Коледино — 3, OZON Хоругвино — 2" in feed
+    assert order.number in feed and "<b>Коробов:</b> 5" in feed and "<b>Телефон:</b> +79990000000" in feed
     # скан короба: номер внутри своего направления
     data = client.post("/mvb/scan/pickup", data={"barcode": oz.boxes[1].barcode}).get_json()
     assert data["seq"] == 2 and data["total"] == 2 and data["direction"] == "OZON Хоругвино"
@@ -1119,7 +1119,7 @@ def test_multi_direction_form_validates_each_row(db, client):
     html = client.post("/mvb/orders/new", data=_multi_order_form(
         line_destination=["Коледино", ""],
     )).get_data(as_text=True)
-    assert "Направление 2: укажите СЦ" in html and MvbOrder.query.count() == 0
+    assert "Направление 2: выберите город" in html and MvbOrder.query.count() == 0
     # лишние строки сверх выбранного количества не учитываются
     client.post("/mvb/orders/new", data=_multi_order_form(direction_count="1"))
     assert len(MvbOrder.query.one().lines) == 1
@@ -1264,3 +1264,65 @@ def test_fulfillment_as_destination_for_orders_pallets_and_trips(db, client):
     data = client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": pallet.number}).get_json()
     assert data["ok"] and data["count"] == 2
     assert [s.label() for s in trip.stops] == ["Фулфилмент · Север"]
+
+
+def test_cities_list_in_prices_and_sc_price_by_city(db, client):
+    """Города отправки задает оператор в прайсе; в заявке город выбирается
+    из списка, отправка на СЦ считается по прайсу города (иначе — общий)."""
+    from wms.models import MvbCity
+
+    _login(client, _user("operator", "mvb_staff"))
+    for name in ("Коледино", "Казань"):
+        client.post("/mvb/prices", data={"action": "city_add", "name": name})
+    client.post("/mvb/prices", data={"action": "city_add", "name": "коледино"})  # дубль не добавится
+    assert sorted(MvbCity.active_names()) == ["Казань", "Коледино"]
+    kazan = MvbCity.find("казань")
+    client.post("/mvb/prices", data={"kind": "pickup", "min_boxes": "1", "price_per_box": "50"})
+    client.post("/mvb/prices", data={"kind": "sc", "min_boxes": "1", "price_per_box": "100"})
+    client.post("/mvb/prices", data={"kind": "sc", "min_boxes": "1", "price_per_box": "300", "city_id": str(kazan.id)})
+    page = client.get("/mvb/prices").get_data(as_text=True)
+    assert "Города отправки" in page and "Отправка на СЦ — Казань" in page
+    assert MvbPriceTier.price_for("sc", 5, kazan.id) == 300
+    assert MvbPriceTier.price_for("sc", 5, MvbCity.find("Коледино").id) == 100
+
+    _login(client, _user("seller", "mvb_client", _mvb_client()))
+    form = client.get("/mvb/orders/new").get_data(as_text=True)
+    assert '<option value="Казань"' in form
+    # город не из списка — нельзя
+    html = client.post("/mvb/orders/new", data=_multi_order_form(
+        line_destination=["Коледино", "Хоругвино"])).get_data(as_text=True)
+    assert "не из списка городов" in html and MvbOrder.query.count() == 0
+    client.post("/mvb/orders/new", data=_multi_order_form(line_destination=["коледино", "Казань"]))
+    order = MvbOrder.query.one()
+    assert [l.destination for l in order.lines] == ["Коледино", "Казань"]
+    client.post(f"/mvb/orders/{order.id}/confirm")
+    order = db.session.get(MvbOrder, order.id)
+    assert order.sc_cost == 3 * 100 + 2 * 300 and order.pickup_cost == 5 * 50
+
+    # скрытый город из списка пропадает
+    _login(client, User.query.filter_by(username="operator").one())
+    client.post("/mvb/prices", data={"action": "city_toggle", "city_id": str(kazan.id)})
+    assert MvbCity.active_names() == ["Коледино"]
+
+
+def test_pickup_done_button_requires_all_boxes(db, client):
+    """После скана коробов на заборе — «Готово»; пока не все короба
+    отсканированы, завершить нельзя."""
+    _login(client, _user("seller", "mvb_client", _mvb_client()))
+    order = _confirmed_order(client, box_count="3")
+    driver = _user("driver", "mvb_driver")
+    _login(client, driver)
+    client.post(f"/mvb/driver/orders/{order.id}/take")
+    assert f"/mvb/scan/pickup?order={order.id}" in client.get("/mvb/driver").get_data(as_text=True)
+    data = client.post("/mvb/scan/pickup", data={"barcode": order.boxes[0].barcode}).get_json()
+    assert data["order_id"] == order.id and data["order_done"] == 1 and data["order_total"] == 3
+    response = client.post(f"/mvb/driver/orders/{order.id}/done")
+    assert response.headers["Location"].endswith(f"/mvb/scan/pickup?order={order.id}")
+    page = client.get(response.headers["Location"]).get_data(as_text=True)
+    assert "Не все короба отсканированы: 1 из 3" in page and "Готово" in page
+    assert db.session.get(MvbOrder, order.id).pickup_done_at is None
+    for box in order.boxes[1:]:
+        client.post("/mvb/scan/pickup", data={"barcode": box.barcode})
+    response = client.post(f"/mvb/driver/orders/{order.id}/done")
+    assert response.headers["Location"].endswith("/mvb/driver")
+    assert db.session.get(MvbOrder, order.id).pickup_done_at is not None

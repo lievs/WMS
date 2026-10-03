@@ -61,7 +61,7 @@
     <select name="marketplace" class="form-select w-auto">
       {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
     </select>
-    <input name="destination" class="form-control w-auto" placeholder="СЦ или фулфилмент">
+    <input name="destination" class="form-control w-auto" list="mvb-city-list" placeholder="Город (СЦ)">
     <button class="btn btn-outline-success">+ Точка</button>
   </form>
   {% endif %}

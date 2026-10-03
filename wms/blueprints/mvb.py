@@ -23,7 +23,7 @@ from flask_login import current_user, login_user, logout_user
 from ..extensions import db
 from ..models import (
     MVB_BOX_STATUS_LABELS, MVB_BOX_STATUS_ORDER, MVB_BOX_STATUSES, MVB_DELIVERY_METHODS,
-    MVB_MARKETPLACES, MVB_ROLES, MvbOrderLine, MVB_TRIP_STATUSES, MvbBox, MvbBoxEvent, MvbClient, MvbOrder,
+    MVB_MARKETPLACES, MVB_ROLES, MvbCity, MvbOrderLine, MVB_TRIP_STATUSES, MvbBox, MvbBoxEvent, MvbClient, MvbOrder,
     MVB_PRICE_KINDS, MvbPallet, MvbPriceTier, MvbTrip, MvbTripStop, MvbVehicle, User,
 )
 from ..utils.http import content_disposition
@@ -155,6 +155,7 @@ def _inject():
             if current_user.is_authenticated and _is_operator() else 0
         ),
         "MVB_TRIP_STATUSES": MVB_TRIP_STATUSES,
+        "mvb_cities": MvbCity.active_names() if current_user.is_authenticated else [],
     }
 
 
@@ -319,13 +320,21 @@ def _form_lines():
         raw = [(form.get("marketplace", "wb"), form.get("destination", ""), form.get("slot_date", ""),
                 form.get("box_count", ""))]
     lines = []
+    cities = None
     for n, (marketplace, destination, slot, boxes) in enumerate(raw, start=1):
         prefix = f"Направление {n}: " if len(raw) > 1 else ""
         if marketplace not in MVB_MARKETPLACES:
             return None, prefix + "выберите маркетплейс"
         destination = (destination or "").strip()
         if not destination:
-            return None, prefix + "укажите СЦ / склад маркетплейса или фулфилмент"
+            return None, prefix + "выберите город (СЦ)"
+        if cities is None:
+            cities = {name.lower(): name for name in MvbCity.active_names()}
+        if cities:
+            # Список городов задан в прайсе — выбираем только из него.
+            if destination.lower() not in cities:
+                return None, prefix + f"город «{destination}» не из списка городов отправки"
+            destination = cities[destination.lower()]
         try:
             slot_date = date.fromisoformat((slot or "").strip())
         except ValueError:
@@ -645,6 +654,29 @@ def driver_take(order_id):
     return redirect(url_for("mvb.driver"))
 
 
+@bp.route("/driver/orders/<int:order_id>/done", methods=["POST"])
+def driver_pickup_done(order_id):
+    """«Готово» после скана коробов на заборе: завершить можно, только
+    когда отсканированы все короба заявки."""
+    if not _can_scan("pickup"):
+        abort(403)
+    order = MvbOrder.query.get_or_404(order_id)
+    if order.status != "confirmed" or order.delivery_method != "pickup":
+        abort(400)
+    left = [b for b in order.boxes if b.status == "created"]
+    if left:
+        flash(
+            f"Не все короба отсканированы: {len(order.boxes) - len(left)} из {len(order.boxes)}. "
+            f"Осталось: {', '.join(b.barcode for b in left[:10])}{' …' if len(left) > 10 else ''}",
+            "danger",
+        )
+        return redirect(url_for("mvb.scan", mode="pickup", order=order.id))
+    order.pickup_done_at = order.pickup_done_at or datetime.utcnow()
+    db.session.commit()
+    flash(f"Забор {order.client.name} завершен: {len(order.boxes)} кор.", "success")
+    return redirect(url_for("mvb.driver"))
+
+
 @bp.route("/driver/handover", methods=["POST"])
 def driver_handover():
     """«Короба сданы в МВБ»: водитель привез забранные короба на склад —
@@ -683,7 +715,13 @@ def scan(mode):
     if not _can_scan(mode):
         flash("Этот режим сканирования вам не доступен", "danger")
         return redirect(url_for("mvb.index"))
-    return render_template("mvb/scan.html", mode=mode, mode_info=SCAN_MODES[mode])
+    current = None
+    if mode == "pickup" and request.args.get("order", type=int):
+        current = MvbOrder.query.get(request.args.get("order", type=int))
+    return render_template(
+        "mvb/scan.html", mode=mode, mode_info=SCAN_MODES[mode], current=current,
+        current_progress=_order_progress(current, "picked_up") if current else None,
+    )
 
 
 @bp.route("/scan/<mode>", methods=["POST"])
@@ -727,9 +765,10 @@ def scan_box(mode):
     if mode == "pickup" and order.delivery_method != "pickup":
         return jsonify(ok=False, message="Это самопривоз — короб принимается на складе", **payload), 409
 
+    payload["order_id"] = order.id
     if box.status == info["to"]:
         return jsonify(ok=True, already=True, message=f"Уже отмечен: {box.status_label}",
-                       status=box.status_label, **payload)
+                       status=box.status_label, **payload, **_order_progress(order, info["to"]))
     if box.status not in info["from"]:
         return jsonify(ok=False, message=f"Сейчас короб в статусе «{box.status_label}»", **payload), 409
 
@@ -759,8 +798,18 @@ def scan_box(mode):
         message = f"{imported_note}. {message}"
     return jsonify(
         ok=True, already=False, message=message, warning=load_note,
-        status=box.status_label, done=done, **payload,
+        status=box.status_label, done=done, **payload, **_order_progress(order, info["to"]),
     )
+
+
+def _order_progress(order, status):
+    """Сколько коробов заявки уже дошло до этапа status (для кнопки
+    «Готово» при заборе)."""
+    level = MVB_BOX_STATUS_ORDER[status]
+    return {
+        "order_done": sum(1 for b in order.boxes if MVB_BOX_STATUS_ORDER.get(b.status, 0) >= level),
+        "order_total": len(order.boxes),
+    }
 
 
 # ---------- администрирование ----------
@@ -1955,7 +2004,15 @@ def _apply_prices(order):
     order.pickup_cost = (
         MvbPriceTier.cost_for("pickup", order.box_count) if order.delivery_method == "pickup" else None
     )
-    order.sc_cost = MvbPriceTier.cost_for("sc", order.box_count)
+    # Отправка на СЦ — по каждому направлению, по прайсу его города.
+    costs = []
+    for line in order.lines or []:
+        city = MvbCity.find(line.destination)
+        costs.append(MvbPriceTier.cost_for("sc", line.box_count, city.id if city else None))
+    if not order.lines:
+        costs.append(MvbPriceTier.cost_for("sc", order.box_count))
+    known = [c for c in costs if c is not None]
+    order.sc_cost = round(sum(known), 2) if known else None
 
 
 def _parse_money(value):
@@ -2001,6 +2058,8 @@ def prices():
         return redirect(url_for("mvb.index"))
     if request.method == "POST":
         action = request.form.get("action", "save")
+        if action in ("city_add", "city_toggle", "city_rename"):
+            return _prices_city_action(action)
         if action == "delete":
             tier = db.session.get(MvbPriceTier, request.form.get("tier_id", type=int)) or abort(404)
             db.session.delete(tier)
@@ -2016,9 +2075,12 @@ def prices():
         if kind not in MVB_PRICE_KINDS or not min_boxes or min_boxes < 1 or price is None:
             flash("Укажите «от скольких коробов» (от 1) и цену за короб", "danger")
             return redirect(url_for("mvb.prices"))
+        city_id = request.form.get("city_id", type=int) if kind == "sc" else None
+        if city_id and db.session.get(MvbCity, city_id) is None:
+            abort(404)
         tier_id = request.form.get("tier_id", type=int)
         tier = db.session.get(MvbPriceTier, tier_id) if tier_id else None
-        duplicate = MvbPriceTier.query.filter_by(kind=kind, min_boxes=min_boxes).first()
+        duplicate = MvbPriceTier.query.filter_by(kind=kind, min_boxes=min_boxes, city_id=city_id).first()
         if duplicate is not None and duplicate is not tier:
             # Одна ступень на количество: правим существующую, лишнюю удаляем.
             if tier is not None:
@@ -2029,14 +2091,52 @@ def prices():
             db.session.add(tier)
         tier.min_boxes = min_boxes
         tier.price_per_box = price
+        tier.city_id = city_id
         db.session.commit()
         flash("Прайс сохранен", "success")
         return redirect(url_for("mvb.prices"))
+    cities = MvbCity.query.order_by(MvbCity.is_active.desc(), MvbCity.name).all()
     tiers = {
-        kind: MvbPriceTier.query.filter_by(kind=kind).order_by(MvbPriceTier.min_boxes).all()
-        for kind in MVB_PRICE_KINDS
+        "pickup": MvbPriceTier.query.filter_by(kind="pickup").order_by(MvbPriceTier.min_boxes).all(),
+        "sc": MvbPriceTier.query.filter_by(kind="sc", city_id=None).order_by(MvbPriceTier.min_boxes).all(),
     }
-    return render_template("mvb/prices.html", tiers=tiers, kinds=MVB_PRICE_KINDS)
+    city_tiers = {
+        city.id: MvbPriceTier.query.filter_by(kind="sc", city_id=city.id).order_by(MvbPriceTier.min_boxes).all()
+        for city in cities
+    }
+    return render_template(
+        "mvb/prices.html", tiers=tiers, kinds=MVB_PRICE_KINDS, cities=cities, city_tiers=city_tiers,
+    )
+
+
+def _prices_city_action(action):
+    """Список городов отправки: добавить, переименовать, скрыть/вернуть."""
+    if action == "city_add":
+        name = request.form.get("name", "").strip()
+        if not name:
+            flash("Укажите название города", "danger")
+        elif MvbCity.find(name):
+            flash(f"Город «{name}» уже в списке", "warning")
+        else:
+            db.session.add(MvbCity(name=name))
+            db.session.commit()
+            flash(f"Город «{name}» добавлен", "success")
+        return redirect(url_for("mvb.prices"))
+    city = db.session.get(MvbCity, request.form.get("city_id", type=int)) or abort(404)
+    if action == "city_toggle":
+        city.is_active = not city.is_active
+        db.session.commit()
+        flash(f"Город «{city.name}» {'снова в списке' if city.is_active else 'скрыт из списка'}", "success")
+    else:
+        name = request.form.get("name", "").strip()
+        other = MvbCity.find(name)
+        if not name or (other is not None and other is not city):
+            flash("Название пустое или такой город уже есть", "danger")
+        else:
+            city.name = name
+            db.session.commit()
+            flash("Город переименован", "success")
+    return redirect(url_for("mvb.prices"))
 
 
 def _report_period():
