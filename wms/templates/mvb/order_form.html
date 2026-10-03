@@ -29,31 +29,38 @@
     {%- set _ = rows.append({'mp': order.marketplace, 'dest': order.destination or '', 'slot': order.slot_date or '', 'boxes': order.box_count}) -%}
   {%- endif -%}
   {%- set count = (form.get('direction_count')|int if form is defined and form.get('direction_count') else 0) or (order.lines|length if order and order.lines else 0) or 1 -%}
-  <div class="mb-3" style="max-width:260px">
-    <label class="form-label">Сколько направлений (СЦ) в заявке?</label>
+  <div class="mb-3" style="max-width:320px">
+    <label class="form-label">Сколько направлений в заявке?</label>
     <select name="direction_count" id="direction-count" class="form-select">
       {% for n in range(1, max_directions + 1) %}<option value="{{ n }}" {{ 'selected' if n == count }}>{{ n }}</option>{% endfor %}
     </select>
   </div>
-  <div class="table-responsive mb-1">
-  <table class="table table-sm align-middle mb-1">
-    <thead><tr><th>#</th><th>Куда</th><th>СЦ / склад / фулфилмент *</th><th>Дата слота *</th><th style="width:110px">Коробов *</th></tr></thead>
-    <tbody>
-    {% for n in range(max_directions) %}
-      {% set r = rows[n] if n < rows|length else {} %}
-      <tr class="direction-row" data-n="{{ n + 1 }}">
-        <td>{{ n + 1 }}</td>
-        <td><select name="line_marketplace" class="form-select form-select-sm">
-          {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}" {{ 'selected' if (r.mp or 'wb') == code }}>{{ label }}</option>{% endfor %}
-        </select></td>
-        <td><input name="line_destination" class="form-control form-control-sm" value="{{ r.dest or '' }}" placeholder="Коледино или название ФФ" required></td>
-        <td><input name="line_slot" type="date" class="form-control form-control-sm" value="{{ r.slot or '' }}" required></td>
-        <td><input name="line_boxes" type="number" min="1" max="500" class="form-control form-control-sm" value="{{ r.boxes or '' }}" required></td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
+  {% for n in range(max_directions) %}
+    {% set r = rows[n] if n < rows|length else {} %}
+    <div class="direction-row border rounded p-2 mb-2" data-n="{{ n + 1 }}">
+      <div class="small fw-bold mb-1">Направление {{ n + 1 }}</div>
+      <div class="row g-2">
+        <div class="col-12 col-md-3">
+          <label class="form-label small mb-0">Куда</label>
+          <select name="line_marketplace" class="form-select">
+            {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}" {{ 'selected' if (r.mp or 'wb') == code }}>{{ label }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-12 col-md-4">
+          <label class="form-label small mb-0">СЦ / склад / фулфилмент *</label>
+          <input name="line_destination" class="form-control" value="{{ r.dest or '' }}" placeholder="Коледино или название ФФ" required>
+        </div>
+        <div class="col-7 col-md-3">
+          <label class="form-label small mb-0">Дата слота *</label>
+          <input name="line_slot" type="date" class="form-control" value="{{ r.slot or '' }}" required>
+        </div>
+        <div class="col-5 col-md-2">
+          <label class="form-label small mb-0">Коробов *</label>
+          <input name="line_boxes" type="number" min="1" max="500" inputmode="numeric" class="form-control" value="{{ r.boxes or '' }}" required>
+        </div>
+      </div>
+    </div>
+  {% endfor %}
   <div class="form-text mb-3">Дата слота — дата поставки, забронированная на складе маркетплейса. Всего коробов: <b id="total-boxes">0</b>.</div>
   <div class="row g-3">
     <div class="col-sm-6">
@@ -72,11 +79,11 @@
       <label class="form-label">Дата забора / сдачи</label>
       <input name="planned_date" type="date" class="form-control" value="{{ val('planned_date') }}">
     </div>
-    <div class="col-sm-4">
+    <div class="col-6 col-sm-4">
       <label class="form-label">Время с</label>
       <input name="time_from" type="time" class="form-control" value="{{ val('time_from') }}">
     </div>
-    <div class="col-sm-4">
+    <div class="col-6 col-sm-4">
       <label class="form-label">по</label>
       <input name="time_to" type="time" class="form-control" value="{{ val('time_to') }}">
     </div>
