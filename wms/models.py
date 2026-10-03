@@ -2038,23 +2038,12 @@ class MvbTripStop(db.Model):
     def map_query(self):
         return self.address or f"{self.marketplace_label} {self.destination or ''}".strip()
 
-    def order_groups(self):
-        """Короба точки по заявкам (направлениям заявок): водитель отмечает
-        «Сдан на СЦ» напротив каждой заявки."""
-        groups = {}
-        for box in self.boxes:
-            key = box.line_id or -box.order_id
-            group = groups.setdefault(key, {"key": key, "line": box.line, "order": box.order, "boxes": []})
-            group["boxes"].append(box)
-        result = []
-        for group in groups.values():
-            statuses = {b.status for b in group["boxes"]}
-            group["state"] = (
-                "pending" if "shipped" in statuses or "loaded" in statuses
-                else "delivered" if statuses == {"delivered"} else "rejected"
-            )
-            result.append(group)
-        return result
+    def pallet_count(self):
+        return len({b.pallet_id for b in self.boxes if b.pallet_id})
+
+    def loose_boxes(self):
+        """Короба на точке без паллеты."""
+        return sum(1 for b in self.boxes if not b.pallet_id)
 
 
 MVB_PRICE_KINDS = {"pickup": "Забор груза", "sc": "Отправка на СЦ"}

@@ -32,7 +32,7 @@
     <button class="btn btn-outline-success btn-lg w-100">Я на погрузке</button>
   </form>
   {% elif trip.status in ('arrived', 'loading') %}
-  <div class="alert alert-info">Идет погрузка. После отправки здесь появятся кнопки «Сдан на СЦ» по каждой заявке.</div>
+  <div class="alert alert-info">Идет погрузка. После отправки здесь появятся кнопки «Сдан на СЦ» по точкам.</div>
   {% elif trip.status == 'delivered' %}
   <div class="alert alert-success">Рейс завершен, спасибо!</div>
   {% endif %}
@@ -43,10 +43,7 @@
   <ol class="list-group list-group-numbered mb-3">
     {% for stop in trip.stops %}
     <li class="list-group-item">
-      <a target="_blank" href="https://yandex.ru/maps/?text={{ stop.map_query()|urlencode }}">📍 {{ stop.label() }}</a>
-      {% if stop.address %}<div class="small">{{ stop.address }}</div>{% endif %}
-      <div class="small text-muted">коробов: {{ stop.boxes|length or stop.planned_boxes }}{% if stop.result == 'delivered' %} · <span class="text-success">✓ точка сдана</span>{% elif stop.result == 'rejected' %} · <span class="text-danger">есть не сданные</span>{% endif %}</div>
-      {% if stop.boxes %}{% set public_token = token %}{% include "mvb/_stop_orders.html" %}{% endif %}
+      {% set public_token = token %}{% include "mvb/_stop_driver.html" %}
     </li>
     {% endfor %}
   </ol>

@@ -37,7 +37,6 @@ bp = Blueprint("mvb", __name__)
 # Ссылка для наемного водителя на СЦ (без учетной записи) — по токену рейса.
 MVB_PUBLIC_ENDPOINTS = {
     "mvb.login", "mvb.register", "mvb.trip_public", "mvb.trip_public_arrive", "mvb.trip_public_stop",
-    "mvb.trip_public_order",
 }
 
 MAX_BOXES_PER_ORDER = 500
@@ -1529,57 +1528,8 @@ def _apply_stop_result(trip, stop, action, comment):
         trip.delivered_at = now
     db.session.commit()
     if action == "deliver":
-        return "success", f"Сдано: {stop.label()} — {len(stop.boxes)} кор."
+        return "success", f"Сдан на СЦ: {stop.label()} — {len(stop.boxes)} кор."
     return "warning", f"Не сдано: {stop.label()} — {len(stop.boxes)} кор. везите обратно на склад МВБ"
-
-
-def _apply_order_result(trip, stop, key, action, comment):
-    """«Сдан на СЦ» / «Не сдан» (с причиной) по одной заявке на точке.
-    key — направление заявки (как в MvbTripStop.order_groups). Когда
-    отмечены все заявки точки, точка закрывается; когда все точки —
-    рейс завершен."""
-    if trip.status != "departed":
-        return "warning", "Рейс еще не в пути"
-    group = next((g for g in stop.order_groups() if g["key"] == key), None)
-    if group is None:
-        abort(404)
-    boxes = [b for b in group["boxes"] if b.status == "shipped"]
-    if not boxes:
-        return "warning", f"Заявка {group['order'].number} уже отмечена"
-    comment = (comment or "").strip()
-    if action == "reject" and not comment:
-        return "danger", "Укажите причину, почему не сдано"
-    now = datetime.utcnow()
-    for box in boxes:
-        _move_box(box, "delivered" if action == "deliver" else "not_delivered", now)
-    if action == "reject":
-        note = f"{group['order'].number}: {comment}"
-        stop.delivery_comment = f"{stop.delivery_comment}; {note}" if stop.delivery_comment else note
-    if not any(b.status == "shipped" for b in stop.boxes):
-        stop.result = "delivered" if all(b.status == "delivered" for b in stop.boxes) else "rejected"
-        stop.delivered_at = now
-        stop.delivered_by_id = current_user.id if current_user.is_authenticated else None
-    if all(s.result for s in trip.stops):
-        trip.status = "delivered"
-        trip.delivered_at = now
-    db.session.commit()
-    name = f"{group['order'].number} ({group['order'].client.name})"
-    if action == "deliver":
-        return "success", f"Сдан на СЦ: {name} — {len(boxes)} кор."
-    return "warning", f"Не сдан: {name} — {len(boxes)} кор. везите обратно на склад МВБ"
-
-
-@bp.route("/trips/<int:trip_id>/stops/<int:stop_id>/orders/<int(signed=True):key>/<action>", methods=["POST"])
-def trip_order_result(trip_id, stop_id, key, action):
-    trip = _get_trip_or_404(trip_id)
-    stop = db.session.get(MvbTripStop, stop_id)
-    if stop is None or stop.trip_id != trip.id or action not in ("deliver", "reject"):
-        abort(404)
-    category, message = _apply_order_result(trip, stop, key, action, request.form.get("comment", ""))
-    flash(message, category)
-    if _is_driver():
-        return redirect(url_for("mvb.driver"))
-    return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
 
 
 @bp.route("/trips/<int:trip_id>/stops/<int:stop_id>/<action>", methods=["POST"])
@@ -1863,17 +1813,6 @@ def trip_public_stop(token, stop_id, action):
     if stop is None or stop.trip_id != trip.id or action not in ("deliver", "reject"):
         abort(404)
     category, message = _apply_stop_result(trip, stop, action, request.form.get("comment", ""))
-    flash(message, category)
-    return redirect(url_for("mvb.trip_public", token=token))
-
-
-@bp.route("/t/<token>/stops/<int:stop_id>/orders/<int(signed=True):key>/<action>", methods=["POST"])
-def trip_public_order(token, stop_id, key, action):
-    trip = _trip_by_token_or_404(token)
-    stop = db.session.get(MvbTripStop, stop_id)
-    if stop is None or stop.trip_id != trip.id or action not in ("deliver", "reject"):
-        abort(404)
-    category, message = _apply_order_result(trip, stop, key, action, request.form.get("comment", ""))
     flash(message, category)
     return redirect(url_for("mvb.trip_public", token=token))
 

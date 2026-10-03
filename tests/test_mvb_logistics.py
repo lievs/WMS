@@ -1328,9 +1328,9 @@ def test_pickup_done_button_requires_all_boxes(db, client):
     assert db.session.get(MvbOrder, order.id).pickup_done_at is not None
 
 
-def test_sc_addresses_route_and_delivered_per_order(db, client):
-    """Адреса СЦ в списке городов — маршрут водителю; «Сдан на СЦ» —
-    напротив каждой заявки, точка закрывается, когда отмечены все."""
+def test_sc_addresses_route_and_driver_sees_only_address_and_count(db, client):
+    """Адреса СЦ в списке городов — маршрут водителю; на точке — адрес,
+    сколько сдать и «Сдан на СЦ»."""
     from wms.models import MvbCity
 
     staff = _user("staff1", "mvb_admin")
@@ -1355,22 +1355,12 @@ def test_sc_addresses_route_and_delivered_per_order(db, client):
     _login(client, driver)
     client.get("/mvb/driver")
     page = client.get("/mvb/driver").get_data(as_text=True)
-    assert "Маршрут по точкам" in page and page.count(">Сдан на СЦ</button>") == 2
-    keys = {g["order"].number: g["key"] for g in stop.order_groups()}
-    client.post(f"/mvb/trips/{trip.id}/stops/{stop.id}/orders/{keys[a.number]}/deliver")
-    db.session.refresh(stop)
-    assert {x.status for x in a.boxes} == {"delivered"} and stop.result is None
-    # причина обязательна
-    client.post(f"/mvb/trips/{trip.id}/stops/{stop.id}/orders/{keys[b.number]}/reject")
-    assert b.boxes[0].status == "shipped"
-    # по ссылке наемного водителя — тоже по заявке
-    client.post("/mvb/logout")
-    client.post(f"/mvb/t/{trip.access_token}/stops/{stop.id}/orders/{keys[b.number]}/reject",
-                data={"comment": "нет пропуска"})
-    db.session.refresh(stop)
+    # водителю — адрес, сколько паллет/коробов сдать и «Сдан на СЦ», без клиентов
+    assert "Маршрут по точкам" in page and "Подольск, Коледино" in page and "<b>3</b> кор." in page
+    assert "ИП А" not in page and page.count("Сдан на СЦ</button>") == 1
+    client.post(f"/mvb/trips/{trip.id}/stops/{stop.id}/deliver")
     db.session.refresh(trip)
-    assert b.boxes[0].status == "not_delivered" and stop.result == "rejected"
-    assert "нет пропуска" in stop.delivery_comment and trip.status == "delivered"
+    assert trip.status == "delivered" and {x.status for x in a.boxes + b.boxes} == {"delivered"}
 
 
 def test_pallet_page_lists_direction_boxes_and_highlights_scanned(db, client):
@@ -1427,3 +1417,7 @@ def test_operator_assigns_car_and_storekeeper_loads_by_plate(db, client):
     assert response.headers["Location"].endswith("/mvb/loading")
     db.session.refresh(trip)
     assert trip.status == "departed" and {b.status for b in order.boxes} == {"shipped"}
+    # водитель по ссылке видит, сколько паллет сдать на точке
+    client.post("/mvb/logout")
+    page = client.get(f"/mvb/t/{trip.access_token}").get_data(as_text=True)
+    assert "Сдать: <b>1</b> пал." in page and "Сдан на СЦ" in page
