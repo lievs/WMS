@@ -1674,9 +1674,12 @@ class MvbOrder(db.Model):
     # Стоимость (руб.): считается по прайсу при оформлении, оператор может
     # поправить вручную.
     pickup_cost = db.Column(db.Float)
+    # Зона забора (Черкесск / регионы / ...) — фиксированная цена забора.
+    pickup_zone_id = db.Column(db.Integer, db.ForeignKey("mvb_pickup_zones.id"))
     sc_cost = db.Column(db.Float)
 
     client = db.relationship("MvbClient")
+    pickup_zone = db.relationship("MvbPickupZone")
     driver = db.relationship("User", foreign_keys=[driver_id])
     created_by = db.relationship("User", foreign_keys=[created_by_id])
     wms_movement = db.relationship("MovementDocument")
@@ -2047,6 +2050,23 @@ class MvbTripStop(db.Model):
 
 
 MVB_PRICE_KINDS = {"pickup": "Забор груза", "sc": "Отправка на СЦ"}
+
+
+class MvbPickupZone(db.Model):
+    """Зона забора груза с фиксированной ценой за забор (например,
+    «Черкесск — 1000 руб.», «Регионы — 1500 руб.»). Клиент выбирает зону в
+    заявке; если зон нет — забор считается по прайсу за короб."""
+
+    __tablename__ = "mvb_pickup_zones"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, unique=True)
+    price = db.Column(db.Float, nullable=False, default=0)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+
+    @staticmethod
+    def active():
+        return MvbPickupZone.query.filter_by(is_active=True).order_by(MvbPickupZone.price, MvbPickupZone.name).all()
 
 
 class MvbCity(db.Model):

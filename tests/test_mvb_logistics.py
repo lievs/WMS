@@ -1512,3 +1512,50 @@ def test_admin_deletes_orders_trips_and_pallets(db, client):
     assert db.session.get(MvbOrder, order.id) is None
     assert MvbBox.query.filter(MvbBox.id.in_(box_ids)).count() == 0
     assert "удалена" in client.get("/mvb/orders").get_data(as_text=True)
+
+
+def test_default_prices_seeded_once_and_pickup_zones(db, client):
+    """Прайс MWB по умолчанию: города с прайсом, пункты WB/Ozon, зоны
+    забора; заносится один раз и не трогает уже заведенное."""
+    from wms import _seed_mvb_default_prices
+    from wms.models import MvbCity, MvbDestination, MvbPickupZone
+
+    db.session.add(MvbCity(name="казань"))
+    db.session.commit()
+    _seed_mvb_default_prices()
+    kazan = MvbCity.find("Казань")
+    assert MvbCity.query.filter(db.func.lower(MvbCity.name) == "казань").count() == 1
+    assert MvbPriceTier.price_for("sc", 1, kazan.id) == 600 and MvbPriceTier.price_for("sc", 11, kazan.id) == 420
+    novosib = MvbCity.find("Новосибирск")
+    assert [MvbPriceTier.price_for("sc", n, novosib.id) for n in (1, 11, 16)] == [1050, 870, 790]
+    assert MvbDestination.find("ozon", "Хоругвино") and MvbDestination.find("wb", "Подольск 4")
+    assert MvbDestination.find("wb", "Хоругвино") is None
+    assert {(z.name, z.price) for z in MvbPickupZone.active()} == {
+        ("Черкесск", 1000), ("Регионы", 1500), ("Хабез", 1800), ("Отрадная", 2800),
+    }
+    # второй раз не срабатывает: удаленное оператором не возвращается
+    MvbPriceTier.query.filter_by(city_id=kazan.id).delete()
+    db.session.commit()
+    _seed_mvb_default_prices()
+    assert MvbPriceTier.query.filter_by(city_id=kazan.id).count() == 0
+
+    # заявка: зона забора обязательна, цена забора — по зоне
+    seller = _user("seller", "mvb_client", _mvb_client())
+    _login(client, seller)
+    html = client.post("/mvb/orders/new", data=_multi_order_form(
+        line_marketplace=["ozon", "wb"], line_destination=["Хоругвино", "Подольск 4"])).get_data(as_text=True)
+    assert "Выберите зону забора" in html and MvbOrder.query.count() == 0
+    zone = MvbPickupZone.query.filter_by(name="Регионы").one()
+    client.post("/mvb/orders/new", data=_multi_order_form(
+        line_marketplace=["ozon", "wb"], line_destination=["Хоругвино", "Подольск 4"], pickup_zone_id=str(zone.id)))
+    order = MvbOrder.query.one()
+    client.post(f"/mvb/orders/{order.id}/confirm")
+    order = db.session.get(MvbOrder, order.id)
+    assert order.pickup_cost == 1500 and order.sc_cost == 3 * 550 + 2 * 550
+    assert "Зона забора" in client.get(f"/mvb/orders/{order.id}").get_data(as_text=True)
+
+    # оператор правит зону
+    _login(client, _user("operator", "mvb_staff"))
+    client.post("/mvb/prices", data={"action": "zone_save", "zone_id": str(zone.id), "name": "Регионы", "price": "1600"})
+    assert db.session.get(MvbPickupZone, zone.id).price == 1600
+    assert "Зона *" in client.get("/mvb/prices").get_data(as_text=True)

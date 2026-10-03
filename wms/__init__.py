@@ -327,6 +327,84 @@ def _ensure_mvb_destinations():
         print(f"[schema] МВБ: справочник городов и прайс по городам обновлены — {changed}")
 
 
+# Прайс MWB по умолчанию (прайсы WB и Ozon от 2026-10-03): ступени «от N
+# коробов — цена за короб» по городу и пункты назначения в нем.
+MVB_DEFAULT_TIERS = {
+    "msk": [(1, 550), (11, 420)],
+    "kzn": [(1, 600), (11, 420)],
+    "sib": [(1, 1050), (11, 870), (16, 790)],
+    "ekb": [(1, 950), (11, 750), (16, 690)],
+    "vlg": [(1, 450), (11, 400)],
+    "spb": [(1, 750), (11, 550)],
+    "ady": [(1, 300), (11, 250)],
+    "thk": [(1, 300)],
+    "nev": [(1, 150)],
+}
+MVB_DEFAULT_CITIES = [
+    # город, ступени, маркетплейсы
+    ("Гривно", "msk", ("ozon",)),
+    ("Ногинск", "msk", ("ozon",)),
+    ("Софьино", "msk", ("ozon",)),
+    ("Хоругвино", "msk", ("ozon",)),
+    ("Пушкино", "msk", ("ozon",)),
+    ("Домодедово", "msk", ("ozon",)),
+    ("Петровское", "msk", ("ozon",)),
+    ("Чашниково", "msk", ("wb",)),
+    ("Радумля", "msk", ("wb",)),
+    ("Никольское", "msk", ("wb",)),
+    ("Щеглово", "msk", ("wb",)),
+    ("Подольск 4", "msk", ("wb",)),
+    ("Домодедово 2", "msk", ("wb",)),
+    ("Казань", "kzn", ("wb", "ozon")),
+    ("Самара", "kzn", ("wb",)),
+    ("Новосибирск", "sib", ("wb", "ozon")),
+    ("Омск", "sib", ("wb", "ozon")),
+    ("Екатеринбург", "ekb", ("wb", "ozon")),
+    ("Волгоград", "vlg", ("ozon",)),
+    ("Санкт-Петербург", "spb", ("ozon",)),
+    ("Бугры", "spb", ("ozon",)),
+    ("Шушары", "spb", ("wb", "ozon")),
+    ("Колпино", "spb", ("ozon",)),
+    ("Порошкино", "spb", ("ozon",)),
+    ("Адыгейск", "ady", ("ozon",)),
+    ("Тахтамукай", "thk", ("wb",)),
+    ("Невинномысск", "nev", ("wb", "ozon")),
+]
+MVB_DEFAULT_PICKUP_ZONES = [("Черкесск", 1000), ("Регионы", 1500), ("Хабез", 1800), ("Отрадная", 2800)]
+
+
+def _seed_mvb_default_prices():
+    """Один раз заносит прайс MWB по умолчанию: города с прайсом, пункты
+    назначения WB / Ozon и зоны забора. То, что оператор уже завел, не
+    трогает (город со своим прайсом, существующий пункт, уже заданные
+    зоны); после первого запуска больше не срабатывает — удаленное
+    оператором не возвращается."""
+    from .models import AppSetting, MvbCity, MvbDestination, MvbPickupZone, MvbPriceTier
+
+    key = "mvb_default_prices_v1"
+    if db.session.get(AppSetting, key) is not None:
+        return
+    for name, tiers_key, marketplaces in MVB_DEFAULT_CITIES:
+        city = MvbCity.find(name)
+        if city is None:
+            city = MvbCity(name=name)
+            db.session.add(city)
+            db.session.flush()
+        if not MvbPriceTier.query.filter_by(kind="sc", city_id=city.id).first():
+            for min_boxes, price in MVB_DEFAULT_TIERS[tiers_key]:
+                db.session.add(MvbPriceTier(kind="sc", city_id=city.id, min_boxes=min_boxes, price_per_box=price))
+        for marketplace in marketplaces:
+            if MvbDestination.find(marketplace, city.name) is None:
+                db.session.add(MvbDestination(marketplace=marketplace, city=city.name))
+        db.session.flush()
+    if not MvbPickupZone.query.first():
+        for name, price in MVB_DEFAULT_PICKUP_ZONES:
+            db.session.add(MvbPickupZone(name=name, price=price))
+    db.session.add(AppSetting(key=key, value="1"))
+    db.session.commit()
+    print("[schema] МВБ: занесен прайс по умолчанию (города, пункты WB/Ozon, зоны забора)")
+
+
 def _register_sqlite_tuning():
     """SQLite-специфичные настройки:
     - LOWER/UPPER на Python-реализации (сравнение LIKE/ILIKE по умолчанию
@@ -465,6 +543,8 @@ def create_app(config_class=Config):
         _ensure_indexes()
         _ensure_mvb_lines()
         _ensure_mvb_destinations()
+        if not app.config.get("TESTING"):
+            _seed_mvb_default_prices()
         _bootstrap_admin()
         bootstrap_categories()
 

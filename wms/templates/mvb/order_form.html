@@ -86,6 +86,15 @@
       <input name="pickup_address" class="form-control" value="{{ val('pickup_address', default_address or '') }}">
       <div class="form-text">Обязателен для забора транспортной компанией.</div>
     </div>
+    {% if mvb_pickup_zones %}
+    <div class="col-sm-6 js-zone">
+      <label class="form-label">Зона забора *</label>
+      <select name="pickup_zone_id" class="form-select">
+        <option value="">— выберите —</option>
+        {% for z in mvb_pickup_zones %}<option value="{{ z.id }}" {{ 'selected' if val('pickup_zone_id') == z.id|string }}>{{ z.name }} — {{ '%g'|format(z.price) }} ₽</option>{% endfor %}
+      </select>
+    </div>
+    {% endif %}
     <div class="col-12"></div>
     <div class="col-sm-4">
       <label class="form-label">Дата забора / сдачи</label>
@@ -124,6 +133,17 @@
       if (!input.disabled) sum += parseInt(input.value, 10) || 0;
     });
     total.textContent = sum;
+  }
+  // Зона забора нужна только для забора.
+  const methodSelect = document.querySelector("select[name=delivery_method]");
+  const zoneBox = document.querySelector(".js-zone");
+  if (zoneBox) {
+    const zoneSync = () => {
+      const on = methodSelect.value === "pickup";
+      zoneBox.classList.toggle("d-none", !on);
+      zoneBox.querySelector("select").required = on;
+    };
+    methodSelect.addEventListener("change", zoneSync); zoneSync();
   }
   countSelect.addEventListener("change", refreshRows);
   document.querySelectorAll("input[name=line_boxes]").forEach(el => el.addEventListener("input", refreshRows));

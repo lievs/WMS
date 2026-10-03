@@ -121,7 +121,37 @@
 <div class="row g-3">
   <div class="col-lg-6">
     <div class="card p-3 h-100">
-      <h5>{{ kinds['pickup'] }}</h5>
+      <h5>{{ kinds['pickup'] }} — зоны</h5>
+      <div class="small text-muted mb-2">Фиксированная цена за забор; клиент выбирает зону в заявке.</div>
+      <table class="table table-sm align-middle">
+        <thead><tr><th>Зона</th><th>Цена забора, руб.</th><th></th></tr></thead>
+        <tbody>
+        {% for z in zones %}
+          <tr class="{{ '' if z.is_active else 'text-muted table-light' }}">
+            <td><input form="zone-{{ z.id }}" name="name" class="form-control form-control-sm" value="{{ z.name }}"></td>
+            <td><input form="zone-{{ z.id }}" name="price" class="form-control form-control-sm" value="{{ '%g'|format(z.price) }}" style="max-width:120px"></td>
+            <td class="text-nowrap">
+              <form method="post" id="zone-{{ z.id }}" class="d-inline"><input type="hidden" name="action" value="zone_save"><input type="hidden" name="zone_id" value="{{ z.id }}"><button class="btn btn-sm btn-outline-primary">Сохранить</button></form>
+              <form method="post" class="d-inline"><input type="hidden" name="action" value="zone_toggle"><input type="hidden" name="zone_id" value="{{ z.id }}"><button class="btn btn-sm btn-outline-secondary">{{ 'Скрыть' if z.is_active else 'Вернуть' }}</button></form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="3" class="text-muted">Зон нет — забор считается по цене за короб ниже</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <form method="post" class="d-flex flex-wrap gap-2">
+        <input type="hidden" name="action" value="zone_add">
+        <input name="name" class="form-control w-auto" placeholder="Зона *" required style="max-width:160px">
+        <input name="price" class="form-control w-auto" placeholder="руб." required style="max-width:110px">
+        <button class="btn btn-success">+ Зона</button>
+      </form>
+    </div>
+  </div>
+  <div class="col-lg-6">
+    <div class="card p-3 h-100">
+      <h5>{{ kinds['pickup'] }} — за короб</h5>
+      <div class="small text-muted mb-1">Если зон забора нет.</div>
       {% call tier_table('pickup', tiers['pickup']) %}Не заполнено — стоимость забора считаться не будет{% endcall %}
     </div>
   </div>

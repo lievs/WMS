@@ -24,7 +24,7 @@ from ..extensions import db
 from ..models import (
     MVB_BOX_STATUS_LABELS, MVB_BOX_STATUS_ORDER, MVB_BOX_STATUSES, MVB_DELIVERY_METHODS,
     MVB_MARKETPLACES, MVB_ROLES, MvbCity, MvbDestination, MvbOrderLine, MVB_TRIP_STATUSES, MvbBox, MvbBoxEvent, MvbClient, MvbOrder,
-    MVB_PRICE_KINDS, MvbPallet, MvbPriceTier, MvbTrip, MvbTripStop, MvbVehicle, User,
+    MVB_PRICE_KINDS, MvbPallet, MvbPickupZone, MvbPriceTier, MvbTrip, MvbTripStop, MvbVehicle, User,
 )
 from ..utils.http import content_disposition
 from ..utils.labels_pdf import build_labels_batch_pdf, build_mvb_box_labels_pdf
@@ -158,6 +158,7 @@ def _inject():
         ),
         "MVB_TRIP_STATUSES": MVB_TRIP_STATUSES,
         "mvb_destinations": MvbDestination.active() if current_user.is_authenticated else [],
+        "mvb_pickup_zones": MvbPickupZone.active() if current_user.is_authenticated else [],
     }
 
 
@@ -382,12 +383,18 @@ def _fill_order_from_form(order):
     pickup_address = request.form.get("pickup_address", "").strip()
     if delivery_method == "pickup" and not pickup_address:
         return "Для забора укажите адрес"
+    zone = None
+    if delivery_method == "pickup" and MvbPickupZone.active():
+        zone = db.session.get(MvbPickupZone, request.form.get("pickup_zone_id", type=int) or 0)
+        if zone is None or not zone.is_active:
+            return "Выберите зону забора"
 
     # Черновик: коробов еще нет — направления просто пересоздаем.
     order.lines = [MvbOrderLine(seq=n, **data) for n, data in enumerate(lines, start=1)]
     order.sync_from_lines()
     order.delivery_method = delivery_method
     order.pickup_address = pickup_address or None
+    order.pickup_zone = zone
     order.planned_date = planned_date
     order.time_from = _parse_time(request.form.get("time_from"))
     order.time_to = _parse_time(request.form.get("time_to"))
@@ -2124,9 +2131,13 @@ def _apply_prices(order):
     своих коробов из WMS стоимость не считается."""
     if order.client and order.client.is_internal:
         return
-    order.pickup_cost = (
-        MvbPriceTier.cost_for("pickup", order.box_count) if order.delivery_method == "pickup" else None
-    )
+    if order.delivery_method != "pickup":
+        order.pickup_cost = None
+    elif order.pickup_zone is not None:
+        # Забор по зоне — фиксированная цена за забор.
+        order.pickup_cost = order.pickup_zone.price
+    else:
+        order.pickup_cost = MvbPriceTier.cost_for("pickup", order.box_count)
     # Отправка на СЦ — по каждому направлению, по прайсу его города.
     costs = []
     for line in order.lines or []:
@@ -2186,6 +2197,8 @@ def prices():
             return _prices_destination_action(action)
         if action in ("city_add", "city_toggle", "city_save"):
             return _prices_city_action(action)
+        if action in ("zone_add", "zone_toggle", "zone_save"):
+            return _prices_zone_action(action)
         if action == "delete":
             tier = db.session.get(MvbPriceTier, request.form.get("tier_id", type=int)) or abort(404)
             db.session.delete(tier)
@@ -2235,7 +2248,7 @@ def prices():
     }
     return render_template(
         "mvb/prices.html", tiers=tiers, kinds=MVB_PRICE_KINDS, destinations=destinations, cities=cities,
-        city_tiers=city_tiers,
+        city_tiers=city_tiers, zones=MvbPickupZone.query.order_by(MvbPickupZone.is_active.desc(), MvbPickupZone.price).all(),
     )
 
 
@@ -2324,6 +2337,36 @@ def _prices_city_action(action):
         city.name = name
         db.session.commit()
         flash(f"Сохранено: {name}", "success")
+    return redirect(url_for("mvb.prices"))
+
+
+def _prices_zone_action(action):
+    """Зоны забора: добавить, изменить, скрыть/вернуть."""
+    zone = None
+    if action != "zone_add":
+        zone = db.session.get(MvbPickupZone, request.form.get("zone_id", type=int)) or abort(404)
+    if action == "zone_toggle":
+        zone.is_active = not zone.is_active
+        db.session.commit()
+        flash(f"Зона «{zone.name}»: {'снова в списке' if zone.is_active else 'скрыта'}", "success")
+        return redirect(url_for("mvb.prices"))
+    name = " ".join(request.form.get("name", "").split())
+    try:
+        price = _parse_money(request.form.get("price"))
+    except ValueError:
+        price = None
+    other = MvbPickupZone.query.filter(db.func.lower(MvbPickupZone.name) == name.lower()).first()
+    if not name or price is None:
+        flash("Укажите название зоны и цену забора", "danger")
+    elif other is not None and other is not zone:
+        flash(f"Зона «{name}» уже есть", "danger")
+    else:
+        if zone is None:
+            zone = MvbPickupZone()
+            db.session.add(zone)
+        zone.name, zone.price = name, price
+        db.session.commit()
+        flash(f"Зона забора «{name}» — {price:g} руб.", "success")
     return redirect(url_for("mvb.prices"))
 
 
