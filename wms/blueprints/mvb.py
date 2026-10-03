@@ -325,7 +325,7 @@ def _form_lines():
             return None, prefix + "выберите маркетплейс"
         destination = (destination or "").strip()
         if not destination:
-            return None, prefix + "укажите СЦ / склад маркетплейса"
+            return None, prefix + "укажите СЦ / склад маркетплейса или фулфилмент"
         try:
             slot_date = date.fromisoformat((slot or "").strip())
         except ValueError:
@@ -1736,7 +1736,7 @@ def _wms_candidates_query():
         .filter(
             MovementDocument.status == "completed",
             MovementDocument.shipped_at.is_(None),
-            Warehouse.marketplace.in_(list(MVB_MARKETPLACES)),
+            Warehouse.marketplace.in_(["wb", "ozon"]),
         )
     )
 
@@ -2071,8 +2071,19 @@ def _report_rows(date_from, date_to):
 
     orders = MvbOrder.query.filter(
         MvbOrder.status == "confirmed", MvbOrder.confirmed_at >= start, MvbOrder.confirmed_at <= end,
-    ).all()
+    ).order_by(MvbOrder.created_at, MvbOrder.id).all()
+    order_rows = []
     for order in orders:
+        order_rows.append({
+            "order": order, "date": order.created_at + MOSCOW_OFFSET if order.created_at else None,
+            "boxes": len(order.boxes),
+            "picked_up": sum(1 for b in order.boxes if b.picked_up_at),
+            "received": sum(1 for b in order.boxes if b.received_at),
+            "shipped": sum(1 for b in order.boxes if b.shipped_at),
+            "delivered": sum(1 for b in order.boxes if b.status == "delivered"),
+            "not_delivered": sum(1 for b in order.boxes if b.status == "not_delivered"),
+            "total": order.total_cost,
+        })
         row = row_for(order.client)
         row["orders"] += 1
         row["boxes"] += len(order.boxes)
@@ -2099,7 +2110,7 @@ def _report_rows(date_from, date_to):
         "orders", "boxes", "picked_up", "received", "shipped", "delivered", "not_delivered",
         "pickup_cost", "sc_cost", "total",
     )}
-    return result, totals
+    return result, totals, order_rows
 
 
 REPORT_COLUMNS = [
@@ -2110,15 +2121,23 @@ REPORT_COLUMNS = [
 ]
 
 
+# Отчет по заявкам: у каждой заявки — дата заявки (создания, по Москве).
+REPORT_ORDER_COLUMNS = [
+    ("boxes", "Коробов"), ("picked_up", "Забрано"), ("received", "Принято на складе"),
+    ("shipped", "Отправлено на СЦ"), ("delivered", "Сдано на СЦ"), ("not_delivered", "Не сдано"),
+    ("total", "Стоимость, руб."),
+]
+
+
 @bp.route("/reports")
 def reports():
     if not _require_operator():
         return redirect(url_for("mvb.index"))
     date_from, date_to = _report_period()
-    rows, totals = _report_rows(date_from, date_to)
+    rows, totals, order_rows = _report_rows(date_from, date_to)
     return render_template(
         "mvb/reports.html", rows=rows, totals=totals, date_from=date_from, date_to=date_to,
-        columns=REPORT_COLUMNS,
+        columns=REPORT_COLUMNS, order_rows=order_rows, order_columns=REPORT_ORDER_COLUMNS,
     )
 
 
@@ -2132,7 +2151,7 @@ def reports_xlsx():
     from openpyxl.styles import Font
 
     date_from, date_to = _report_period()
-    rows, totals = _report_rows(date_from, date_to)
+    rows, totals, order_rows = _report_rows(date_from, date_to)
     wb = Workbook()
     ws = wb.active
     ws.title = "По клиентам"
@@ -2150,6 +2169,18 @@ def reports_xlsx():
     ws.column_dimensions["A"].width = 32
     for col in "CDEFGHIJKL":
         ws.column_dimensions[col].width = 16
+
+    ws = wb.create_sheet("По заявкам")
+    ws.append(["Дата заявки", "Заявка", "Клиент", "Направления"] + [label for _, label in REPORT_ORDER_COLUMNS])
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for row in order_rows:
+        order = row["order"]
+        ws.append([row["date"], order.number, order.client.name, order.directions_label]
+                  + [row[key] for key, _ in REPORT_ORDER_COLUMNS])
+        ws.cell(row=ws.max_row, column=1).number_format = "DD.MM.YYYY HH:MM"
+    for col, width in zip("ABCD", (17, 14, 28, 44)):
+        ws.column_dimensions[col].width = width
     buffer = io.BytesIO()
     wb.save(buffer)
     fname = f"mvb_report_{date_from:%Y%m%d}_{date_to:%Y%m%d}.xlsx"

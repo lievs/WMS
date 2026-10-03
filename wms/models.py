@@ -1583,7 +1583,9 @@ class ProductionOrder(db.Model):
 # штрихкод, и по сканам видно, какие короба забрали, приняли на складе МВБ
 # и отправили на сортировочный центр маркетплейса (WB / Ozon).
 
-MVB_MARKETPLACES = {"wb": "Wildberries", "ozon": "Ozon"}
+# Направления отправки: склады маркетплейсов и фулфилменты (в поле СЦ —
+# название фулфилмента).
+MVB_MARKETPLACES = {"wb": "Wildberries", "ozon": "Ozon", "ff": "Фулфилмент"}
 MVB_DELIVERY_METHODS = {"pickup": "Забор транспортной компанией", "self": "Самопривоз"}
 MVB_ORDER_STATUSES = {"draft": "Черновик", "confirmed": "Оформлена", "cancelled": "Отменена"}
 # Порядок важен: короб движется только вперед по этому списку.
@@ -1762,7 +1764,7 @@ class MvbOrderLine(db.Model):
     planned_trip = db.relationship("MvbTrip", back_populates="planned_lines")
     wms_movement = db.relationship("MovementDocument")
 
-    SHORT_MARKETPLACES = {"wb": "WB", "ozon": "OZON"}
+    SHORT_MARKETPLACES = {"wb": "WB", "ozon": "OZON", "ff": "ФФ"}
 
     @property
     def marketplace_label(self):

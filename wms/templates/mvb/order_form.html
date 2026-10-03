@@ -37,7 +37,7 @@
   </div>
   <div class="table-responsive mb-1">
   <table class="table table-sm align-middle mb-1">
-    <thead><tr><th>#</th><th>Маркетплейс</th><th>СЦ / склад *</th><th>Дата слота *</th><th style="width:110px">Коробов *</th></tr></thead>
+    <thead><tr><th>#</th><th>Куда</th><th>СЦ / склад / фулфилмент *</th><th>Дата слота *</th><th style="width:110px">Коробов *</th></tr></thead>
     <tbody>
     {% for n in range(max_directions) %}
       {% set r = rows[n] if n < rows|length else {} %}
@@ -46,7 +46,7 @@
         <td><select name="line_marketplace" class="form-select form-select-sm">
           {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}" {{ 'selected' if (r.mp or 'wb') == code }}>{{ label }}</option>{% endfor %}
         </select></td>
-        <td><input name="line_destination" class="form-control form-control-sm" value="{{ r.dest or '' }}" placeholder="например, Коледино" required></td>
+        <td><input name="line_destination" class="form-control form-control-sm" value="{{ r.dest or '' }}" placeholder="Коледино или название ФФ" required></td>
         <td><input name="line_slot" type="date" class="form-control form-control-sm" value="{{ r.slot or '' }}" required></td>
         <td><input name="line_boxes" type="number" min="1" max="500" class="form-control form-control-sm" value="{{ r.boxes or '' }}" required></td>
       </tr>

@@ -966,9 +966,12 @@ def test_client_report_for_period(db, client):
     today = datetime.utcnow().date().isoformat()
     html = client.get(f"/mvb/reports?date_from={today}&date_to={today}").get_data(as_text=True)
     assert "Альфа" in html and "Бета" in html
+    assert "Дата заявки" in html and order_a.number in html
     from wms.blueprints.mvb import _report_rows
 
-    rows, totals = _report_rows(datetime.utcnow().date(), datetime.utcnow().date())
+    rows, totals, order_rows = _report_rows(datetime.utcnow().date(), datetime.utcnow().date())
+    by_number = {r["order"].number: r for r in order_rows}
+    assert by_number[order_a.number]["date"] is not None and by_number[order_a.number]["shipped"] == 2
     by_name = {r["client"].name: r for r in rows}
     assert by_name["Альфа"]["boxes"] == 3 and by_name["Альфа"]["shipped"] == 2 and by_name["Альфа"]["delivered"] == 2
     assert by_name["Альфа"]["total"] == 3 * 50 + 3 * 120
@@ -977,6 +980,12 @@ def test_client_report_for_period(db, client):
 
     xlsx = client.get(f"/mvb/reports.xlsx?date_from={today}&date_to={today}")
     assert xlsx.status_code == 200 and xlsx.data[:2] == b"PK"
+    import io
+
+    from openpyxl import load_workbook
+
+    sheet = load_workbook(io.BytesIO(xlsx.data))["По заявкам"]
+    assert sheet["A1"].value == "Дата заявки" and sheet["B2"].value == order_a.number
     # другой период — пусто
     assert _report_rows(datetime(2020, 1, 1).date(), datetime(2020, 1, 31).date())[0] == []
 
@@ -1238,3 +1247,20 @@ def test_old_orders_get_one_direction_on_startup(db, client):
     order = db.session.get(MvbOrder, order.id)
     assert len(order.lines) == 1 and order.lines[0].short_label() == "WB Коледино"
     assert all(b.line_id == order.lines[0].id for b in order.boxes)
+
+
+def test_fulfillment_as_destination_for_orders_pallets_and_trips(db, client):
+    """Кроме складов маркетплейсов, короба и паллеты едут на фулфилменты."""
+    client_user = _user("client1", "mvb_client", _mvb_client())
+    staff = _user("staff1", "mvb_admin")
+    order = _received_order(client, client_user, staff, marketplace="ff", destination="Север", box_count="2")
+    assert order.lines[0].short_label() == "ФФ Север"
+    client.post("/mvb/pallets", data={"marketplace": "ff", "destination": "Север"})
+    pallet = MvbPallet.query.one()
+    for box in order.boxes:
+        assert client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode}).get_json()["ok"]
+    assert "Фулфилмент" in client.get("/mvb/dispatch").get_data(as_text=True)
+    trip = _trip(client, marketplace="ff", destination="Север")
+    data = client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": pallet.number}).get_json()
+    assert data["ok"] and data["count"] == 2
+    assert [s.label() for s in trip.stops] == ["Фулфилмент · Север"]

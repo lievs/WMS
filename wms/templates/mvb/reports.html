@@ -28,4 +28,24 @@
   {% endif %}
 </table>
 </div>
+
+<h5 class="mt-4">По заявкам</h5>
+<div class="table-responsive">
+<table class="table table-sm align-middle">
+  <thead><tr><th>Дата заявки</th><th>Заявка</th><th>Клиент</th><th>Направления</th>{% for key, label in order_columns %}<th class="text-end">{{ label }}</th>{% endfor %}</tr></thead>
+  <tbody>
+  {% for r in order_rows %}
+    <tr>
+      <td class="text-nowrap">{{ r.date.strftime('%d.%m.%Y %H:%M') if r.date else '' }}</td>
+      <td><a href="{{ url_for('mvb.order_detail', order_id=r.order.id) }}">{{ r.order.number }}</a></td>
+      <td>{{ r.order.client.name }}</td>
+      <td>{{ r.order.directions_label }}</td>
+      {% for key, label in order_columns %}<td class="text-end">{% if key == 'total' %}{{ num(r.total, True) if r.total is not none else '—' }}{% else %}{{ r[key] }}{% endif %}</td>{% endfor %}
+    </tr>
+  {% else %}
+    <tr><td colspan="{{ order_columns|length + 4 }}" class="text-muted">За период заявок нет</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
 {% endblock %}
