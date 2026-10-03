@@ -1643,3 +1643,19 @@ def test_direction_cannot_be_planned_into_two_trips(db, client):
     client.post(f"/mvb/trips/{trip.id}/cancel")
     client.post("/mvb/trips/new", data={"dir": [key]})
     assert MvbTrip.query.count() == 2
+
+
+def test_sc_driver_link_expires_day_after_route_finished(db, client):
+    from datetime import timedelta
+    staff = _user("staff1", "mvb_admin")
+    _login(client, staff)
+    trip = _new_trip(client, ("wb", "Коледино"))
+    url = f"/mvb/t/{trip.access_token}"
+    assert client.get(url).status_code == 200
+    trip.status, trip.delivered_at = "delivered", datetime.utcnow() - timedelta(hours=2)
+    db.session.commit()
+    assert client.get(url).status_code == 200
+    trip.delivered_at = datetime.utcnow() - timedelta(days=2)
+    db.session.commit()
+    resp = client.get(url)
+    assert resp.status_code == 410 and "Ссылка больше не действует" in resp.get_data(as_text=True)

@@ -12,7 +12,7 @@
 """
 
 import secrets
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from flask import (
     Blueprint, Response, abort, flash, jsonify, redirect, render_template, request, session,
@@ -1919,11 +1919,29 @@ def loading_trip(trip_id):
     return render_template("mvb/loading_trip.html", trip=trip)
 
 
+# Ссылка водителя действует, пока рейс в работе, и еще сутки после
+# завершения маршрута (досмотреть/поправить отметку), потом гаснет.
+TRIP_LINK_GRACE = timedelta(days=1)
+
+
 def _trip_by_token_or_404(token):
     trip = MvbTrip.query.filter_by(access_token=token).first() if token else None
     if trip is None or trip.status == "cancelled":
         abort(404)
+    if trip.status == "delivered" and trip.delivered_at and datetime.utcnow() - trip.delivered_at > TRIP_LINK_GRACE:
+        abort(410)
     return trip
+
+
+@bp.errorhandler(410)
+def _link_expired(_error):
+    return (
+        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<div style='font-family:sans-serif;max-width:420px;margin:15vh auto;text-align:center;padding:16px'>"
+        "<div style='font-size:48px'>🚚</div><h2>Ссылка больше не действует</h2>"
+        "<p style='color:#666'>Рейс завершен. Если нужна новая ссылка, обратитесь к оператору МВБ.</p></div>",
+        410,
+    )
 
 
 @bp.route("/t/<token>")
