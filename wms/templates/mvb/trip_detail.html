@@ -19,7 +19,7 @@
     {% if trip.status in ('assigned', 'arrived', 'loading') %}
       <form method="post" action="{{ url_for('mvb.trip_action', trip_id=trip.id, action='depart') }}" onsubmit="return confirm('Завершить погрузку и отправить рейс?')"><button class="btn btn-success">Погрузка завершена — отправить</button></form>
     {% endif %}
-    {% if trip.status in ('searching', 'assigned', 'arrived', 'loading') %}
+    {% if mvb_is_operator and trip.status in ('searching', 'assigned', 'arrived', 'loading') %}
       <form method="post" action="{{ url_for('mvb.trip_action', trip_id=trip.id, action='cancel') }}" onsubmit="return confirm('Отменить рейс? Погруженные короба вернутся на склад.')"><button class="btn btn-outline-danger">Отменить</button></form>
     {% endif %}
   </div>
@@ -44,7 +44,7 @@
         {% if mvb_is_staff %}
         {% include "mvb/_stop_result.html" %}
         {% endif %}
-      {% elif mvb_is_staff and trip.status in ('searching','assigned','arrived','loading') %}
+      {% elif mvb_is_operator and trip.status in ('searching','assigned','arrived','loading') %}
         <div class="d-flex gap-1">
           {% for act, icon in [('up', '↑'), ('down', '↓'), ('remove', '✕')] %}
           <form method="post" action="{{ url_for('mvb.trip_stop_action', trip_id=trip.id, stop_id=stop.id, action=act) }}"><button class="btn btn-sm btn-outline-secondary" title="{{ {'up': 'Выше', 'down': 'Ниже', 'remove': 'Убрать точку'}[act] }}">{{ icon }}</button></form>
@@ -56,7 +56,7 @@
     <li class="list-group-item text-muted">Точек нет — добавьте СЦ</li>
   {% endfor %}
   </ol>
-  {% if mvb_is_staff and trip.status in ('searching','assigned','arrived','loading') %}
+  {% if mvb_is_operator and trip.status in ('searching','assigned','arrived','loading') %}
   <form method="post" action="{{ url_for('mvb.trip_add_stop', trip_id=trip.id) }}" class="d-flex flex-wrap gap-2">
     <select name="marketplace" class="form-select w-auto">
       {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
@@ -84,7 +84,7 @@
   <div class="col-lg-7">
     <div class="card p-3 h-100">
       <h6>Авто и водитель</h6>
-      {% if mvb_is_staff and trip.status not in ('departed', 'delivered', 'cancelled') %}
+      {% if mvb_is_operator and trip.status not in ('departed', 'delivered', 'cancelled') %}
       <form method="post" action="{{ url_for('mvb.trip_plan', trip_id=trip.id) }}" class="row g-2">
         <div class="col-12 small text-muted">Наемный водитель (без регистрации) — достаточно госномера; водителю отправьте ссылку ниже.</div>
         <div class="col-md-3"><label class="form-label small">Госномер</label><input name="car_plate" class="form-control" value="{{ trip.car_plate or '' }}" placeholder="А123ВС77"></div>
@@ -144,19 +144,20 @@
 <div class="alert alert-info">Укажите госномер наемного авто или выберите авто из справочника — после этого откроется погрузка.</div>
 {% endif %}
 
-{% if trip.planned_orders %}
-<h5>Заявки в рейсе (целиком)</h5>
+{% if trip.planned_lines %}
+<h5>Заявки в рейсе (направления целиком)</h5>
 <div class="table-responsive">
 <table class="table table-sm align-middle">
-  <thead><tr><th>Заявка</th><th>Клиент</th><th>Направление</th><th class="text-end">Коробов</th><th class="text-end">Погружено</th></tr></thead>
+  <thead><tr><th>Заявка</th><th>Клиент</th><th>Направление</th><th>Слот</th><th class="text-end">Коробов</th><th class="text-end">Погружено</th></tr></thead>
   <tbody>
-  {% for o in trip.planned_orders %}
-    {% set loaded = o.boxes|selectattr('trip_id', 'equalto', trip.id)|list|length %}
-    <tr class="{{ 'table-success' if loaded == o.boxes|length else '' }}">
-      <td><a href="{{ url_for('mvb.order_detail', order_id=o.id) }}">{{ o.number }}</a></td>
-      <td>{{ o.client.name }}</td>
-      <td>{{ o.marketplace_label }}{% if o.destination %} · {{ o.destination }}{% endif %}</td>
-      <td class="text-end">{{ o.boxes|length }}</td>
+  {% for l in trip.planned_lines %}
+    {% set loaded = l.boxes|selectattr('trip_id', 'equalto', trip.id)|list|length %}
+    <tr class="{{ 'table-success' if loaded == l.boxes|length else '' }}">
+      <td><a href="{{ url_for('mvb.order_detail', order_id=l.order.id) }}">{{ l.order.number }}</a></td>
+      <td>{{ l.order.client.name }}</td>
+      <td>{{ l.short_label() }}</td>
+      <td>{{ l.slot_date.strftime('%d.%m') if l.slot_date else '—' }}</td>
+      <td class="text-end">{{ l.boxes|length }}</td>
       <td class="text-end">{{ loaded }}</td>
     </tr>
   {% endfor %}

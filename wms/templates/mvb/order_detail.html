@@ -23,7 +23,7 @@
   </div>
 </div>
 
-{% if mvb_is_staff and order.status == 'confirmed' and not order.client.is_internal %}
+{% if mvb_is_operator and order.status == 'confirmed' and not order.client.is_internal %}
 <form method="post" action="{{ url_for('mvb.order_costs', order_id=order.id) }}" class="card p-3 mb-3 d-flex flex-row flex-wrap gap-2 align-items-end">
   <div><label class="form-label small mb-0">Забор груза, ₽</label><input name="pickup_cost" class="form-control" value="{{ '%.2f'|format(order.pickup_cost) if order.pickup_cost is not none else '' }}" style="max-width:150px"></div>
   <div><label class="form-label small mb-0">Отправка на СЦ, ₽</label><input name="sc_cost" class="form-control" value="{{ '%.2f'|format(order.sc_cost) if order.sc_cost is not none else '' }}" style="max-width:150px"></div>
@@ -31,26 +31,17 @@
   <button class="btn btn-outline-secondary" name="action" value="recalc">Пересчитать по прайсу</button>
 </form>
 {% endif %}
-{% if order.wms_movement %}
-<div class="alert alert-secondary">Свои короба из перемещения WMS {{ order.wms_movement.number }} — сканируются по прежним этикеткам WMS{% if order.wms_movement.shipped_at %}; в WMS отмечено «Транспорт забрал»{% endif %}.</div>
+{% if order.client.is_internal and (order.wms_movement or order.lines|selectattr('wms_movement')|list) %}
+<div class="alert alert-secondary">Свои короба из WMS — сканируются по прежним этикеткам WMS.</div>
 {% endif %}
 <div class="row g-3 mb-3">
   <div class="col-md-6">
     <div class="card p-3 h-100">
       <div><b>Статус:</b> {{ order.progress_label() }}</div>
-      <div><b>Куда:</b> {{ order.marketplace_label }}{% if order.destination %} · {{ order.destination }}{% endif %}</div>
       <div><b>Способ:</b> {{ order.delivery_label }}</div>
       {% if order.pickup_address %}<div><b>Адрес забора:</b> {{ order.pickup_address }}</div>{% endif %}
-      <div><b>Слот на СЦ:</b> {{ order.slot_date.strftime('%d.%m.%Y') if order.slot_date else '—' }}
-        {% if order.status == 'confirmed' and (mvb_is_staff or mvb_is_client) %}
-        <form method="post" action="{{ url_for('mvb.order_slot', order_id=order.id) }}" class="d-inline-flex gap-1 ms-1 align-middle">
-          <input type="date" name="slot_date" class="form-control form-control-sm" value="{{ order.slot_date or '' }}" required style="max-width:150px">
-          <button class="btn btn-sm btn-outline-secondary">{{ 'Изменить' if order.slot_date else 'Указать' }}</button>
-        </form>
-        {% endif %}
-      </div>
       <div><b>Дата / время:</b> {{ order.planned_date.strftime('%d.%m.%Y') if order.planned_date else '—' }}{% if order.time_from %} {{ order.time_from }}{% if order.time_to %}–{{ order.time_to }}{% endif %}{% endif %}</div>
-      <div><b>Коробов:</b> {{ order.box_count }}</div>
+      <div><b>Коробов всего:</b> {{ order.box_count }}{% if order.lines|length > 1 %} · направлений {{ order.lines|length }}{% endif %}</div>
       {% if order.status == 'confirmed' and not order.client.is_internal %}
       <div><b>Стоимость:</b>
         {% if order.total_cost is not none %}
@@ -72,7 +63,34 @@
   {% endif %}
 </div>
 
-{% if order.status == 'confirmed' and order.delivery_method == 'pickup' and mvb_is_staff %}
+<h5>Направления</h5>
+<div class="table-responsive mb-3">
+<table class="table table-sm align-middle">
+  <thead><tr><th>#</th><th>Куда</th><th>Слот на СЦ</th><th class="text-end">Коробов</th>{% if order.status == 'confirmed' %}<th class="text-end">Сдано на СЦ</th>{% endif %}</tr></thead>
+  <tbody>
+  {% for l in order.lines %}
+    <tr>
+      <td>{{ l.seq }}</td>
+      <td><b>{{ l.short_label() }}</b>{% if l.wms_movement %} <span class="text-muted small">· перемещение WMS {{ l.wms_movement.number }}</span>{% endif %}</td>
+      <td>
+        {% set can_slot = order.status == 'confirmed' and (mvb_is_operator or mvb_is_client) and not (l.boxes|selectattr('status', 'in', ['shipped', 'delivered'])|list) %}
+        {% if can_slot %}
+        <form method="post" action="{{ url_for('mvb.order_slot', order_id=order.id) }}" class="d-inline-flex gap-1 align-middle">
+          <input type="hidden" name="line_id" value="{{ l.id }}">
+          <input type="date" name="slot_date" class="form-control form-control-sm" value="{{ l.slot_date or '' }}" required style="max-width:150px">
+          <button class="btn btn-sm btn-outline-secondary">{{ 'Изменить' if l.slot_date else 'Указать' }}</button>
+        </form>
+        {% else %}{{ l.slot_date.strftime('%d.%m.%Y') if l.slot_date else '—' }}{% endif %}
+      </td>
+      <td class="text-end">{{ l.box_count }}</td>
+      {% if order.status == 'confirmed' %}<td class="text-end">{{ l.boxes|selectattr('status', 'equalto', 'delivered')|list|length }}</td>{% endif %}
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+{% if order.status == 'confirmed' and order.delivery_method == 'pickup' and mvb_is_operator %}
 <form method="post" action="{{ url_for('mvb.order_assign_driver', order_id=order.id) }}" class="card p-3 mb-3 d-flex flex-row flex-wrap gap-2 align-items-center">
   <b>Водитель на забор:</b>
   <select name="driver_id" class="form-select w-auto">
@@ -88,13 +106,28 @@
 {% if order.status == 'draft' %}
   <div class="alert alert-info">Это черновик. После оформления каждому из {{ order.box_count }} коробов будет присвоен свой штрихкод — распечатайте этикетки и наклейте на каждый короб. Короб без штрихкода не принимается.</div>
 {% elif order.boxes %}
+{% set groups = [] %}
+{% for l in order.lines %}{% set _ = groups.append((l, l.boxes)) %}{% endfor %}
+{% set loose = order.boxes|rejectattr('line')|list %}
+{% if loose %}{% set _ = groups.append((none, loose)) %}{% endif %}
+{% for l, boxes in groups %}
+{% set delivered = boxes|selectattr('status', 'equalto', 'delivered')|list|length %}
+{% set received = boxes|selectattr('received_at')|list|length %}
+<div class="d-flex flex-wrap align-items-center gap-2 mt-3 mb-1">
+  <h5 class="mb-0">{% if l %}{% if groups|length > 1 %}{{ l.seq }}. {% endif %}{{ l.short_label() }}{% else %}Короба{% endif %}</h5>
+  {% if l and l.slot_date %}<span class="text-muted">слот {{ l.slot_date.strftime('%d.%m.%Y') }}</span>{% endif %}
+  <span class="badge bg-secondary">{{ boxes|length }} кор.</span>
+  <span class="badge bg-light text-dark">на складе {{ received }} / {{ boxes|length }}</span>
+  <span class="badge {{ 'bg-success' if delivered == boxes|length else 'bg-light text-dark' }}">сдано на СЦ {{ delivered }} / {{ boxes|length }}</span>
+  {% if l and groups|length > 1 %}<a class="btn btn-sm btn-outline-success" target="_blank" href="{{ url_for('mvb.order_labels_pdf', order_id=order.id, line=l.id) }}">🖨 Этикетки направления</a>{% endif %}
+</div>
 <div class="table-responsive">
 <table class="table table-sm align-middle">
   <thead><tr><th>№</th><th>Штрихкод</th><th>Статус</th><th>Забран</th><th>На складе</th><th>Погружен</th><th>Отгружен на СЦ</th><th>Сдан на СЦ</th><th></th></tr></thead>
   <tbody>
-  {% for b in order.boxes %}
+  {% for b in boxes %}
     <tr>
-      <td>{{ b.seq }}</td>
+      <td class="text-nowrap">{{ loop.index }} / {{ boxes|length }}</td>
       <td class="font-monospace text-nowrap">{{ b.barcode }}</td>
       <td>{{ b.status_label }}</td>
       <td>{{ (b.picked_up_at|msk).strftime('%d.%m %H:%M') if b.picked_up_at else '' }}</td>
@@ -108,5 +141,6 @@
   </tbody>
 </table>
 </div>
+{% endfor %}
 {% endif %}
 {% endblock %}

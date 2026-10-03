@@ -76,7 +76,8 @@ SECTION_CODES = {code for code, _ in SECTIONS}
 MVB_ROLES = {
     "mvb_client": "Клиент",
     "mvb_driver": "Водитель",
-    "mvb_staff": "Склад МВБ (приемщик / оператор)",
+    "mvb_staff": "Оператор МВБ",
+    "mvb_storekeeper": "Кладовщик МВБ",
     "mvb_admin": "Администратор МВБ",
 }
 
@@ -1675,7 +1676,9 @@ class MvbOrder(db.Model):
     driver = db.relationship("User", foreign_keys=[driver_id])
     created_by = db.relationship("User", foreign_keys=[created_by_id])
     wms_movement = db.relationship("MovementDocument")
-    planned_trip = db.relationship("MvbTrip", foreign_keys=[planned_trip_id], back_populates="planned_orders")
+    lines = db.relationship(
+        "MvbOrderLine", back_populates="order", order_by="MvbOrderLine.seq", cascade="all, delete-orphan"
+    )
     boxes = db.relationship(
         "MvbBox", back_populates="order", order_by="MvbBox.seq", cascade="all, delete-orphan"
     )
@@ -1687,6 +1690,25 @@ class MvbOrder(db.Model):
     @property
     def delivery_label(self):
         return MVB_DELIVERY_METHODS.get(self.delivery_method, self.delivery_method)
+
+    @property
+    def directions_label(self):
+        """«WB Коледино — 3, OZON Хоругвино — 5»; у старых заявок без
+        направлений — по полям самой заявки."""
+        if self.lines:
+            return ", ".join(f"{line.short_label()} — {line.box_count}" for line in self.lines)
+        return MvbOrderLine.make_short_label(self.marketplace, self.destination)
+
+    def sync_from_lines(self):
+        """Итоговые поля заявки по направлениям: всего коробов; маркетплейс,
+        СЦ и слот — первого направления (для совместимости и сортировки)."""
+        if not self.lines:
+            return
+        first = self.lines[0]
+        self.marketplace = first.marketplace
+        self.destination = first.destination
+        self.slot_date = min((l.slot_date for l in self.lines if l.slot_date), default=None)
+        self.box_count = sum(l.box_count for l in self.lines)
 
     @property
     def total_cost(self):
@@ -1715,6 +1737,50 @@ class MvbOrder(db.Model):
         return f"{MVB_BOX_STATUSES[furthest][1]}: {reached} из {len(self.boxes)}"
 
 
+class MvbOrderLine(db.Model):
+    """Направление заявки: маркетплейс + СЦ, дата слота и сколько коробов.
+    В одной заявке клиента может быть несколько направлений; водитель
+    забирает все короба заявки разом, а дальше каждое направление едет
+    целиком в своем рейсе."""
+
+    __tablename__ = "mvb_order_lines"
+
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.Integer, db.ForeignKey("mvb_orders.id"), nullable=False, index=True)
+    seq = db.Column(db.Integer, nullable=False, default=1)
+    marketplace = db.Column(db.String(10), nullable=False)
+    destination = db.Column(db.String(200))
+    slot_date = db.Column(db.Date, index=True)
+    box_count = db.Column(db.Integer, nullable=False, default=0)
+    # Рейс, в который направление запланировано при компоновке отгрузки.
+    planned_trip_id = db.Column(db.Integer, db.ForeignKey("mvb_trips.id"), index=True)
+    # Перемещение WMS, из которого пришли короба этого направления.
+    wms_movement_id = db.Column(db.Integer, db.ForeignKey("movement_documents.id"), index=True)
+
+    order = db.relationship("MvbOrder", back_populates="lines")
+    boxes = db.relationship("MvbBox", back_populates="line", order_by="MvbBox.seq")
+    planned_trip = db.relationship("MvbTrip", back_populates="planned_lines")
+    wms_movement = db.relationship("MovementDocument")
+
+    SHORT_MARKETPLACES = {"wb": "WB", "ozon": "OZON"}
+
+    @property
+    def marketplace_label(self):
+        return MVB_MARKETPLACES.get(self.marketplace, self.marketplace)
+
+    @classmethod
+    def make_short_label(cls, marketplace, destination):
+        label = cls.SHORT_MARKETPLACES.get(marketplace, MVB_MARKETPLACES.get(marketplace, marketplace or ""))
+        return f"{label} {destination}" if destination else label
+
+    def short_label(self):
+        """Как пишут на коробах: «WB Коледино»."""
+        return self.make_short_label(self.marketplace, self.destination)
+
+    def label(self):
+        return self.marketplace_label + (f" · {self.destination}" if self.destination else "")
+
+
 class MvbBox(db.Model):
     """Короб заявки с собственным уникальным штрихкодом (номер заявки +
     порядковый номер короба), по которому его сканируют на каждом этапе."""
@@ -1738,8 +1804,23 @@ class MvbBox(db.Model):
     pallet_id = db.Column(db.Integer, db.ForeignKey("mvb_pallets.id"), index=True)
     trip_id = db.Column(db.Integer, db.ForeignKey("mvb_trips.id"), index=True)
     trip_stop_id = db.Column(db.Integer, db.ForeignKey("mvb_trip_stops.id"), index=True)
+    # Направление заявки, к которому относится короб.
+    line_id = db.Column(db.Integer, db.ForeignKey("mvb_order_lines.id"), index=True)
 
     order = db.relationship("MvbOrder", back_populates="boxes")
+    line = db.relationship("MvbOrderLine", back_populates="boxes")
+
+    @property
+    def line_position(self):
+        """Номер короба внутри своего направления (у каждого направления
+        свой счетчик 1…N)."""
+        if self.line is None:
+            return self.seq
+        return next((n for n, b in enumerate(self.line.boxes, start=1) if b is self), self.seq)
+
+    @property
+    def line_total(self):
+        return len(self.line.boxes) if self.line is not None else len(self.order.boxes)
     trip_stop = db.relationship("MvbTripStop", back_populates="boxes")
     pallet = db.relationship("MvbPallet", back_populates="boxes")
     trip = db.relationship("MvbTrip", back_populates="boxes")
@@ -1866,8 +1947,8 @@ class MvbTrip(db.Model):
     vehicle = db.relationship("MvbVehicle")
     driver = db.relationship("User", foreign_keys=[driver_id])
     boxes = db.relationship("MvbBox", back_populates="trip", order_by="MvbBox.loaded_at")
-    planned_orders = db.relationship(
-        "MvbOrder", foreign_keys="MvbOrder.planned_trip_id", back_populates="planned_trip", order_by="MvbOrder.id"
+    planned_lines = db.relationship(
+        "MvbOrderLine", back_populates="planned_trip", order_by="MvbOrderLine.id"
     )
     stops = db.relationship(
         "MvbTripStop", back_populates="trip", order_by="MvbTripStop.seq", cascade="all, delete-orphan"

@@ -14,7 +14,18 @@
   </div>
 </div>
 {% elif current_user.role == 'mvb_driver' %}
-<div class="alert alert-warning">За вами не закреплена машина — свободное место не считается. Обратитесь к складу МВБ (раздел «Транспорт»).</div>
+<div class="alert alert-warning">За вами не закреплена машина — свободное место не считается. Обратитесь к оператору МВБ.</div>
+{% endif %}
+
+{% if current_user.role == 'mvb_driver' and not current_user.is_admin and load %}
+<div class="card p-3 mb-3 border-warning">
+  <div class="d-flex justify-content-between flex-wrap gap-2 align-items-center">
+    <div class="fs-5">У меня забрано: <b>{{ load }}</b> кор.</div>
+    <form method="post" action="{{ url_for('mvb.driver_handover') }}" onsubmit="return confirm('Подтвердите: все {{ load }} кор. выгружены на склад МВБ')">
+      <button class="btn btn-warning btn-lg">📦 Короба сданы в МВБ</button>
+    </form>
+  </div>
+</div>
 {% endif %}
 
 {% if trips %}
@@ -64,7 +75,7 @@
         <span class="badge bg-light text-dark mvb-seen-badge d-none">только что</span>
         · {{ o.client.name }}{% if o.client.phone %} · <a href="tel:{{ o.client.phone }}">{{ o.client.phone }}</a>{% endif %}<br>
         {% if o.pickup_address %}<a target="_blank" href="https://yandex.ru/maps/?text={{ o.pickup_address|urlencode }}">📍 {{ o.pickup_address }}</a>{% else %}адрес не указан{% endif %}<br>
-        <span class="text-muted">{{ o.planned_date.strftime('%d.%m.%Y') if o.planned_date else 'дата не указана' }}{% if o.time_from %} {{ o.time_from }}{% if o.time_to %}–{{ o.time_to }}{% endif %}{% endif %} · {{ o.marketplace_label }}{% if o.destination %} · {{ o.destination }}{% endif %}{% if o.slot_date %} · слот {{ o.slot_date.strftime('%d.%m') }}{% endif %}</span>
+        <span class="text-muted">{{ o.planned_date.strftime('%d.%m.%Y') if o.planned_date else 'дата не указана' }}{% if o.time_from %} {{ o.time_from }}{% if o.time_to %}–{{ o.time_to }}{% endif %}{% endif %} · {{ o.directions_label }}{% if o.slot_date %} · слот с {{ o.slot_date.strftime('%d.%m') }}{% endif %}</span>
       </div>
       <div class="text-end">
         <div class="fs-5">{{ r.remaining }} кор.{% if r.remaining != o.box_count %} <span class="text-muted fs-6">(из {{ o.box_count }})</span>{% endif %}</div>

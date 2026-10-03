@@ -127,7 +127,7 @@ def test_wms_user_cannot_login_to_mvb_or_open_it(db, client):
 
 
 def test_mvb_user_cannot_open_wms_sections(db, client):
-    _login(client, _user("staff1", "mvb_staff"))
+    _login(client, _user("staff1", "mvb_admin"))
     for url in ("/", "/nomenclature/", "/movement/", "/users"):
         response = client.get(url)
         assert response.status_code == 302, url
@@ -186,7 +186,7 @@ def test_box_scanned_through_all_stages(db, client):
     box = order.boxes[0]
 
     driver = _user("driver1", "mvb_driver")
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
 
     _login(client, driver)
     data = client.post("/mvb/scan/pickup", data={"barcode": box.barcode}).get_json()
@@ -217,7 +217,7 @@ def test_box_scanned_through_all_stages(db, client):
 def test_scan_rejects_wrong_order_of_stages_and_unknown_boxes(db, client):
     _login(client, _user("client1", "mvb_client", _mvb_client()))
     order = _confirmed_order(client)
-    _login(client, _user("staff1", "mvb_staff"))
+    _login(client, _user("staff1", "mvb_admin"))
 
     # короб еще не принят на складе — в рейс его не погрузить
     trip = _trip(client)
@@ -235,7 +235,7 @@ def test_self_delivery_boxes_cannot_be_picked_up_but_are_received(db, client):
     _login(client, _user("driver1", "mvb_driver"))
     assert client.post("/mvb/scan/pickup", data={"barcode": barcode}).status_code == 409
 
-    _login(client, _user("staff1", "mvb_staff"))
+    _login(client, _user("staff1", "mvb_admin"))
     assert client.post("/mvb/scan/receive", data={"barcode": barcode}).get_json()["ok"]
 
 
@@ -244,7 +244,7 @@ def test_draft_and_cancelled_orders_cannot_be_scanned_or_cancelled_after_scan(db
     order = _confirmed_order(client)
     barcode = order.boxes[0].barcode
 
-    _login(client, _user("staff1", "mvb_staff"))
+    _login(client, _user("staff1", "mvb_admin"))
     client.post("/mvb/scan/receive", data={"barcode": barcode})
     client.post(f"/mvb/orders/{order.id}/cancel")
     db.session.refresh(order)
@@ -256,7 +256,7 @@ def test_progress_label_shows_how_many_boxes_moved(db, client):
     order = _confirmed_order(client)
     assert order.progress_label() == "Ожидает передачи"
 
-    _login(client, _user("staff1", "mvb_staff"))
+    _login(client, _user("staff1", "mvb_admin"))
     client.post("/mvb/scan/receive", data={"barcode": order.boxes[0].barcode})
     db.session.refresh(order)
     assert order.progress_label() == "На складе МВБ: 1 из 3"
@@ -294,7 +294,7 @@ def test_wms_admin_has_access_and_mvb_users_hidden_from_wms_settings(db, client_
 def test_pages_render(db, client_logged_in):
     rom = _mvb_client()
     client_logged_in.post("/mvb/orders/new", data={
-        "client_id": str(rom.id), "marketplace": "ozon", "box_count": "2",
+        "client_id": str(rom.id), "marketplace": "ozon", "destination": "Хоругвино", "box_count": "2",
         "delivery_method": "pickup", "pickup_address": "Москва", "slot_date": "2026-10-07",
     })
     order = MvbOrder.query.one()
@@ -324,7 +324,7 @@ def _received_order(http, client_user, staff, **overrides):
 def test_trip_lifecycle_with_plan_and_fact(db, client):
     rom = _mvb_client()
     client_user = _user("client1", "mvb_client", rom)
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     driver = _user("driver1", "mvb_driver")
     order = _received_order(client, client_user, staff)
 
@@ -369,7 +369,7 @@ def test_trip_lifecycle_with_plan_and_fact(db, client):
 
 
 def test_driver_cannot_operate_other_trips_or_staff_actions(db, client):
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     driver = _user("driver1", "mvb_driver")
     other = _user("driver2", "mvb_driver")
     _login(client, staff)
@@ -384,7 +384,7 @@ def test_driver_cannot_operate_other_trips_or_staff_actions(db, client):
 
 def test_trip_rejects_other_direction_and_cancel_returns_boxes(db, client):
     client_user = _user("client1", "mvb_client", _mvb_client())
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     order = _received_order(client, client_user, staff, marketplace="ozon", destination="Хоругвино")
     trip = _trip(client, marketplace="wb", destination="Коледино")
     assert client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": order.boxes[0].barcode}).status_code == 409
@@ -398,7 +398,7 @@ def test_trip_rejects_other_direction_and_cancel_returns_boxes(db, client):
 
 def test_pallet_scan_and_load_whole_pallet(db, client):
     client_user = _user("client1", "mvb_client", _mvb_client())
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     order = _received_order(client, client_user, staff)
     other = _received_order(client, client_user, staff, marketplace="ozon", box_count="1")
 
@@ -421,7 +421,7 @@ def test_pallet_scan_and_load_whole_pallet(db, client):
 
 def test_dispatch_groups_ready_boxes_by_direction_fifo(db, client):
     client_user = _user("client1", "mvb_client", _mvb_client())
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     _received_order(client, client_user, staff)
     _received_order(client, client_user, staff, marketplace="ozon", destination="Хоругвино", box_count="2")
     html = client.get("/mvb/dispatch").get_data(as_text=True)
@@ -431,7 +431,7 @@ def test_dispatch_groups_ready_boxes_by_direction_fifo(db, client):
 
 def test_driver_sees_assigned_and_unassigned_pickups_only(db, client):
     client_user = _user("client1", "mvb_client", _mvb_client())
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     d1, d2 = _user("driver1", "mvb_driver"), _user("driver2", "mvb_driver")
     _login(client, client_user)
     mine = _confirmed_order(client)
@@ -452,7 +452,7 @@ def test_driver_sees_assigned_and_unassigned_pickups_only(db, client):
 
 
 def test_vehicles_page_staff_only(db, client):
-    _login(client, _user("staff1", "mvb_staff"))
+    _login(client, _user("staff1", "mvb_admin"))
     client.post("/mvb/vehicles", data={"plate": "а001аа77", "capacity_boxes": "40"})
     assert MvbVehicle.query.one().plate == "А001АА77"
     _login(client, _user("client1", "mvb_client", _mvb_client()))
@@ -472,7 +472,7 @@ def test_stage2_pages_render(db, client_logged_in):
 
 def test_multi_stop_route_driver_delivers_each_point(db, client):
     client_user = _user("client1", "mvb_client", _mvb_client())
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     driver = _user("driver1", "mvb_driver")
     wb = _received_order(client, client_user, staff, box_count="2")
     oz = _received_order(client, client_user, staff, marketplace="ozon", destination="Хоругвино", box_count="1")
@@ -508,7 +508,7 @@ def test_multi_stop_route_driver_delivers_each_point(db, client):
 
 
 def test_stop_order_can_be_changed(db, client):
-    _login(client, _user("staff1", "mvb_staff"))
+    _login(client, _user("staff1", "mvb_admin"))
     trip = _new_trip(client, ("wb", "Коледино"), ("ozon", "Хоругвино"))
     second = trip.stops[1]
     client.post(f"/mvb/trips/{trip.id}/stops/{second.id}/up")
@@ -575,16 +575,16 @@ def _wms_movement(number="PER-000777", boxes=2, request_number="WB-1"):
 
 
 def test_wms_movement_import_keeps_wms_barcodes(db, client):
-    _login(client, _user("staff1", "mvb_staff"))
+    _login(client, _user("staff1", "mvb_admin"))
     doc, wms_boxes = _wms_movement()
     assert doc.number in client.get("/mvb/wms").get_data(as_text=True)
 
-    client.post(f"/mvb/wms/{doc.id}/import", data={"delivery_method": "self"})
+    client.post("/mvb/wms/import", data={"doc_id": str(doc.id), "delivery_method": "self"})
     order = MvbOrder.query.filter_by(wms_movement_id=doc.id).one()
     assert order.client.is_internal and order.marketplace == "wb" and order.destination == "Коледино"
     assert [b.barcode for b in order.boxes] == [b.barcode_value for b in wms_boxes]
     # повторно не импортируется
-    client.post(f"/mvb/wms/{doc.id}/import")
+    client.post("/mvb/wms/import", data={"doc_id": str(doc.id)})
     assert MvbOrder.query.filter_by(wms_movement_id=doc.id).count() == 1
     # скан этикетки WMS (цифры) и ручной ввод номера BOX- находят короб МВБ
     assert client.post("/mvb/scan/receive", data={"barcode": wms_boxes[0].barcode_value}).get_json()["ok"]
@@ -592,7 +592,7 @@ def test_wms_movement_import_keeps_wms_barcodes(db, client):
 
 
 def test_receive_scan_of_wms_box_auto_imports_movement_and_trip_marks_wms_shipped(db, client):
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     _login(client, staff)
     doc, wms_boxes = _wms_movement()
 
@@ -610,9 +610,9 @@ def test_receive_scan_of_wms_box_auto_imports_movement_and_trip_marks_wms_shippe
 
 
 def test_wms_shipped_not_set_without_marketplace_request_or_partial(db, client):
-    _login(client, _user("staff1", "mvb_staff"))
+    _login(client, _user("staff1", "mvb_admin"))
     doc, wms_boxes = _wms_movement(request_number=None)
-    client.post(f"/mvb/wms/{doc.id}/import")
+    client.post("/mvb/wms/import", data={"doc_id": str(doc.id)})
     for box in wms_boxes:
         client.post("/mvb/scan/receive", data={"barcode": box.barcode_value})
     trip = _trip(client)
@@ -644,6 +644,7 @@ def test_full_chain_seller_to_sc(db, client):
     seller = _user("seller", "mvb_client", _mvb_client("ИП Селлер"))
     seller2 = _user("seller2", "mvb_client", _mvb_client("ООО Второй"))
     operator = _user("operator", "mvb_staff")
+    keeper = _user("keeper", "mvb_storekeeper")
     driver = _user("driver", "mvb_driver")
     _vehicle(capacity=6, driver=driver)
 
@@ -678,10 +679,14 @@ def test_full_chain_seller_to_sc(db, client):
         data = client.post("/mvb/scan/pickup", data={"barcode": box.barcode}).get_json()
     assert data["warning"] == "В машине 5 из 6 кор."
 
-    # 4. приемка на складе
+    # 4. водитель привез короба на склад — одна кнопка «Короба сданы в МВБ»
+    assert "Короба сданы в МВБ" in client.get("/mvb/driver").get_data(as_text=True)
+    client.post("/mvb/driver/handover")
+    assert {b.status for b in first.boxes + second.boxes} == {"received"}
+    # приемка — у кладовщика, оператору и водителю она не нужна
+    assert client.post("/mvb/scan/receive", data={"barcode": first.boxes[0].barcode}).status_code == 403
     _login(client, operator)
-    for box in first.boxes + second.boxes:
-        assert client.post("/mvb/scan/receive", data={"barcode": box.barcode}).get_json()["ok"]
+    assert client.post("/mvb/scan/receive", data={"barcode": first.boxes[0].barcode}).status_code == 403
 
     # 5. программа считает машины и компонует рейсы по наполненности,
     # не разбивая заявки: 3 + 2 кор. в машины по 4 — две машины
@@ -694,8 +699,8 @@ def test_full_chain_seller_to_sc(db, client):
     assert len(trips) == 2 and {t.status for t in trips} == {"searching"}
     assert [t.planned_boxes for t in trips] == [3, 2]
     assert [[s.label() for s in t.stops] for t in trips] == [["Wildberries · Коледино"], ["Ozon · Хоругвино"]]
-    assert db.session.get(MvbOrder, first.id).planned_trip_id == trips[0].id
-    assert db.session.get(MvbOrder, second.id).planned_trip_id == trips[1].id
+    assert db.session.get(MvbOrder, first.id).lines[0].planned_trip_id == trips[0].id
+    assert db.session.get(MvbOrder, second.id).lines[0].planned_trip_id == trips[1].id
     assert "Поиск авто: 2" in client.get("/mvb/trips").get_data(as_text=True)
 
     # 6. авто найдено — наемный водитель без регистрации, погрузка сканом
@@ -707,10 +712,13 @@ def test_full_chain_seller_to_sc(db, client):
         })
         db.session.refresh(trip)
         assert trip.status == "assigned" and trip.car_plate == "В777ОР77" and trip.driver_id is None
+        links.append(f"/mvb/t/{trip.access_token}")
+    # погрузка и отправка — кладовщик
+    _login(client, keeper)
+    for trip, order in zip(trips, (first, second)):
         for box in order.boxes:
             assert client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": box.barcode}).get_json()["ok"]
         client.post(f"/mvb/trips/{trip.id}/depart")
-        links.append(f"/mvb/t/{trip.access_token}")
 
     # 7. водитель по ссылке (без входа): Коледино сдано, Хоругвино не сдано
     client.post("/mvb/logout")
@@ -727,18 +735,20 @@ def test_full_chain_seller_to_sc(db, client):
     oz_stop = oz_trip.stops[0]
     assert oz_stop.result == "rejected" and oz_stop.delivery_comment == "СЦ не принял: нет слота"
 
-    # не сданный короб возвращается на склад и снова готов к отправке
-    _login(client, operator)
+    # не сданный короб возвращается на склад (приемка кладовщиком) и снова
+    # готов к отправке
+    _login(client, keeper)
     assert client.post("/mvb/scan/receive", data={"barcode": second.boxes[0].barcode}).get_json()["ok"]
     box = db.session.get(MvbBox, second.boxes[0].id)
     assert box.status == "received" and box.trip_id is None
+    _login(client, operator)
     assert "Хоругвино" in client.get("/mvb/dispatch").get_data(as_text=True)
 
 
 def test_driver_on_sc_trip_does_not_see_free_pickups(db, client):
     """Водителя можно назначить и на забор, и на рейс на СЦ; в рейсе на СЦ
     функция «забрать по дороге» ему не нужна."""
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     driver = _user("driver1", "mvb_driver")
     client_user = _user("client1", "mvb_client", _mvb_client())
     received = _received_order(client, client_user, staff, box_count="1")
@@ -772,7 +782,7 @@ def test_driver_on_sc_trip_does_not_see_free_pickups(db, client):
 
 def test_reject_requires_reason(db, client):
     client_user = _user("client1", "mvb_client", _mvb_client())
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     order = _received_order(client, client_user, staff, box_count="1")
     trip = _trip(client)
     client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": order.boxes[0].barcode})
@@ -787,7 +797,7 @@ def test_fill_mode_packs_whole_orders(db, client):
     """Компоновка рейсов не разбивает заявки: 3 + 3 + 2 кор. в машины по 5 —
     [3 + 2] и [3]; заявка больше машины едет отдельно целиком."""
     client_user = _user("client1", "mvb_client", _mvb_client())
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     a = _received_order(client, client_user, staff, box_count="3")
     b = _received_order(client, client_user, staff, box_count="3")
     c = _received_order(client, client_user, staff, marketplace="ozon", destination="Хоругвино", box_count="2")
@@ -796,8 +806,8 @@ def test_fill_mode_packs_whole_orders(db, client):
     client.post("/mvb/trips/new", data={"dir": ["wb|Коледино", "ozon|Хоругвино"], "mode": "fill", "capacity": "5"})
     trips = MvbTrip.query.order_by(MvbTrip.id).all()
     assert [t.planned_boxes for t in trips] == [5, 3]
-    assert [o.number for o in trips[0].planned_orders] == [a.number, c.number]
-    assert [o.number for o in trips[1].planned_orders] == [b.number]
+    assert [l.order.number for l in trips[0].planned_lines] == [a.number, c.number]
+    assert [l.order.number for l in trips[1].planned_lines] == [b.number]
 
     # погрузка короба заявки из другого рейса — предупреждение
     client.post(f"/mvb/trips/{trips[1].id}/plan", data={"car_plate": "А1"})
@@ -806,7 +816,7 @@ def test_fill_mode_packs_whole_orders(db, client):
 
     # отмена рейса освобождает заявки
     client.post(f"/mvb/trips/{trips[0].id}/cancel")
-    assert db.session.get(MvbOrder, c.id).planned_trip_id is None
+    assert db.session.get(MvbOrder, c.id).lines[0].planned_trip_id is None
 
 
 def test_slot_date_required_and_separates_trips(db, client):
@@ -817,7 +827,7 @@ def test_slot_date_required_and_separates_trips(db, client):
     html = _create_order(client, slot_date="").get_data(as_text=True)
     assert "Укажите дату слота" in html and MvbOrder.query.count() == 0
 
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     late = _received_order(client, client_user, staff, box_count="2", slot_date="2026-10-09")
     early = _received_order(client, client_user, staff, box_count="1", slot_date="2026-10-07")
     assert early.slot_date.isoformat() == "2026-10-07"
@@ -841,7 +851,7 @@ def test_slot_date_required_and_separates_trips(db, client):
 
 def test_order_bigger_than_truck_goes_whole(db, client):
     client_user = _user("client1", "mvb_client", _mvb_client())
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     _received_order(client, client_user, staff, box_count="7")
     client.post("/mvb/trips/new", data={"dir": ["wb|Коледино"], "mode": "fill", "capacity": "3"})
     trips = MvbTrip.query.order_by(MvbTrip.id).all()
@@ -852,7 +862,7 @@ def test_sc_driver_link_without_login(db, client):
     """Наемный водитель на СЦ не регистрируется: по ссылке он отмечает подачу
     и итог на точках; по чужому/неверному токену — 404, служебное закрыто."""
     client_user = _user("client1", "mvb_client", _mvb_client())
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     order = _received_order(client, client_user, staff, box_count="2")
     trip = _new_trip(client, ("wb", "Коледино"))
     client.post(f"/mvb/trips/{trip.id}/plan", data={"car_plate": "е555кх77", "capacity_boxes": "10"})
@@ -895,7 +905,7 @@ def _set_prices(http):
 
 
 def test_price_tiers_and_order_cost(db, client):
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     client_user = _user("client1", "mvb_client", _mvb_client())
     _login(client, staff)
     _set_prices(client)
@@ -938,7 +948,7 @@ def test_prices_page_staff_only(db, client):
 
 
 def test_client_report_for_period(db, client):
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     a = _user("ca", "mvb_client", _mvb_client("Альфа"))
     b = _user("cb", "mvb_client", _mvb_client("Бета"))
     _login(client, staff)
@@ -997,12 +1007,12 @@ def test_client_self_registration_needs_operator_approval(db, client):
     assert client.get("/mvb/orders").status_code == 302
 
     # оператор видит новую регистрацию и подтверждает
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     _login(client, staff)
-    client.get("/mvb/registrations")
-    page = client.get("/mvb/registrations").get_data(as_text=True)
+    client.get("/mvb/admin/clients")
+    page = client.get("/mvb/admin/clients").get_data(as_text=True)
     assert "ИП Новый" in page and "+7 900 123-45-67" in page
-    assert "Новые клиенты <span" in page
+    assert "Клиенты <span" in page
     client.post(f"/mvb/registrations/{new.id}/approve")
     assert db.session.get(MvbClient, new.id).approval == "approved"
 
@@ -1027,7 +1037,7 @@ def test_registration_validation_and_reject(db, client):
 
     _register(client)
     new = MvbClient.query.filter_by(name="ИП Новый").one()
-    staff = _user("staff1", "mvb_staff")
+    staff = _user("staff1", "mvb_admin")
     _login(client, staff)
     client.post(f"/mvb/registrations/{new.id}/reject")
     client.post("/mvb/logout")
@@ -1044,3 +1054,187 @@ def test_registration_validation_and_reject(db, client):
 def test_wms_login_page_links_to_mvb(db, client):
     html = client.get("/login").get_data(as_text=True)
     assert "МВБ Логистика" in html and 'href="/mvb/login"' in html
+
+
+def _multi_order_form(**overrides):
+    form = {
+        "direction_count": "2",
+        "line_marketplace": ["wb", "ozon"],
+        "line_destination": ["Коледино", "Хоругвино"],
+        "line_slot": ["2026-10-06", "2026-10-08"],
+        "line_boxes": ["3", "2"],
+        "delivery_method": "pickup",
+        "pickup_address": "Москва, ул. Ленина, 1",
+    }
+    form.update(overrides)
+    return form
+
+
+def test_one_order_many_directions_with_own_box_counters(db, client):
+    """Одна заявка на несколько направлений: у каждого направления свой
+    СЦ, слот, количество, свой список коробов и счетчик 1…N."""
+    seller = _user("seller", "mvb_client", _mvb_client())
+    _login(client, seller)
+    form = client.get("/mvb/orders/new").get_data(as_text=True)
+    assert "Сколько направлений" in form
+    client.post("/mvb/orders/new", data=_multi_order_form())
+    order = MvbOrder.query.one()
+    assert [l.short_label() for l in order.lines] == ["WB Коледино", "OZON Хоругвино"]
+    assert order.box_count == 5 and order.slot_date.isoformat() == "2026-10-06"
+    client.post(f"/mvb/orders/{order.id}/confirm")
+    wb, oz = order.lines
+    assert [b.barcode for b in wb.boxes] == [f"{order.number}-1-001", f"{order.number}-1-002", f"{order.number}-1-003"]
+    assert [b.barcode for b in oz.boxes] == [f"{order.number}-2-001", f"{order.number}-2-002"]
+    assert [(b.line_position, b.line_total) for b in oz.boxes] == [(1, 2), (2, 2)]
+    client.get(f"/mvb/orders/{order.id}")
+    page = client.get(f"/mvb/orders/{order.id}").get_data(as_text=True)
+    assert "OZON Хоругвино" in page and "сдано на СЦ 0 / 2" in page and "Этикетки направления" in page
+    # этикетки одного направления
+    response = client.get(f"/mvb/orders/{order.id}/labels.pdf?line={oz.id}")
+    assert response.status_code == 200 and response.mimetype == "application/pdf"
+    # слот меняется по направлению
+    client.post(f"/mvb/orders/{order.id}/slot", data={"line_id": str(oz.id), "slot_date": "2026-10-09"})
+    assert db.session.get(MvbOrder, order.id).lines[1].slot_date.isoformat() == "2026-10-09"
+    # водитель видит одну заявку с общим количеством коробов
+    _login(client, _user("driver", "mvb_driver"))
+    client.get("/mvb/driver")
+    feed = client.get("/mvb/driver").get_data(as_text=True)
+    assert feed.count(order.number) >= 1 and "5 кор." in feed and "WB Коледино — 3, OZON Хоругвино — 2" in feed
+    # скан короба: номер внутри своего направления
+    data = client.post("/mvb/scan/pickup", data={"barcode": oz.boxes[1].barcode}).get_json()
+    assert data["seq"] == 2 and data["total"] == 2 and data["direction"] == "OZON Хоругвино"
+
+
+def test_multi_direction_form_validates_each_row(db, client):
+    _login(client, _user("seller", "mvb_client", _mvb_client()))
+    html = client.post("/mvb/orders/new", data=_multi_order_form(
+        line_destination=["Коледино", ""],
+    )).get_data(as_text=True)
+    assert "Направление 2: укажите СЦ" in html and MvbOrder.query.count() == 0
+    # лишние строки сверх выбранного количества не учитываются
+    client.post("/mvb/orders/new", data=_multi_order_form(direction_count="1"))
+    assert len(MvbOrder.query.one().lines) == 1
+
+
+def test_wms_movements_from_one_warehouse_become_one_order_for_drivers(db, client):
+    _login(client, _user("operator", "mvb_staff"))
+    doc1, boxes1 = _wms_movement("PER-000701", boxes=2)
+    doc2, boxes2 = _wms_movement("PER-000702", boxes=1)
+    doc2.from_warehouse_id = doc1.from_warehouse_id
+    doc2.to_warehouse.marketplace = "ozon"
+    doc2.to_warehouse.marketplace_city = "Хоругвино"
+    db.session.commit()
+    client.post("/mvb/wms/import", data={"doc_id": [str(doc1.id), str(doc2.id)]})
+    order = MvbOrder.query.one()
+    assert order.delivery_method == "pickup" and order.pickup_address == "Москва, Складская 5"
+    assert [(l.short_label(), l.box_count) for l in order.lines] == [("WB Коледино", 2), ("OZON Хоругвино", 1)]
+    assert [b.barcode for b in order.lines[1].boxes] == [boxes2[0].barcode_value]
+    # заявка из WMS падает в заявки водителям
+    _login(client, _user("driver", "mvb_driver"))
+    assert order.number in client.get("/mvb/driver").get_data(as_text=True)
+
+
+def test_wms_movements_from_different_warehouses_are_not_merged(db, client):
+    _login(client, _user("operator", "mvb_staff"))
+    doc1, _ = _wms_movement("PER-000711")
+    doc2, _ = _wms_movement("PER-000712")
+    client.post("/mvb/wms/import", data={"doc_id": [str(doc1.id), str(doc2.id)]})
+    assert MvbOrder.query.count() == 0
+
+
+def test_menu_by_role(db, client):
+    seller = _user("seller", "mvb_client", _mvb_client())
+    roles = {
+        "seller": (seller, ["Мои заявки"], ["Заявки в работе", "Приемка", "Скан забора", "Настройки"]),
+        "driver": (_user("driver", "mvb_driver"), ["Заявки на забор", "Скан забора"], ["Заявки в работе", "Приемка", "Паллеты"]),
+        "operator": (_user("operator", "mvb_staff"), ["Заявки в работе", "Клиенты", "Настройки", "Прайс", "Транспорт", "Пользователи", "Рейсы"], ["Приемка", "Скан забора", "Заявки на забор", "Паллеты"]),
+        "keeper": (_user("keeper", "mvb_storekeeper"), ["Приемка", "Паллеты", "Рейсы"], ["Заявки в работе", "Скан забора", "Настройки", "Клиенты"]),
+    }
+    for name, (user, visible, hidden) in roles.items():
+        _login(client, user)
+        page = client.get("/mvb/trips" if name in ("operator", "keeper") else "/mvb/").get_data(as_text=True)
+        if name in ("seller", "driver"):
+            page = client.get(client.get("/mvb/").headers["Location"]).get_data(as_text=True)
+        nav = page.split("</nav>")[0]
+        for item in visible:
+            assert item in nav, (name, item)
+        for item in hidden:
+            assert item not in nav, (name, item)
+    # кладовщик попадает сразу на приемку, оператору приемка недоступна
+    _login(client, roles["keeper"][0])
+    assert client.get("/mvb/").headers["Location"].endswith("/mvb/scan/receive")
+    _login(client, roles["operator"][0])
+    assert client.get("/mvb/scan/receive").status_code == 302
+    assert client.get("/mvb/scan/pickup").status_code == 302
+
+
+def test_storekeeper_cannot_do_operator_work(db, client):
+    _login(client, _user("keeper", "mvb_storekeeper"))
+    assert client.get("/mvb/prices").status_code == 302
+    assert client.get("/mvb/admin/clients").status_code == 302
+    client.post("/mvb/trips/new", data={"dir": ["wb|Коледино"]})
+    assert MvbTrip.query.count() == 0
+
+
+def test_clients_and_registrations_in_one_section_for_operator(db, client):
+    pending = MvbClient(name="ИП Ждет", approval="pending")
+    db.session.add(pending)
+    db.session.commit()
+    _login(client, _user("operator", "mvb_staff"))
+    page = client.get("/mvb/admin/clients").get_data(as_text=True)
+    assert "Новые регистрации" in page and "ИП Ждет" in page
+    client.post(f"/mvb/registrations/{pending.id}/approve")
+    assert db.session.get(MvbClient, pending.id).approval == "approved"
+    assert client.get("/mvb/registrations").headers["Location"].endswith("/mvb/admin/clients")
+
+
+def test_operator_manages_users_except_mvb_admins(db, client):
+    admin = _user("boss", "mvb_admin")
+    _login(client, _user("operator", "mvb_staff"))
+    page = client.get("/mvb/admin/users").get_data(as_text=True)
+    assert "Кладовщик МВБ" in page and 'value="mvb_admin"' not in page
+    client.post("/mvb/admin/users", data={"username": "k1", "password": "secret1", "role": "mvb_storekeeper"})
+    assert User.query.filter_by(username="k1").one().role == "mvb_storekeeper"
+    assert client.post(f"/mvb/admin/users/{admin.id}/password", data={"password": "hacked1"}).status_code == 403
+    assert client.post(f"/mvb/admin/users/{admin.id}/toggle").status_code == 403
+    assert "Создать тестовых пользователей" not in page
+
+
+def test_test_accounts_one_per_role(db, client):
+    _login(client, _user("boss", "mvb_admin"))
+    client.post("/mvb/admin/users/test-accounts")
+    page = client.get("/mvb/admin/users").get_data(as_text=True)
+    users = {u.username: u for u in User.query.filter(User.username.like("test_%")).all()}
+    assert {u.role for u in users.values()} == {"mvb_client", "mvb_driver", "mvb_staff", "mvb_storekeeper", "mvb_admin"}
+    assert users["test_client"].mvb_client.is_approved()
+    assert "сохраните пароли" in page
+    # пароль показан один раз и подходит для входа
+    import re
+    password = re.search(r"test_driver</td><td class=\"font-monospace\">([^<]+)<", page).group(1)
+    assert "сохраните пароли" not in client.get("/mvb/admin/users").get_data(as_text=True)
+    client.post("/mvb/logout")
+    g.pop("_login_user", None)
+    response = client.post("/mvb/login", data={"username": "test_driver", "password": password})
+    assert response.status_code == 302 and response.headers["Location"].endswith("/mvb/")
+    # повторное нажатие — новые пароли, без дублей
+    _login(client, User.query.filter_by(username="boss").one())
+    client.post("/mvb/admin/users/test-accounts")
+    assert User.query.filter(User.username.like("test_%")).count() == 5
+    assert MvbClient.query.filter_by(name="Тестовый клиент").count() == 1
+
+
+def test_old_orders_get_one_direction_on_startup(db, client):
+    from wms import _ensure_mvb_lines
+
+    rom = _mvb_client()
+    order = MvbOrder(number="MVB-OLD", client_id=rom.id, marketplace="wb", destination="Коледино", box_count=2,
+                     delivery_method="self", status="confirmed")
+    order.boxes = [MvbBox(seq=1, barcode="MVB-OLD-001"), MvbBox(seq=2, barcode="MVB-OLD-002")]
+    db.session.add(order)
+    db.session.commit()
+    assert not order.lines
+    _ensure_mvb_lines()
+    _ensure_mvb_lines()
+    order = db.session.get(MvbOrder, order.id)
+    assert len(order.lines) == 1 and order.lines[0].short_label() == "WB Коледино"
+    assert all(b.line_id == order.lines[0].id for b in order.boxes)

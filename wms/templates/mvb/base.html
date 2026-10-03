@@ -18,28 +18,36 @@
     </button>
     <div class="collapse navbar-collapse" id="navMvb">
       <ul class="navbar-nav me-auto">
-        {% if current_user.role != 'mvb_driver' or current_user.is_admin %}
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.orders') }}">Заявки</a></li>
+        {% if mvb_is_client %}
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.orders') }}">Мои заявки</a></li>
         {% endif %}
-        {% if mvb_can_scan('pickup') %}
+        {% if mvb_is_driver %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.driver') }}">Заявки на забор</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.scan', mode='pickup') }}">📷 Скан забора</a></li>
         {% endif %}
-        {% for mode, info in SCAN_MODES.items() if mvb_can_scan(mode) %}
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.scan', mode=mode) }}">📷 {{ info.nav }}</a></li>
-        {% endfor %}
-        {% if mvb_is_staff %}
+        {% if mvb_is_operator %}
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.orders') }}">Заявки в работе</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.wms_movements') }}">Из WMS</a></li>
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.registrations') }}">Новые клиенты{% if mvb_pending_clients %} <span class="badge bg-warning text-dark">{{ mvb_pending_clients }}</span>{% endif %}</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.admin_clients') }}">Клиенты{% if mvb_pending_clients %} <span class="badge bg-warning text-dark" title="Новые регистрации">{{ mvb_pending_clients }}</span>{% endif %}</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.dispatch') }}">К отправке</a></li>
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.pallets') }}">Паллеты</a></li>
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.trips') }}">Рейсы</a></li>
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.vehicles') }}">Транспорт</a></li>
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.prices') }}">Прайс</a></li>
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.reports') }}">Отчет</a></li>
         {% endif %}
-        {% if current_user.can_manage_mvb() %}
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.admin_clients') }}">Клиенты</a></li>
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.admin_users') }}">Пользователи</a></li>
+        {% if mvb_is_storekeeper %}
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.scan', mode='receive') }}">📷 Приемка</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.pallets') }}">Паллеты</a></li>
+        {% endif %}
+        {% if mvb_is_staff %}
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.trips') }}">Рейсы</a></li>
+        {% endif %}
+        {% if mvb_is_operator %}
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.reports') }}">Отчет</a></li>
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">⚙ Настройки</a>
+          <ul class="dropdown-menu">
+            <li><a class="dropdown-item" href="{{ url_for('mvb.prices') }}">Прайс</a></li>
+            <li><a class="dropdown-item" href="{{ url_for('mvb.vehicles') }}">Транспорт</a></li>
+            <li><a class="dropdown-item" href="{{ url_for('mvb.admin_users') }}">Пользователи</a></li>
+          </ul>
+        </li>
         {% endif %}
         {% if current_user.is_admin %}
         <li class="nav-item"><a class="nav-link text-white-50" href="{{ url_for('main.index') }}">← WMS</a></li>

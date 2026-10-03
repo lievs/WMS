@@ -252,6 +252,37 @@ def _ensure_indexes():
             )
 
 
+def _ensure_mvb_lines():
+    """МВБ: заявки, созданные до появления направлений, получают одно
+    направление по своим полям; их короба и план рейса переносятся на него.
+    Повторный запуск ничего не делает."""
+    from .models import MvbBox, MvbOrder, MvbOrderLine
+
+    orders = MvbOrder.query.filter(~MvbOrder.lines.any()).all()
+    for order in orders:
+        line = MvbOrderLine(
+            seq=1,
+            marketplace=order.marketplace or "wb",
+            destination=order.destination,
+            slot_date=order.slot_date,
+            box_count=order.box_count or len(order.boxes) or 1,
+            planned_trip_id=order.planned_trip_id,
+            wms_movement_id=order.wms_movement_id,
+        )
+        order.lines.append(line)
+        for box in order.boxes:
+            box.line = line
+    if orders:
+        db.session.commit()
+        print(f"[schema] МВБ: направления созданы для заявок — {len(orders)}")
+    orphan = MvbBox.query.filter(MvbBox.line_id.is_(None)).count()
+    if orphan:
+        for box in MvbBox.query.filter(MvbBox.line_id.is_(None)).all():
+            if box.order.lines:
+                box.line = box.order.lines[0]
+        db.session.commit()
+
+
 def _register_sqlite_tuning():
     """SQLite-специфичные настройки:
     - LOWER/UPPER на Python-реализации (сравнение LIKE/ILIKE по умолчанию
@@ -388,6 +419,7 @@ def create_app(config_class=Config):
         db.create_all()
         _ensure_columns()
         _ensure_indexes()
+        _ensure_mvb_lines()
         _bootstrap_admin()
         bootstrap_categories()
 

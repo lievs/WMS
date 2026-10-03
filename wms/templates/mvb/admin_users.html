@@ -1,7 +1,25 @@
 {% extends "mvb/base.html" %}
 {% block title %}Пользователи{% endblock %}
 {% block content %}
-<h3 class="mb-3">Пользователи МВБ Логистики</h3>
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+  <h3 class="mb-0">Пользователи МВБ Логистики</h3>
+  {% if mvb_can_manage %}
+  <form method="post" action="{{ url_for('mvb.admin_test_accounts') }}" onsubmit="return confirm('Создать по одному тестовому пользователю на каждую роль? Если они уже есть, им будут выданы новые пароли.')">
+    <button class="btn btn-outline-secondary">🧪 Создать тестовых пользователей</button>
+  </form>
+  {% endif %}
+</div>
+{% if test_accounts %}
+<div class="alert alert-warning">
+  <b>Тестовые пользователи — сохраните пароли, больше они не покажутся.</b> Вход: <a href="{{ url_for('mvb.login', _external=True) }}">{{ url_for('mvb.login', _external=True) }}</a>
+  <table class="table table-sm mb-0 mt-2" style="max-width:640px">
+    <thead><tr><th>Роль</th><th>Логин</th><th>Пароль</th></tr></thead>
+    <tbody>
+    {% for a in test_accounts %}<tr><td>{{ a.role }}</td><td class="font-monospace">{{ a.username }}</td><td class="font-monospace">{{ a.password }}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
 <form method="post" class="card p-3 mb-4">
   <h6>Новый пользователь</h6>
   <div class="row g-2">
@@ -10,7 +28,7 @@
     <div class="col-md-2"><input name="full_name" class="form-control" placeholder="ФИО"></div>
     <div class="col-md-3">
       <select name="role" class="form-select" required>
-        {% for code, label in MVB_ROLES.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
+        {% for code, label in roles.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
       </select>
     </div>
     <div class="col-md-3">
@@ -33,6 +51,9 @@
       <td>{{ MVB_ROLES.get(u.role, u.role) }}</td>
       <td>{{ u.mvb_client.name if u.mvb_client else '' }}</td>
       <td>{{ 'активен' if u.is_active_user else 'отключен' }}</td>
+      {% if u.role == 'mvb_admin' and not mvb_can_manage %}
+      <td></td><td></td>
+      {% else %}
       <td>
         <form method="post" action="{{ url_for('mvb.admin_user_password', user_id=u.id) }}" class="d-flex gap-1">
           <input name="password" class="form-control form-control-sm" placeholder="от 6 символов" required>
@@ -44,6 +65,7 @@
           <button class="btn btn-sm btn-outline-secondary">{{ 'Отключить' if u.is_active_user else 'Включить' }}</button>
         </form>
       </td>
+      {% endif %}
     </tr>
   {% else %}
     <tr><td colspan="7" class="text-muted">Пользователей пока нет</td></tr>

@@ -50,7 +50,7 @@
   <ol class="mb-0">
   {% for b in proposal %}
     <li class="{{ 'text-danger' if b.boxes > capacity else '' }}">{% if b.slot_date %}слот <b>{{ b.slot_date.strftime('%d.%m') }}</b> · {% endif %}<b>{{ b.boxes }}</b> кор.{% if b.boxes > capacity %} — заявка больше машины{% endif %}:
-      {% for i in b['items'] %}{{ i.order.number }} ({{ MVB_MARKETPLACES[i.marketplace] }}{% if i.destination %} · {{ i.destination }}{% endif %}, {{ i.boxes }}){% if not loop.last %}, {% endif %}{% endfor %}</li>
+      {% for i in b['items'] %}{{ i.order.number }}{% if i.order.lines|length > 1 %}/{{ i.line.seq }}{% endif %} ({{ MVB_MARKETPLACES[i.marketplace] }}{% if i.destination %} · {{ i.destination }}{% endif %}, {{ i.boxes }}){% if not loop.last %}, {% endif %}{% endfor %}</li>
   {% endfor %}
   </ol>
 </div>

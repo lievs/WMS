@@ -7,7 +7,7 @@
 {%- endmacro %}
 {% block content %}
 <h3 class="mb-3">{{ 'Заявка ' ~ order.number if order else 'Новая заявка' }}</h3>
-<form method="post" class="card p-3" style="max-width:720px">
+<form method="post" class="card p-3" style="max-width:860px">
   {% if clients %}
   <div class="mb-3">
     <label class="form-label">Клиент</label>
@@ -17,21 +17,45 @@
     </select>
   </div>
   {% endif %}
+  {%- set rows = [] -%}
+  {%- if form is defined and form.getlist('line_marketplace') -%}
+    {%- for mp in form.getlist('line_marketplace') -%}
+      {%- set i = loop.index0 -%}
+      {%- set _ = rows.append({'mp': mp, 'dest': (form.getlist('line_destination')[i] if i < form.getlist('line_destination')|length else ''), 'slot': (form.getlist('line_slot')[i] if i < form.getlist('line_slot')|length else ''), 'boxes': (form.getlist('line_boxes')[i] if i < form.getlist('line_boxes')|length else '')}) -%}
+    {%- endfor -%}
+  {%- elif order and order.lines -%}
+    {%- for l in order.lines -%}{%- set _ = rows.append({'mp': l.marketplace, 'dest': l.destination or '', 'slot': l.slot_date or '', 'boxes': l.box_count}) -%}{%- endfor -%}
+  {%- elif order -%}
+    {%- set _ = rows.append({'mp': order.marketplace, 'dest': order.destination or '', 'slot': order.slot_date or '', 'boxes': order.box_count}) -%}
+  {%- endif -%}
+  {%- set count = (form.get('direction_count')|int if form is defined and form.get('direction_count') else 0) or (order.lines|length if order and order.lines else 0) or 1 -%}
+  <div class="mb-3" style="max-width:260px">
+    <label class="form-label">Сколько направлений (СЦ) в заявке?</label>
+    <select name="direction_count" id="direction-count" class="form-select">
+      {% for n in range(1, max_directions + 1) %}<option value="{{ n }}" {{ 'selected' if n == count }}>{{ n }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="table-responsive mb-1">
+  <table class="table table-sm align-middle mb-1">
+    <thead><tr><th>#</th><th>Маркетплейс</th><th>СЦ / склад *</th><th>Дата слота *</th><th style="width:110px">Коробов *</th></tr></thead>
+    <tbody>
+    {% for n in range(max_directions) %}
+      {% set r = rows[n] if n < rows|length else {} %}
+      <tr class="direction-row" data-n="{{ n + 1 }}">
+        <td>{{ n + 1 }}</td>
+        <td><select name="line_marketplace" class="form-select form-select-sm">
+          {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}" {{ 'selected' if (r.mp or 'wb') == code }}>{{ label }}</option>{% endfor %}
+        </select></td>
+        <td><input name="line_destination" class="form-control form-control-sm" value="{{ r.dest or '' }}" placeholder="например, Коледино" required></td>
+        <td><input name="line_slot" type="date" class="form-control form-control-sm" value="{{ r.slot or '' }}" required></td>
+        <td><input name="line_boxes" type="number" min="1" max="500" class="form-control form-control-sm" value="{{ r.boxes or '' }}" required></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <div class="form-text mb-3">Дата слота — дата поставки, забронированная на складе маркетплейса. Всего коробов: <b id="total-boxes">0</b>.</div>
   <div class="row g-3">
-    <div class="col-sm-6">
-      <label class="form-label">Маркетплейс</label>
-      <select name="marketplace" class="form-select">
-        {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}" {{ 'selected' if val('marketplace', 'wb') == code }}>{{ label }}</option>{% endfor %}
-      </select>
-    </div>
-    <div class="col-sm-6">
-      <label class="form-label">СЦ / склад маркетплейса</label>
-      <input name="destination" class="form-control" value="{{ val('destination') }}" placeholder="например, Коледино">
-    </div>
-    <div class="col-sm-6">
-      <label class="form-label">Количество коробов</label>
-      <input name="box_count" type="number" min="1" max="500" class="form-control" value="{{ val('box_count', 1) }}" required>
-    </div>
     <div class="col-sm-6">
       <label class="form-label">Способ передачи</label>
       <select name="delivery_method" class="form-select">
@@ -42,11 +66,6 @@
       <label class="form-label">Адрес забора</label>
       <input name="pickup_address" class="form-control" value="{{ val('pickup_address', default_address or '') }}">
       <div class="form-text">Обязателен для забора транспортной компанией.</div>
-    </div>
-    <div class="col-sm-6">
-      <label class="form-label">Дата слота на СЦ *</label>
-      <input name="slot_date" type="date" class="form-control" value="{{ val('slot_date') }}" required>
-      <div class="form-text">Дата поставки, забронированная на складе маркетплейса.</div>
     </div>
     <div class="col-12"></div>
     <div class="col-sm-4">
@@ -77,6 +96,27 @@
   // Адрес клиента по умолчанию подставляется при выборе клиента (оператором).
   const clientSelect = document.querySelector("select[name=client_id]");
   const addressInput = document.querySelector("input[name=pickup_address]");
+  const countSelect = document.getElementById("direction-count");
+  const rows = [...document.querySelectorAll(".direction-row")];
+  const total = document.getElementById("total-boxes");
+  function refreshRows() {
+    const count = parseInt(countSelect.value, 10) || 1;
+    rows.forEach(row => {
+      const on = parseInt(row.dataset.n, 10) <= count;
+      row.classList.toggle("d-none", !on);
+      // Скрытые строки не отправляются и не мешают обязательными полями.
+      row.querySelectorAll("input, select").forEach(el => el.disabled = !on);
+    });
+    let sum = 0;
+    rows.forEach(row => {
+      const input = row.querySelector("input[name=line_boxes]");
+      if (!input.disabled) sum += parseInt(input.value, 10) || 0;
+    });
+    total.textContent = sum;
+  }
+  countSelect.addEventListener("change", refreshRows);
+  document.querySelectorAll("input[name=line_boxes]").forEach(el => el.addEventListener("input", refreshRows));
+  refreshRows();
   if (clientSelect) {
     clientSelect.addEventListener("change", () => {
       const opt = clientSelect.selectedOptions[0];

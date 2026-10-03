@@ -27,8 +27,8 @@ document.addEventListener("DOMContentLoaded", function () {
     const cls = !data.ok ? "danger" : data.already ? "warning" : "success";
     let extra = "";
     if (data.order) {
-      extra += ` · <a href="${esc(data.order_url)}">${esc(data.order)}</a> · ${esc(data.client)} · короб ${esc(data.seq)}/${esc(data.total)}`;
-      if (data.done !== undefined) extra += ` · по заявке: ${esc(data.done)} из ${esc(data.total)}`;
+      extra += ` · <a href="${esc(data.order_url)}">${esc(data.order)}</a> · ${esc(data.client)} · ${data.direction ? esc(data.direction) + ' · ' : ''}короб ${esc(data.seq)}/${esc(data.total)}`;
+      if (data.done !== undefined) extra += ` · по направлению: ${esc(data.done)} из ${esc(data.total)}`;
     }
     if (data.count !== undefined) extra += ` · всего: ${esc(data.count)}`;
     let html = `<div class="alert alert-${cls} fs-5 mb-1">${esc(data.message)}${extra}</div>`;

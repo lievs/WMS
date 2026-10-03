@@ -23,7 +23,7 @@ from flask_login import current_user, login_user, logout_user
 from ..extensions import db
 from ..models import (
     MVB_BOX_STATUS_LABELS, MVB_BOX_STATUS_ORDER, MVB_BOX_STATUSES, MVB_DELIVERY_METHODS,
-    MVB_MARKETPLACES, MVB_ROLES, MVB_TRIP_STATUSES, MvbBox, MvbBoxEvent, MvbClient, MvbOrder,
+    MVB_MARKETPLACES, MVB_ROLES, MvbOrderLine, MVB_TRIP_STATUSES, MvbBox, MvbBoxEvent, MvbClient, MvbOrder,
     MVB_PRICE_KINDS, MvbPallet, MvbPriceTier, MvbTrip, MvbTripStop, MvbVehicle, User,
 )
 from ..utils.http import content_disposition
@@ -49,14 +49,18 @@ SCAN_MODES = {
         "nav": "Скан забора",
         "to": "picked_up",
         "from": {"created"},
-        "roles": {"mvb_driver", "mvb_staff", "mvb_admin"},
+        # Забор у клиента сканирует водитель (в меню — только у него).
+        "roles": {"mvb_driver", "mvb_admin"},
     },
     "receive": {
         "title": "Приемка на складе МВБ",
         "nav": "Приемка",
         "to": "received",
+        # Приемка — для самопривоза и вернувшихся с СЦ; короба с забора
+        # водитель сдает кнопкой «Короба сданы в МВБ» (скан забранного
+        # короба тоже примет его, если водитель забыл нажать).
         "from": {"created", "picked_up", "not_delivered"},
-        "roles": {"mvb_staff", "mvb_admin"},
+        "roles": {"mvb_storekeeper", "mvb_admin"},
     },
 }
 
@@ -76,8 +80,17 @@ def _is_client():
     return current_user.role == "mvb_client" and not current_user.is_admin
 
 
-def _is_staff():
+def _is_operator():
     return current_user.is_admin or current_user.role in ("mvb_staff", "mvb_admin")
+
+
+def _is_storekeeper():
+    return current_user.is_admin or current_user.role in ("mvb_storekeeper", "mvb_admin")
+
+
+def _is_staff():
+    """Сотрудник МВБ: оператор или кладовщик."""
+    return _is_operator() or _is_storekeeper()
 
 
 def _is_driver():
@@ -133,9 +146,13 @@ def _inject():
         "mvb_is_client": current_user.is_authenticated and _is_client(),
         "mvb_can_scan": (lambda mode: current_user.is_authenticated and _can_scan(mode)),
         "mvb_is_staff": current_user.is_authenticated and _is_staff(),
+        "mvb_is_operator": current_user.is_authenticated and _is_operator(),
+        "mvb_is_storekeeper": current_user.is_authenticated and _is_storekeeper(),
+        "mvb_is_driver": current_user.is_authenticated and _is_driver(),
+        "mvb_can_manage": current_user.is_authenticated and current_user.can_manage_mvb(),
         "mvb_pending_clients": (
             MvbClient.query.filter_by(approval="pending").count()
-            if current_user.is_authenticated and _is_staff() else 0
+            if current_user.is_authenticated and _is_operator() else 0
         ),
         "MVB_TRIP_STATUSES": MVB_TRIP_STATUSES,
     }
@@ -239,6 +256,8 @@ def logout():
 def index():
     if current_user.role == "mvb_driver" and not current_user.is_admin:
         return redirect(url_for("mvb.driver"))
+    if current_user.role == "mvb_storekeeper" and not current_user.is_admin:
+        return redirect(url_for("mvb.scan", mode="receive"))
     return redirect(url_for("mvb.orders"))
 
 
@@ -280,20 +299,65 @@ def _parse_time(value):
     return value
 
 
+MAX_DIRECTIONS = 10
+
+
+def _form_lines():
+    """Направления из формы: списки line_marketplace / line_destination /
+    line_slot / line_boxes (по строке на направление). Форма в одно
+    направление (marketplace, destination, slot_date, box_count) тоже
+    принимается. Возвращает (список словарей, ошибка)."""
+    form = request.form
+    if form.getlist("line_marketplace"):
+        raw = list(zip(
+            form.getlist("line_marketplace"), form.getlist("line_destination"),
+            form.getlist("line_slot"), form.getlist("line_boxes"),
+        ))
+        count = form.get("direction_count", type=int) or len(raw)
+        raw = raw[:max(1, min(count, MAX_DIRECTIONS))]
+    else:
+        raw = [(form.get("marketplace", "wb"), form.get("destination", ""), form.get("slot_date", ""),
+                form.get("box_count", ""))]
+    lines = []
+    for n, (marketplace, destination, slot, boxes) in enumerate(raw, start=1):
+        prefix = f"Направление {n}: " if len(raw) > 1 else ""
+        if marketplace not in MVB_MARKETPLACES:
+            return None, prefix + "выберите маркетплейс"
+        destination = (destination or "").strip()
+        if not destination:
+            return None, prefix + "укажите СЦ / склад маркетплейса"
+        try:
+            slot_date = date.fromisoformat((slot or "").strip())
+        except ValueError:
+            return None, prefix + "укажите дату слота на СЦ"
+        try:
+            box_count = int(boxes)
+        except (TypeError, ValueError):
+            return None, prefix + "укажите количество коробов"
+        if box_count < 1:
+            return None, prefix + "количество коробов — от 1"
+        lines.append({"marketplace": marketplace, "destination": destination, "slot_date": slot_date,
+                      "box_count": box_count})
+    if sum(l["box_count"] for l in lines) > MAX_BOXES_PER_ORDER:
+        return None, f"Всего коробов в заявке — не больше {MAX_BOXES_PER_ORDER}"
+    return lines, None
+
+
+def _form_lines_checked():
+    lines, error = _form_lines()
+    if error:
+        error = error[0].upper() + error[1:]
+    return lines, error
+
+
 def _fill_order_from_form(order):
-    """Заполняет заявку из формы; возвращает текст ошибки или None."""
-    marketplace = request.form.get("marketplace", "wb")
+    """Заполняет заявку (черновик) из формы; возвращает текст ошибки или None."""
     delivery_method = request.form.get("delivery_method", "pickup")
-    if marketplace not in MVB_MARKETPLACES:
-        return "Выберите маркетплейс"
     if delivery_method not in MVB_DELIVERY_METHODS:
         return "Выберите способ передачи коробов"
-    try:
-        box_count = int(request.form.get("box_count", ""))
-    except ValueError:
-        return "Укажите количество коробов"
-    if box_count < 1 or box_count > MAX_BOXES_PER_ORDER:
-        return f"Количество коробов — от 1 до {MAX_BOXES_PER_ORDER}"
+    lines, error = _form_lines_checked()
+    if error:
+        return error
     planned_date = None
     raw_date = request.form.get("planned_date", "").strip()
     if raw_date:
@@ -301,21 +365,16 @@ def _fill_order_from_form(order):
             planned_date = date.fromisoformat(raw_date)
         except ValueError:
             return "Некорректная дата"
-    try:
-        slot_date = date.fromisoformat(request.form.get("slot_date", "").strip())
-    except ValueError:
-        return "Укажите дату слота на СЦ"
     pickup_address = request.form.get("pickup_address", "").strip()
     if delivery_method == "pickup" and not pickup_address:
         return "Для забора укажите адрес"
 
-    order.marketplace = marketplace
+    # Черновик: коробов еще нет — направления просто пересоздаем.
+    order.lines = [MvbOrderLine(seq=n, **data) for n, data in enumerate(lines, start=1)]
+    order.sync_from_lines()
     order.delivery_method = delivery_method
-    order.box_count = box_count
-    order.destination = request.form.get("destination", "").strip() or None
     order.pickup_address = pickup_address or None
     order.planned_date = planned_date
-    order.slot_date = slot_date
     order.time_from = _parse_time(request.form.get("time_from"))
     order.time_to = _parse_time(request.form.get("time_to"))
     order.comment = request.form.get("comment", "").strip() or None
@@ -329,7 +388,7 @@ def order_new():
         client = current_user.mvb_client if _is_client() else None
         return render_template(
             "mvb/order_form.html", order=None, clients=clients,
-            default_address=(client.address if client else ""),
+            default_address=(client.address if client else ""), max_directions=MAX_DIRECTIONS,
         )
 
     if _is_client():
@@ -338,13 +397,15 @@ def order_new():
         client_id = request.form.get("client_id", type=int)
         if not client_id or not db.session.get(MvbClient, client_id):
             flash("Выберите клиента", "danger")
-            return render_template("mvb/order_form.html", order=None, clients=clients, form=request.form)
+            return render_template("mvb/order_form.html", order=None, clients=clients, form=request.form,
+                                   max_directions=MAX_DIRECTIONS)
 
     order = MvbOrder(client_id=client_id, created_by_id=current_user.id, status="draft")
     error = _fill_order_from_form(order)
     if error:
         flash(error, "danger")
-        return render_template("mvb/order_form.html", order=None, clients=clients, form=request.form)
+        return render_template("mvb/order_form.html", order=None, clients=clients, form=request.form,
+                                   max_directions=MAX_DIRECTIONS)
     order.number = next_number("mvb_order", "MVB-", 6)
     db.session.add(order)
     db.session.commit()
@@ -366,16 +427,22 @@ def order_slot(order_id):
     """Дата слота на СЦ меняется и у оформленной заявки (слот могут
     перенести), пока короба не отправлены на СЦ."""
     order = _get_order_or_404(order_id)
-    if order.status == "cancelled" or any(b.status in ("shipped", "delivered") for b in order.boxes):
+    line = next((l for l in order.lines if l.id == request.form.get("line_id", type=int)), None)
+    if line is None and len(order.lines) == 1:
+        line = order.lines[0]
+    if line is None:
+        abort(400)
+    if order.status == "cancelled" or any(b.status in ("shipped", "delivered") for b in line.boxes):
         flash("Слот уже не изменить — короба отправлены на СЦ", "warning")
         return redirect(url_for("mvb.order_detail", order_id=order.id))
     try:
-        order.slot_date = date.fromisoformat(request.form.get("slot_date", "").strip())
+        line.slot_date = date.fromisoformat(request.form.get("slot_date", "").strip())
     except ValueError:
         flash("Укажите дату слота на СЦ", "danger")
         return redirect(url_for("mvb.order_detail", order_id=order.id))
+    order.sync_from_lines()
     db.session.commit()
-    flash(f"Слот на СЦ: {order.slot_date.strftime('%d.%m.%Y')}", "success")
+    flash(f"{line.short_label()}: слот на СЦ {line.slot_date.strftime('%d.%m.%Y')}", "success")
     return redirect(url_for("mvb.order_detail", order_id=order.id))
 
 
@@ -386,12 +453,13 @@ def order_edit(order_id):
         flash("Изменить можно только черновик", "warning")
         return redirect(url_for("mvb.order_detail", order_id=order.id))
     if request.method == "GET":
-        return render_template("mvb/order_form.html", order=order, clients=[])
+        return render_template("mvb/order_form.html", order=order, clients=[], max_directions=MAX_DIRECTIONS)
     error = _fill_order_from_form(order)
     if error:
         db.session.rollback()
         flash(error, "danger")
-        return render_template("mvb/order_form.html", order=order, clients=[], form=request.form)
+        return render_template("mvb/order_form.html", order=order, clients=[], form=request.form,
+                               max_directions=MAX_DIRECTIONS)
     db.session.commit()
     flash("Заявка сохранена", "success")
     return redirect(url_for("mvb.order_detail", order_id=order.id))
@@ -405,8 +473,15 @@ def order_confirm(order_id):
     if order.status != "draft":
         flash("Заявка уже оформлена", "warning")
         return redirect(url_for("mvb.order_detail", order_id=order.id))
-    for seq in range(1, order.box_count + 1):
-        order.boxes.append(MvbBox(seq=seq, barcode=f"{order.number}-{seq:03d}", status="created"))
+    # У каждого направления свой счетчик коробов: при нескольких
+    # направлениях штрихкод «номер заявки-направление-номер короба».
+    seq = 0
+    multi = len(order.lines) > 1
+    for line in order.lines:
+        for n in range(1, line.box_count + 1):
+            seq += 1
+            barcode = f"{order.number}-{line.seq}-{n:03d}" if multi else f"{order.number}-{n:03d}"
+            order.boxes.append(MvbBox(seq=seq, barcode=barcode, status="created", line=line))
     order.status = "confirmed"
     order.confirmed_at = datetime.utcnow()
     _apply_prices(order)
@@ -431,7 +506,8 @@ def order_cancel(order_id):
 
 @bp.route("/orders/<int:order_id>/labels.pdf")
 def order_labels_pdf(order_id):
-    """Этикетки 58×40 на все короба заявки (или на выбранные ?seq=1,2)."""
+    """Этикетки 58×40 на все короба заявки, на одно направление (?line=id)
+    или на выбранные короба (?seq=1,2)."""
     order = _get_order_or_404(order_id)
     if order.status != "confirmed" or not order.boxes:
         abort(404)
@@ -443,19 +519,27 @@ def order_labels_pdf(order_id):
         except ValueError:
             abort(400)
         boxes = [b for b in boxes if b.seq in wanted]
-    total = len(order.boxes)
-    # Коротко, как пишут на коробах: «WB Коледино», «OZON Хоругвино».
-    destination = {"wb": "WB", "ozon": "OZON"}.get(order.marketplace, order.marketplace_label)
-    if order.destination:
-        destination += f" {order.destination}"
-    entries = [
-        {
-            "barcode": box.barcode, "destination": destination, "seq": box.seq, "total": total,
-            "slot": order.slot_date.strftime("%d.%m.%Y") if order.slot_date else "",
+    line_id = request.args.get("line", type=int)
+    if line_id:
+        boxes = [b for b in boxes if b.line_id == line_id]
+        if not boxes:
+            abort(404)
+    # Номер короба на этикетке — внутри своего направления («3 / 12 кор.»):
+    # так его считают на СЦ.
+    position = {}
+    for line in order.lines:
+        for n, line_box in enumerate(line.boxes, start=1):
+            position[line_box.id] = (n, len(line.boxes))
+    entries = []
+    for box in boxes:
+        line = box.line
+        n, total = position.get(box.id, (box.seq, len(order.boxes)))
+        entries.append({
+            # Коротко, как пишут на коробах: «WB Коледино», «OZON Хоругвино».
+            "barcode": box.barcode, "destination": line.short_label(), "seq": n, "total": total,
+            "slot": line.slot_date.strftime("%d.%m.%Y") if line.slot_date else "",
             "sender": order.client.name,
-        }
-        for box in boxes
-    ]
+        })
     pdf = build_mvb_box_labels_pdf(entries)
     return Response(
         pdf,
@@ -561,6 +645,25 @@ def driver_take(order_id):
     return redirect(url_for("mvb.driver"))
 
 
+@bp.route("/driver/handover", methods=["POST"])
+def driver_handover():
+    """«Короба сданы в МВБ»: водитель привез забранные короба на склад —
+    все они переходят в «На складе МВБ» без поштучной приемки."""
+    if not _is_driver():
+        abort(403)
+    boxes = MvbBox.query.filter(MvbBox.status == "picked_up", MvbBox.picked_up_by_id == current_user.id).all()
+    if not boxes:
+        flash("У вас нет забранных коробов", "warning")
+        return redirect(url_for("mvb.driver"))
+    now = datetime.utcnow()
+    for box in boxes:
+        _move_box(box, "received", now)
+    db.session.commit()
+    orders = sorted({box.order.number for box in boxes})
+    flash(f"Сдано на склад МВБ: {len(boxes)} кор. ({', '.join(orders)})", "success")
+    return redirect(url_for("mvb.driver"))
+
+
 @bp.route("/driver/orders/<int:order_id>/release", methods=["POST"])
 def driver_release(order_id):
     if not _is_driver():
@@ -598,12 +701,12 @@ def scan_box(mode):
 
     box = _find_box(code)
     imported_note = None
-    if box is None and mode == "receive":
+    if box is None and mode in ("receive", "pickup"):
         # Свой короб WMS, перемещение которого еще не передано в МВБ, —
-        # принимаем всё перемещение сразу по скану его этикетки.
+        # передаем всё перемещение сразу по скану его этикетки.
         doc = _wms_movement_for_box_code(code)
         if doc is not None:
-            order, errors = _import_movement(doc, "self")
+            order, errors = _import_movement(doc, "self" if mode == "receive" else "pickup")
             if order is not None:
                 imported_note = f"Перемещение WMS {doc.number} принято в МВБ как заявка {order.number}"
                 box = _find_box(code)
@@ -615,8 +718,9 @@ def scan_box(mode):
         "order": order.number,
         "order_url": url_for("mvb.order_detail", order_id=order.id),
         "client": order.client.name,
-        "seq": box.seq,
-        "total": len(order.boxes),
+        "seq": box.line_position,
+        "total": box.line_total,
+        "direction": box.line.short_label() if box.line else "",
     }
     if order.status != "confirmed":
         return jsonify(ok=False, message=f"Заявка {order.number} не оформлена или отменена", **payload), 409
@@ -647,7 +751,7 @@ def scan_box(mode):
         if vehicle and vehicle.capacity_boxes:
             load_note = f"В машине {load} из {vehicle.capacity_boxes} кор."
     done = sum(
-        1 for b in order.boxes
+        1 for b in (box.line.boxes if box.line else order.boxes)
         if MVB_BOX_STATUS_ORDER.get(b.status, 0) >= MVB_BOX_STATUS_ORDER[info["to"]]
     )
     message = f"{box.barcode}: {box.status_label}"
@@ -671,21 +775,13 @@ def _require_manage():
 
 @bp.route("/registrations")
 def registrations():
-    """Новые клиенты, зарегистрировавшиеся сами: оператор подтверждает или
-    отклоняет."""
-    if not _require_staff():
-        return redirect(url_for("mvb.index"))
-    pending = MvbClient.query.filter_by(approval="pending").order_by(MvbClient.created_at).all()
-    recent = (
-        MvbClient.query.filter(MvbClient.approval.in_(["approved", "rejected"]), MvbClient.approved_at.isnot(None))
-        .order_by(MvbClient.approved_at.desc()).limit(20).all()
-    )
-    return render_template("mvb/registrations.html", pending=pending, recent=recent)
+    """Новые регистрации теперь в разделе «Клиенты»."""
+    return redirect(url_for("mvb.admin_clients"))
 
 
 @bp.route("/registrations/<int:client_id>/<action>", methods=["POST"])
 def registration_action(client_id, action):
-    if not _require_staff():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     client = db.session.get(MvbClient, client_id)
     if client is None or action not in ("approve", "reject"):
@@ -698,12 +794,12 @@ def registration_action(client_id, action):
         flash(f"Клиент «{client.name}» подтвержден — может входить и создавать заявки", "success")
     else:
         flash(f"Регистрация «{client.name}» отклонена", "warning")
-    return redirect(url_for("mvb.registrations"))
+    return redirect(url_for("mvb.admin_clients"))
 
 
 @bp.route("/admin/clients", methods=["GET", "POST"])
 def admin_clients():
-    if not _require_manage():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     if request.method == "POST":
         client_id = request.form.get("client_id", type=int)
@@ -725,13 +821,14 @@ def admin_clients():
         db.session.commit()
         flash(f"Клиент «{client.name}» сохранен", "success")
         return redirect(url_for("mvb.admin_clients"))
-    clients = MvbClient.query.order_by(MvbClient.name).all()
-    return render_template("mvb/admin_clients.html", clients=clients)
+    clients = MvbClient.query.filter(MvbClient.approval != "pending").order_by(MvbClient.name).all()
+    pending = MvbClient.query.filter_by(approval="pending").order_by(MvbClient.created_at).all()
+    return render_template("mvb/admin_clients.html", clients=clients, pending=pending)
 
 
 @bp.route("/admin/users", methods=["GET", "POST"])
 def admin_users():
-    if not _require_manage():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     if request.method == "POST":
         username = request.form.get("username", "").strip()
@@ -740,7 +837,7 @@ def admin_users():
         client_id = request.form.get("client_id", type=int)
         if not username or len(password) < 6:
             flash("Укажите логин и пароль не короче 6 символов", "danger")
-        elif role not in MVB_ROLES:
+        elif role not in _assignable_roles():
             flash("Выберите роль", "danger")
         elif role == "mvb_client" and not (client_id and db.session.get(MvbClient, client_id)):
             flash("Для роли «Клиент» выберите клиента", "danger")
@@ -762,19 +859,77 @@ def admin_users():
         return redirect(url_for("mvb.admin_users"))
     users = User.query.filter(User.role.in_(list(MVB_ROLES))).order_by(User.username).all()
     clients = MvbClient.query.filter_by(is_active=True).order_by(MvbClient.name).all()
-    return render_template("mvb/admin_users.html", users=users, clients=clients)
+    return render_template(
+        "mvb/admin_users.html", users=users, clients=clients, roles=_assignable_roles(),
+        test_accounts=session.pop("mvb_test_accounts", None),
+    )
+
+
+def _assignable_roles():
+    """Оператор заводит всех, кроме администраторов МВБ."""
+    if current_user.can_manage_mvb():
+        return dict(MVB_ROLES)
+    return {code: label for code, label in MVB_ROLES.items() if code != "mvb_admin"}
+
+
+TEST_CLIENT_NAME = "Тестовый клиент"
+TEST_ACCOUNTS = (
+    ("test_client", "mvb_client", "Тестовый клиент"),
+    ("test_driver", "mvb_driver", "Тестовый водитель"),
+    ("test_operator", "mvb_staff", "Тестовый оператор"),
+    ("test_storekeeper", "mvb_storekeeper", "Тестовый кладовщик"),
+    ("test_admin", "mvb_admin", "Тестовый администратор МВБ"),
+)
+
+
+@bp.route("/admin/users/test-accounts", methods=["POST"])
+def admin_test_accounts():
+    """По одному тестовому пользователю на каждую роль. Пароли случайные и
+    показываются один раз; повторное нажатие выдает тестовым учетным
+    записям новые пароли."""
+    if not _require_manage():
+        return redirect(url_for("mvb.index"))
+    client = MvbClient.query.filter_by(name=TEST_CLIENT_NAME).first()
+    if client is None:
+        client = MvbClient(name=TEST_CLIENT_NAME, address="Москва, тестовый адрес забора", phone="+70000000000")
+        db.session.add(client)
+    client.approval = "approved"
+    client.is_active = True
+    db.session.flush()
+    created = []
+    for username, role, full_name in TEST_ACCOUNTS:
+        user = User.query.filter_by(username=username).first()
+        if user is not None and user.role not in MVB_ROLES:
+            flash(f"Логин «{username}» занят пользователем WMS — пропущен", "warning")
+            continue
+        if user is None:
+            user = User(username=username, is_admin=False, allowed_sections="none")
+            db.session.add(user)
+        user.full_name = full_name
+        user.role = role
+        user.mvb_client_id = client.id if role == "mvb_client" else None
+        user.is_active_user = True
+        password = secrets.token_urlsafe(6)
+        user.set_password(password)
+        user.session_version = (user.session_version or 0) + 1
+        created.append({"username": username, "password": password, "role": MVB_ROLES[role]})
+    db.session.commit()
+    session["mvb_test_accounts"] = created
+    return redirect(url_for("mvb.admin_users"))
 
 
 def _get_mvb_user_or_404(user_id):
     user = db.session.get(User, user_id)
     if user is None or user.role not in MVB_ROLES:
         abort(404)
+    if user.role == "mvb_admin" and not current_user.can_manage_mvb():
+        abort(403)
     return user
 
 
 @bp.route("/admin/users/<int:user_id>/toggle", methods=["POST"])
 def admin_user_toggle(user_id):
-    if not _require_manage():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     user = _get_mvb_user_or_404(user_id)
     if user.id == current_user.id:
@@ -790,7 +945,7 @@ def admin_user_toggle(user_id):
 
 @bp.route("/admin/users/<int:user_id>/password", methods=["POST"])
 def admin_user_password(user_id):
-    if not _require_manage():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     user = _get_mvb_user_or_404(user_id)
     password = request.form.get("password", "")
@@ -809,7 +964,14 @@ def admin_user_password(user_id):
 
 def _require_staff():
     if not _is_staff():
-        flash("Доступно только складу МВБ", "danger")
+        flash("Доступно только сотрудникам МВБ", "danger")
+        return False
+    return True
+
+
+def _require_operator():
+    if not _is_operator():
+        flash("Доступно только оператору МВБ", "danger")
         return False
     return True
 
@@ -847,9 +1009,9 @@ def _local_to_utc(value):
     return dt - MOSCOW_OFFSET if dt else None
 
 
-def _same_direction(box_order, marketplace, destination):
-    return box_order.marketplace == marketplace and (
-        (box_order.destination or "").strip().lower() == (destination or "").strip().lower()
+def _same_direction(line, marketplace, destination):
+    return line.marketplace == marketplace and (
+        (line.destination or "").strip().lower() == (destination or "").strip().lower()
     )
 
 
@@ -858,7 +1020,7 @@ def _same_direction(box_order, marketplace, destination):
 
 @bp.route("/orders/<int:order_id>/driver", methods=["POST"])
 def order_assign_driver(order_id):
-    if not _require_staff():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     order = _get_order_or_404(order_id)
     driver_id = request.form.get("driver_id", type=int)
@@ -882,7 +1044,7 @@ def order_assign_driver(order_id):
 
 @bp.route("/vehicles", methods=["GET", "POST"])
 def vehicles():
-    if not _require_staff():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     if request.method == "POST":
         vehicle_id = request.form.get("vehicle_id", type=int)
@@ -962,8 +1124,8 @@ def pallet_scan(pallet_id):
         return jsonify(ok=False, message=f"Короб {code} не найден"), 404
     if box.status != "received":
         return jsonify(ok=False, message=f"Короб в статусе «{box.status_label}» — на паллету только принятые на складе"), 409
-    if not _same_direction(box.order, pallet.marketplace, pallet.destination):
-        return jsonify(ok=False, message=f"Другое направление: {box.order.marketplace_label} · {box.order.destination or '—'}"), 409
+    if not _same_direction(box.line, pallet.marketplace, pallet.destination):
+        return jsonify(ok=False, message=f"Другое направление: {box.line.label()}"), 409
     if box.pallet_id == pallet.id:
         return jsonify(ok=True, already=True, message=f"{box.barcode} уже на этой паллете", count=len(pallet.boxes))
     moved_from = box.pallet.number if box.pallet else None
@@ -1005,7 +1167,7 @@ def _ready_boxes_query():
     return (
         MvbBox.query.join(MvbOrder)
         .filter(MvbBox.status == "received", MvbBox.trip_id.is_(None))
-        .order_by(MvbBox.received_at)
+        .order_by(MvbBox.received_at, MvbBox.id)
     )
 
 
@@ -1013,16 +1175,16 @@ def _direction_key(marketplace, destination):
     return f"{marketplace}|{(destination or '').strip()}"
 
 
-def _group_key(order):
+def _group_key(line):
     """Группа отгрузки: направление (маркетплейс + СЦ) + дата слота."""
-    slot = order.slot_date.isoformat() if order.slot_date else ""
-    return f"{_direction_key(order.marketplace, order.destination)}|{slot}"
+    slot = line.slot_date.isoformat() if line.slot_date else ""
+    return f"{_direction_key(line.marketplace, line.destination)}|{slot}"
 
 
-def _selected_match(selected, order):
-    """Отмечена ли группа заявки: по полному ключу или по направлению целиком
-    (все слоты)."""
-    return _group_key(order) in selected or _direction_key(order.marketplace, order.destination) in selected
+def _selected_match(selected, line):
+    """Отмечена ли группа направления заявки: по полному ключу или по
+    направлению целиком (все слоты)."""
+    return _group_key(line) in selected or _direction_key(line.marketplace, line.destination) in selected
 
 
 def _slot_sort(slot_date):
@@ -1034,39 +1196,45 @@ def _ready_groups():
     сверху ближайшие слоты, внутри — самые давние (FIFO)."""
     groups = {}
     for box in _ready_boxes_query().all():
-        key = _group_key(box.order)
+        line = box.line
+        key = _group_key(line)
         group = groups.setdefault(key, {
-            "key": key, "direction": _direction_key(box.order.marketplace, box.order.destination),
-            "marketplace": box.order.marketplace, "slot_date": box.order.slot_date,
-            "destination": (box.order.destination or "").strip(), "boxes": 0,
-            "oldest": box.received_at, "pallets": set(), "clients": set(),
+            "key": key, "direction": _direction_key(line.marketplace, line.destination),
+            "marketplace": line.marketplace, "slot_date": line.slot_date,
+            "destination": (line.destination or "").strip(), "boxes": 0,
+            "oldest": box.received_at, "first_id": box.id, "pallets": set(), "clients": set(),
         })
         group["boxes"] += 1
         group["clients"].add(box.order.client.name)
         if box.pallet_id:
             group["pallets"].add(box.pallet.number)
-    return sorted(groups.values(), key=lambda g: (_slot_sort(g["slot_date"]), g["oldest"]))
+    return sorted(groups.values(), key=lambda g: (_slot_sort(g["slot_date"]), g["oldest"], g["first_id"]))
 
 
 def _ready_order_items(selected=None):
-    """Готовые к отправке короба по заявкам — заявка внутри направления
-    едет целиком, поэтому компонуем рейсы заявками. Порядок FIFO: сначала
-    самые давние направления, внутри — самые давние заявки."""
+    """Готовые к отправке короба по направлениям заявок — направление
+    заявки едет целиком, поэтому компонуем рейсы ими. Порядок: ближайший
+    слот, затем FIFO."""
     items = {}
     for box in _ready_boxes_query().all():
-        if selected is not None and not _selected_match(selected, box.order):
+        line = box.line
+        if selected is not None and not _selected_match(selected, line):
             continue
-        key = _group_key(box.order)
-        item = items.setdefault(box.order_id, {
-            "order": box.order, "key": key, "slot_date": box.order.slot_date, "marketplace": box.order.marketplace,
-            "destination": (box.order.destination or "").strip(), "boxes": 0, "oldest": box.received_at,
+        key = _group_key(line)
+        item = items.setdefault(line.id, {
+            "order": box.order, "line": line, "key": key, "slot_date": line.slot_date,
+            "marketplace": line.marketplace,
+            "destination": (line.destination or "").strip(), "boxes": 0, "oldest": box.received_at,
+            "first_id": box.id,
         })
         item["boxes"] += 1
-    group_oldest = {}
+    # Короба приходят в порядке приемки, поэтому первый встреченный — самый
+    # давний (при равном времени — принятый раньше).
+    group_first = {}
     for item in items.values():
-        group_oldest[item["key"]] = min(group_oldest.get(item["key"], item["oldest"]), item["oldest"])
+        group_first.setdefault(item["key"], (item["oldest"], item["first_id"]))
     return sorted(
-        items.values(), key=lambda i: (_slot_sort(i["slot_date"]), group_oldest[i["key"]], i["key"], i["oldest"])
+        items.values(), key=lambda i: (_slot_sort(i["slot_date"]), group_first[i["key"]], i["oldest"], i["first_id"])
     )
 
 
@@ -1100,7 +1268,7 @@ def dispatch():
     сколько машин выбранной вместимости нужно; отмеченные направления можно
     отправить одним рейсом-маршрутом или разбить на рейсы по наполненности
     авто."""
-    if not _require_staff():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     rows = _ready_groups()
     capacities = _vehicle_capacities()
@@ -1158,7 +1326,7 @@ def trip_new():
     по наполненности авто целыми заявками (заявка не делится между машинами,
     см. _pack_orders). Каждый рейс создается в статусе «Поиск авто», заявки
     запоминаются как запланированные в него (planned_trip)."""
-    if not _require_staff():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     selected = set(request.form.getlist("dir"))
     groups = [g for g in _ready_groups() if g["key"] in selected or g["direction"] in selected]
@@ -1194,7 +1362,7 @@ def trip_new():
         stop = _add_stop(trip, item["marketplace"], item["destination"])
         stop.planned_boxes += item["boxes"]
         trip.planned_boxes += item["boxes"]
-        item["order"].planned_trip = trip
+        item["line"].planned_trip = trip
 
     if mode == "fill" and capacity > 0:
         for bin_ in _pack_orders(items, capacity):
@@ -1203,7 +1371,7 @@ def trip_new():
             for item in bin_["items"]:
                 plan(trip, item)
                 if item["boxes"] > capacity:
-                    oversized.append(item["order"].number)
+                    oversized.append(f'{item["order"].number} ({item["line"].short_label()})')
     else:
         trip = new_trip()
         slots = {item["slot_date"] for item in items}
@@ -1254,9 +1422,9 @@ def trip_detail(trip_id):
         db.session.commit()
     return render_template(
         "mvb/trip_detail.html", trip=trip, ready=ready,
-        driver_link=url_for("mvb.trip_public", token=trip.access_token, _external=True) if _is_staff() else None,
-        vehicles=MvbVehicle.query.filter_by(is_active=True).order_by(MvbVehicle.plate).all() if _is_staff() else [],
-        drivers=_active_drivers() if _is_staff() else [],
+        driver_link=url_for("mvb.trip_public", token=trip.access_token, _external=True) if _is_operator() else None,
+        vehicles=MvbVehicle.query.filter_by(is_active=True).order_by(MvbVehicle.plate).all() if _is_operator() else [],
+        drivers=_active_drivers() if _is_operator() else [],
     )
 
 
@@ -1265,7 +1433,7 @@ TRIP_EDITABLE_STATUSES = ("searching", "assigned", "arrived", "loading")
 
 @bp.route("/trips/<int:trip_id>/stops", methods=["POST"])
 def trip_add_stop(trip_id):
-    if not _require_staff():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     trip = _get_trip_or_404(trip_id)
     marketplace = request.form.get("marketplace", "")
@@ -1321,7 +1489,7 @@ def trip_stop_action(trip_id, stop_id, action):
             return redirect(url_for("mvb.driver"))
         return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
 
-    if not _is_staff():
+    if not _is_operator():
         abort(403)
     if trip.status not in TRIP_EDITABLE_STATUSES:
         abort(400)
@@ -1345,7 +1513,7 @@ def trip_stop_action(trip_id, stop_id, action):
 @bp.route("/trips/<int:trip_id>/plan", methods=["POST"])
 def trip_plan(trip_id):
     """Авто найдено: транспорт, водитель и плановое время подачи/погрузки."""
-    if not _require_staff():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     trip = _get_trip_or_404(trip_id)
     if trip.status not in TRIP_EDITABLE_STATUSES:
@@ -1410,9 +1578,11 @@ def trip_action(trip_id, action):
                 _move_box(box, "shipped", now)
         _sync_wms_shipped({box.order for box in trip.boxes}, now)
     elif action == "cancel" and trip.status in TRIP_EDITABLE_STATUSES:
+        if not _is_operator():
+            abort(403)
         trip.status = "cancelled"
-        for order in list(trip.planned_orders):
-            order.planned_trip = None
+        for line in list(trip.planned_lines):
+            line.planned_trip = None
         for box in list(trip.boxes):
             # погруженные короба возвращаются на склад
             box.status = "received"
@@ -1447,7 +1617,7 @@ def trip_scan(trip_id):
         boxes = [b for b in pallet.boxes if b.status == "received" and b.trip_id is None]
         if not boxes:
             return jsonify(ok=False, message=f"На паллете {pallet.number} нет коробов к погрузке"), 409
-        order = boxes[0].order
+        order, line = boxes[0].order, boxes[0].line
     else:
         box = _find_box(code)
         if box is None:
@@ -1457,12 +1627,12 @@ def trip_scan(trip_id):
         if box.status != "received" or box.trip_id is not None:
             return jsonify(ok=False, message=f"Короб в статусе «{box.status_label}»"), 409
         boxes = [box]
-        order = box.order
-    stop = trip.stop_for(order.marketplace, order.destination)
+        order, line = box.order, box.line
+    stop = trip.stop_for(line.marketplace, line.destination)
     if stop is None:
         return jsonify(
             ok=False,
-            message=f"Направления «{order.marketplace_label} · {order.destination or '—'}» нет в маршруте — добавьте точку",
+            message=f"Направления «{line.label()}» нет в маршруте — добавьте точку",
         ), 409
 
     if trip.status != "loading":
@@ -1485,10 +1655,10 @@ def trip_scan(trip_id):
         warnings.append(f"{count} кор. больше вместимости авто ({capacity})")
     if stop.planned_boxes and len(stop.boxes) > stop.planned_boxes:
         warnings.append(f"на точку «{stop.label()}» по плану {stop.planned_boxes} кор., погружено {len(stop.boxes)}")
-    if trip.slot_date and order.slot_date and order.slot_date != trip.slot_date:
-        warnings.append(f"слот заявки {order.slot_date.strftime('%d.%m')}, а рейса {trip.slot_date.strftime('%d.%m')}")
-    if order.planned_trip_id and order.planned_trip_id != trip.id:
-        warnings.append(f"заявка {order.number} запланирована в рейс {order.planned_trip.number}")
+    if trip.slot_date and line.slot_date and line.slot_date != trip.slot_date:
+        warnings.append(f"слот заявки {line.slot_date.strftime('%d.%m')}, а рейса {trip.slot_date.strftime('%d.%m')}")
+    if line.planned_trip_id and line.planned_trip_id != trip.id:
+        warnings.append(f"заявка {order.number} ({line.short_label()}) запланирована в рейс {line.planned_trip.number}")
     warning = ("Внимание: " + "; ".join(warnings)) if warnings else None
     return jsonify(ok=True, already=False, message=message, count=count, warning=warning)
 
@@ -1572,6 +1742,13 @@ def _wms_candidates_query():
 
 
 def _active_order_for_movement(doc_id):
+    line = (
+        MvbOrderLine.query.join(MvbOrder, MvbOrderLine.order_id == MvbOrder.id)
+        .filter(MvbOrderLine.wms_movement_id == doc_id, MvbOrder.status != "cancelled")
+        .first()
+    )
+    if line is not None:
+        return line.order
     return MvbOrder.query.filter(
         MvbOrder.wms_movement_id == doc_id, MvbOrder.status != "cancelled"
     ).first()
@@ -1619,11 +1796,8 @@ def _wms_movement_for_box_code(code):
     return None
 
 
-def _import_movement(doc, delivery_method="self", pickup_address=None):
-    """Создает оформленную заявку МВБ из перемещения WMS. Возвращает
-    (заявка или None, список проблем по коробам)."""
-    if _active_order_for_movement(doc.id) is not None:
-        return None, [f"Перемещение {doc.number} уже передано в МВБ"]
+def _accepted_wms_boxes(doc, errors):
+    """Короба перемещения, которые можно передать в МВБ (не в работе)."""
     wms_boxes = []
     seen = set()
     for line in doc.lines:
@@ -1631,9 +1805,7 @@ def _import_movement(doc, delivery_method="self", pickup_address=None):
             seen.add(line.box_id)
             wms_boxes.append(line.box)
     if not wms_boxes:
-        return None, [f"В перемещении {doc.number} нет коробов"]
-
-    errors = []
+        errors.append(f"В перемещении {doc.number} нет коробов")
     accepted = []
     for wms_box in wms_boxes:
         barcode = wms_box.barcode_value
@@ -1647,47 +1819,93 @@ def _import_movement(doc, delivery_method="self", pickup_address=None):
                 errors.append(f"Короб {wms_box.box_number} уже в работе МВБ ({existing.order.number})")
                 continue
         accepted.append(wms_box)
-    if not accepted:
+    return accepted
+
+
+def _import_movements(docs, delivery_method="pickup", pickup_address=None):
+    """Одна оформленная заявка МВБ из перемещений WMS одного склада-
+    отправителя: каждое перемещение — отдельное направление заявки.
+    Возвращает (заявка или None, список проблем)."""
+    errors = []
+    todo = []
+    for doc in docs:
+        if _active_order_for_movement(doc.id) is not None:
+            errors.append(f"Перемещение {doc.number} уже передано в МВБ")
+        else:
+            todo.append(doc)
+    if not todo:
+        return None, errors
+    senders = {doc.from_warehouse_id for doc in todo}
+    if len(senders) > 1:
+        return None, errors + ["В одну заявку объединяются перемещения только с одного склада-отправителя"]
+
+    parts = []
+    for doc in todo:
+        accepted = _accepted_wms_boxes(doc, errors)
+        if accepted:
+            parts.append((doc, accepted))
+    if not parts:
         return None, errors
 
-    destination = doc.to_warehouse
+    source = parts[0][0].from_warehouse
     now = datetime.utcnow()
     order = MvbOrder(
         number=next_number("mvb_order", "MVB-", 6),
         client_id=_internal_client().id,
-        marketplace=destination.marketplace,
-        destination=destination.marketplace_city or destination.name,
-        box_count=len(accepted),
-        delivery_method=delivery_method if delivery_method in MVB_DELIVERY_METHODS else "self",
-        pickup_address=pickup_address or (doc.from_warehouse.address if doc.from_warehouse else None),
-        comment=f"Перемещение WMS {doc.number}: {doc.from_warehouse.name} → {destination.name}",
+        delivery_method=delivery_method if delivery_method in MVB_DELIVERY_METHODS else "pickup",
+        pickup_address=pickup_address or (source.address if source else None),
+        comment="Перемещения WMS " + ", ".join(doc.number for doc, _ in parts)
+        + (f" со склада {source.name}" if source else ""),
         status="confirmed",
         confirmed_at=now,
         created_by_id=current_user.id if current_user.is_authenticated else None,
-        wms_movement_id=doc.id,
+        wms_movement_id=parts[0][0].id if len(parts) == 1 else None,
     )
+    seq = 0
+    for n, (doc, accepted) in enumerate(parts, start=1):
+        target = doc.to_warehouse
+        line = MvbOrderLine(
+            seq=n,
+            marketplace=target.marketplace,
+            destination=target.marketplace_city or target.name,
+            box_count=len(accepted),
+            wms_movement_id=doc.id,
+        )
+        order.lines.append(line)
+        for wms_box in accepted:
+            seq += 1
+            order.boxes.append(MvbBox(
+                seq=seq, barcode=wms_box.barcode_value, status="created",
+                wms_box_id=wms_box.id, line=line,
+            ))
+    order.sync_from_lines()
     db.session.add(order)
-    db.session.flush()
-    for seq, wms_box in enumerate(accepted, start=1):
-        order.boxes.append(MvbBox(seq=seq, barcode=wms_box.barcode_value, status="created", wms_box_id=wms_box.id))
     db.session.commit()
     return order, errors
+
+
+def _import_movement(doc, delivery_method="pickup", pickup_address=None):
+    return _import_movements([doc], delivery_method, pickup_address)
 
 
 def _sync_wms_shipped(orders, now):
     """Все короба перемещения уехали рейсом МВБ → в WMS «Транспорт забрал»
     (как кнопка на странице перемещения: только если заявка на МП подана)."""
+    shipped = MVB_BOX_STATUS_ORDER["shipped"]
     for order in orders:
-        doc = order.wms_movement
-        if doc is None or doc.shipped_at is not None or not doc.marketplace_request_created_at:
-            continue
-        if all(MVB_BOX_STATUS_ORDER.get(b.status, 0) >= MVB_BOX_STATUS_ORDER["shipped"] for b in order.boxes):
-            doc.shipped_at = now
+        groups = [(line.wms_movement, line.boxes) for line in order.lines if line.wms_movement is not None]
+        if not groups and order.wms_movement is not None:
+            groups = [(order.wms_movement, order.boxes)]
+        for doc, boxes in groups:
+            if doc.shipped_at is not None or not doc.marketplace_request_created_at:
+                continue
+            if boxes and all(MVB_BOX_STATUS_ORDER.get(b.status, 0) >= shipped for b in boxes):
+                doc.shipped_at = now
 
 
 @bp.route("/wms")
 def wms_movements():
-    if not _require_staff():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     from ..models import MovementDocument
 
@@ -1699,32 +1917,31 @@ def wms_movements():
             "boxes": len({line.box_id for line in doc.lines}),
             "order": _active_order_for_movement(doc.id),
         })
-    imported = (
-        MvbOrder.query.filter(MvbOrder.wms_movement_id.isnot(None))
-        .order_by(MvbOrder.created_at.desc()).limit(50).all()
-    )
-    return render_template("mvb/wms.html", rows=rows, imported=imported)
+    return render_template("mvb/wms.html", rows=rows)
 
 
-@bp.route("/wms/<int:doc_id>/import", methods=["POST"])
-def wms_import(doc_id):
-    if not _require_staff():
+@bp.route("/wms/import", methods=["POST"])
+def wms_import():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     from ..models import MovementDocument
 
+    ids = [int(v) for v in request.form.getlist("doc_id") if v.isdigit()]
     # filter_by здесь применился бы к присоединенной таблице складов.
-    doc = _wms_candidates_query().filter(MovementDocument.id == doc_id).first()
-    if doc is None:
-        flash("Перемещение не найдено или уже уехало", "danger")
+    docs = _wms_candidates_query().filter(MovementDocument.id.in_(ids)).all() if ids else []
+    if not docs:
+        flash("Отметьте перемещения, которые передаете в МВБ", "danger")
         return redirect(url_for("mvb.wms_movements"))
-    order, errors = _import_movement(doc, request.form.get("delivery_method", "self"))
+    order, errors = _import_movements(docs, request.form.get("delivery_method", "pickup"))
     for error in errors:
         flash(error, "warning")
     if order is None:
         return redirect(url_for("mvb.wms_movements"))
-    flash(f"Перемещение {doc.number} передано в МВБ: заявка {order.number}, коробов {order.box_count}. Этикетки WMS остаются прежними.", "success")
+    flash(
+        f"Передано в МВБ: заявка {order.number}, направлений {len(order.lines)}, коробов {order.box_count}. "
+        "Этикетки WMS остаются прежними.", "success",
+    )
     return redirect(url_for("mvb.order_detail", order_id=order.id))
-
 
 
 # ---------- прайс, стоимость заявки, отчеты ----------
@@ -1758,7 +1975,7 @@ def _parse_money(value):
 def order_costs(order_id):
     """Оператор вносит/правит стоимость забора и отправки на СЦ или
     пересчитывает ее по прайсу."""
-    if not _require_staff():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     order = _get_order_or_404(order_id)
     if request.form.get("action") == "recalc":
@@ -1780,7 +1997,7 @@ def order_costs(order_id):
 def prices():
     """Прайс оператора: цена за короб для забора и для отправки на СЦ с
     градацией «от N коробов»."""
-    if not _require_staff():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     if request.method == "POST":
         action = request.form.get("action", "save")
@@ -1895,7 +2112,7 @@ REPORT_COLUMNS = [
 
 @bp.route("/reports")
 def reports():
-    if not _require_staff():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     date_from, date_to = _report_period()
     rows, totals = _report_rows(date_from, date_to)
@@ -1907,7 +2124,7 @@ def reports():
 
 @bp.route("/reports.xlsx")
 def reports_xlsx():
-    if not _require_staff():
+    if not _require_operator():
         return redirect(url_for("mvb.index"))
     import io
 
