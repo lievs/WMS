@@ -1976,6 +1976,15 @@ class MvbTrip(db.Model):
     def capacity(self):
         return self.capacity_boxes or (self.vehicle.capacity_boxes if self.vehicle else 0) or 0
 
+    def route_url(self):
+        """Маршрут в Яндекс Картах от текущего места по точкам рейса."""
+        from urllib.parse import quote
+
+        points = [stop.map_query() for stop in self.stops]
+        if not points:
+            return None
+        return "https://yandex.ru/maps/?rtt=auto&rtext=" + quote("~" + "~".join(points), safe="~")
+
     def driver_label(self):
         if self.driver:
             return self.driver.display_name()
@@ -2019,6 +2028,33 @@ class MvbTripStop(db.Model):
     def label(self):
         return f"{self.marketplace_label} · {self.destination}" if self.destination else self.marketplace_label
 
+    @property
+    def address(self):
+        """Адрес СЦ из списка городов (если внесен)."""
+        city = MvbCity.find(self.destination)
+        return city.address_for(self.marketplace) if city else None
+
+    def map_query(self):
+        return self.address or f"{self.marketplace_label} {self.destination or ''}".strip()
+
+    def order_groups(self):
+        """Короба точки по заявкам (направлениям заявок): водитель отмечает
+        «Сдан на СЦ» напротив каждой заявки."""
+        groups = {}
+        for box in self.boxes:
+            key = box.line_id or -box.order_id
+            group = groups.setdefault(key, {"key": key, "line": box.line, "order": box.order, "boxes": []})
+            group["boxes"].append(box)
+        result = []
+        for group in groups.values():
+            statuses = {b.status for b in group["boxes"]}
+            group["state"] = (
+                "pending" if "shipped" in statuses or "loaded" in statuses
+                else "delivered" if statuses == {"delivered"} else "rejected"
+            )
+            result.append(group)
+        return result
+
 
 MVB_PRICE_KINDS = {"pickup": "Забор груза", "sc": "Отправка на СЦ"}
 
@@ -2033,6 +2069,15 @@ class MvbCity(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False, unique=True)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
+    # Адреса СЦ в городе — для маршрута водителя (у WB и Ozon свои склады;
+    # «общий» — для фулфилмента и если адрес маркетплейса не указан).
+    address_wb = db.Column(db.String(300))
+    address_ozon = db.Column(db.String(300))
+    address = db.Column(db.String(300))
+
+    def address_for(self, marketplace):
+        specific = {"wb": self.address_wb, "ozon": self.address_ozon}.get(marketplace)
+        return specific or self.address
 
     @staticmethod
     def active_names():

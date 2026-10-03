@@ -35,7 +35,10 @@ bp = Blueprint("mvb", __name__)
 
 # Эндпоинты, доступные без входа (проверяется в require_login приложения).
 # Ссылка для наемного водителя на СЦ (без учетной записи) — по токену рейса.
-MVB_PUBLIC_ENDPOINTS = {"mvb.login", "mvb.register", "mvb.trip_public", "mvb.trip_public_arrive", "mvb.trip_public_stop"}
+MVB_PUBLIC_ENDPOINTS = {
+    "mvb.login", "mvb.register", "mvb.trip_public", "mvb.trip_public_arrive", "mvb.trip_public_stop",
+    "mvb.trip_public_order",
+}
 
 MAX_BOXES_PER_ORDER = 500
 
@@ -1157,7 +1160,16 @@ def pallet_detail(pallet_id):
     if not _require_staff():
         return redirect(url_for("mvb.index"))
     pallet = db.session.get(MvbPallet, pallet_id) or abort(404)
-    return render_template("mvb/pallet_detail.html", pallet=pallet)
+    # Все короба этого направления на складе (еще не погруженные) — те, что
+    # уже на паллете, подсвечиваются.
+    ready = [
+        b for b in _ready_boxes_query().all()
+        if b.line is not None and _same_direction(b.line, pallet.marketplace, pallet.destination)
+    ]
+    ids = {b.id for b in ready}
+    boxes = ready + [b for b in pallet.boxes if b.id not in ids]
+    boxes.sort(key=lambda b: (b.order.number, b.seq))
+    return render_template("mvb/pallet_detail.html", pallet=pallet, boxes=boxes)
 
 
 @bp.route("/pallets/<int:pallet_id>/scan", methods=["POST"])
@@ -1176,12 +1188,13 @@ def pallet_scan(pallet_id):
     if not _same_direction(box.line, pallet.marketplace, pallet.destination):
         return jsonify(ok=False, message=f"Другое направление: {box.line.label()}"), 409
     if box.pallet_id == pallet.id:
-        return jsonify(ok=True, already=True, message=f"{box.barcode} уже на этой паллете", count=len(pallet.boxes))
+        return jsonify(ok=True, already=True, message=f"{box.barcode} уже на этой паллете", count=len(pallet.boxes),
+                       barcode=box.barcode)
     moved_from = box.pallet.number if box.pallet else None
     box.pallet = pallet
     db.session.commit()
     message = f"{box.barcode} → {pallet.number}" + (f" (снят с {moved_from})" if moved_from else "")
-    return jsonify(ok=True, already=False, message=message, count=len(pallet.boxes))
+    return jsonify(ok=True, already=False, message=message, count=len(pallet.boxes), barcode=box.barcode)
 
 
 @bp.route("/pallets/<int:pallet_id>/remove/<int:box_id>", methods=["POST"])
@@ -1520,6 +1533,55 @@ def _apply_stop_result(trip, stop, action, comment):
     return "warning", f"Не сдано: {stop.label()} — {len(stop.boxes)} кор. везите обратно на склад МВБ"
 
 
+def _apply_order_result(trip, stop, key, action, comment):
+    """«Сдан на СЦ» / «Не сдан» (с причиной) по одной заявке на точке.
+    key — направление заявки (как в MvbTripStop.order_groups). Когда
+    отмечены все заявки точки, точка закрывается; когда все точки —
+    рейс завершен."""
+    if trip.status != "departed":
+        return "warning", "Рейс еще не в пути"
+    group = next((g for g in stop.order_groups() if g["key"] == key), None)
+    if group is None:
+        abort(404)
+    boxes = [b for b in group["boxes"] if b.status == "shipped"]
+    if not boxes:
+        return "warning", f"Заявка {group['order'].number} уже отмечена"
+    comment = (comment or "").strip()
+    if action == "reject" and not comment:
+        return "danger", "Укажите причину, почему не сдано"
+    now = datetime.utcnow()
+    for box in boxes:
+        _move_box(box, "delivered" if action == "deliver" else "not_delivered", now)
+    if action == "reject":
+        note = f"{group['order'].number}: {comment}"
+        stop.delivery_comment = f"{stop.delivery_comment}; {note}" if stop.delivery_comment else note
+    if not any(b.status == "shipped" for b in stop.boxes):
+        stop.result = "delivered" if all(b.status == "delivered" for b in stop.boxes) else "rejected"
+        stop.delivered_at = now
+        stop.delivered_by_id = current_user.id if current_user.is_authenticated else None
+    if all(s.result for s in trip.stops):
+        trip.status = "delivered"
+        trip.delivered_at = now
+    db.session.commit()
+    name = f"{group['order'].number} ({group['order'].client.name})"
+    if action == "deliver":
+        return "success", f"Сдан на СЦ: {name} — {len(boxes)} кор."
+    return "warning", f"Не сдан: {name} — {len(boxes)} кор. везите обратно на склад МВБ"
+
+
+@bp.route("/trips/<int:trip_id>/stops/<int:stop_id>/orders/<int(signed=True):key>/<action>", methods=["POST"])
+def trip_order_result(trip_id, stop_id, key, action):
+    trip = _get_trip_or_404(trip_id)
+    stop = db.session.get(MvbTripStop, stop_id)
+    if stop is None or stop.trip_id != trip.id or action not in ("deliver", "reject"):
+        abort(404)
+    category, message = _apply_order_result(trip, stop, key, action, request.form.get("comment", ""))
+    flash(message, category)
+    if _is_driver():
+        return redirect(url_for("mvb.driver"))
+    return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
+
+
 @bp.route("/trips/<int:trip_id>/stops/<int:stop_id>/<action>", methods=["POST"])
 def trip_stop_action(trip_id, stop_id, action):
     """Порядок точек (up/down), удаление пустой точки (remove) и итог
@@ -1750,6 +1812,17 @@ def trip_public_stop(token, stop_id, action):
     if stop is None or stop.trip_id != trip.id or action not in ("deliver", "reject"):
         abort(404)
     category, message = _apply_stop_result(trip, stop, action, request.form.get("comment", ""))
+    flash(message, category)
+    return redirect(url_for("mvb.trip_public", token=token))
+
+
+@bp.route("/t/<token>/stops/<int:stop_id>/orders/<int(signed=True):key>/<action>", methods=["POST"])
+def trip_public_order(token, stop_id, key, action):
+    trip = _trip_by_token_or_404(token)
+    stop = db.session.get(MvbTripStop, stop_id)
+    if stop is None or stop.trip_id != trip.id or action not in ("deliver", "reject"):
+        abort(404)
+    category, message = _apply_order_result(trip, stop, key, action, request.form.get("comment", ""))
     flash(message, category)
     return redirect(url_for("mvb.trip_public", token=token))
 
@@ -2118,7 +2191,12 @@ def _prices_city_action(action):
         elif MvbCity.find(name):
             flash(f"Город «{name}» уже в списке", "warning")
         else:
-            db.session.add(MvbCity(name=name))
+            db.session.add(MvbCity(
+                name=name,
+                address_wb=request.form.get("address_wb", "").strip() or None,
+                address_ozon=request.form.get("address_ozon", "").strip() or None,
+                address=request.form.get("address", "").strip() or None,
+            ))
             db.session.commit()
             flash(f"Город «{name}» добавлен", "success")
         return redirect(url_for("mvb.prices"))
@@ -2134,8 +2212,11 @@ def _prices_city_action(action):
             flash("Название пустое или такой город уже есть", "danger")
         else:
             city.name = name
+            city.address_wb = request.form.get("address_wb", "").strip() or None
+            city.address_ozon = request.form.get("address_ozon", "").strip() or None
+            city.address = request.form.get("address", "").strip() or None
             db.session.commit()
-            flash("Город переименован", "success")
+            flash(f"Город «{city.name}» сохранен", "success")
     return redirect(url_for("mvb.prices"))
 
 

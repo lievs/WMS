@@ -32,27 +32,21 @@
     <button class="btn btn-outline-success btn-lg w-100">Я на погрузке</button>
   </form>
   {% elif trip.status in ('arrived', 'loading') %}
-  <div class="alert alert-info">Идет погрузка. После отправки здесь появятся кнопки «Сдано на СЦ» по точкам.</div>
+  <div class="alert alert-info">Идет погрузка. После отправки здесь появятся кнопки «Сдан на СЦ» по каждой заявке.</div>
   {% elif trip.status == 'delivered' %}
   <div class="alert alert-success">Рейс завершен, спасибо!</div>
   {% endif %}
 
   {% if trip.slot_date %}<div class="alert alert-warning py-2">Сдать на СЦ: <b>{{ trip.slot_date.strftime('%d.%m.%Y') }}</b></div>{% endif %}
   <h5>Точки маршрута</h5>
+  {% if trip.route_url() %}<a class="btn btn-primary w-100 mb-2" target="_blank" href="{{ trip.route_url() }}">🗺 Маршрут по точкам</a>{% endif %}
   <ol class="list-group list-group-numbered mb-3">
     {% for stop in trip.stops %}
     <li class="list-group-item">
-      <div class="mb-2">
-        <a target="_blank" href="https://yandex.ru/maps/?text={{ (stop.marketplace_label ~ ' ' ~ (stop.destination or ''))|urlencode }}">📍 {{ stop.label() }}</a>
-        <span class="small text-muted">· коробов: {{ stop.boxes|length or stop.planned_boxes }}</span>
-      </div>
-      {% if stop.result == 'delivered' %}
-        <span class="text-success">✓ сдано {{ (stop.delivered_at|msk).strftime('%d.%m %H:%M') }}</span>
-      {% elif stop.result == 'rejected' %}
-        <span class="text-danger">✗ не сдано: {{ stop.delivery_comment }}</span>
-      {% elif trip.status == 'departed' %}
-        {% set public_token = token %}{% include "mvb/_stop_result.html" %}
-      {% endif %}
+      <a target="_blank" href="https://yandex.ru/maps/?text={{ stop.map_query()|urlencode }}">📍 {{ stop.label() }}</a>
+      {% if stop.address %}<div class="small">{{ stop.address }}</div>{% endif %}
+      <div class="small text-muted">коробов: {{ stop.boxes|length or stop.planned_boxes }}{% if stop.result == 'delivered' %} · <span class="text-success">✓ точка сдана</span>{% elif stop.result == 'rejected' %} · <span class="text-danger">есть не сданные</span>{% endif %}</div>
+      {% if stop.boxes %}{% set public_token = token %}{% include "mvb/_stop_orders.html" %}{% endif %}
     </li>
     {% endfor %}
   </ol>

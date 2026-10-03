@@ -39,26 +39,39 @@
 
 <div class="card p-3 mb-3">
   <h5>Города отправки</h5>
-  <p class="text-muted small mb-2">Из этого списка клиент выбирает город (СЦ) для каждого направления заявки. Скрытый город в заявке не выбрать, но старые заявки с ним сохраняются.{% if not cities %} Пока список пуст, город в заявке вписывают вручную.{% endif %}</p>
-  <div class="d-flex flex-wrap gap-2 mb-2">
-  {% for c in cities %}
-    <div class="border rounded px-2 py-1 d-flex align-items-center gap-1 {{ '' if c.is_active else 'text-muted bg-light' }}">
-      <form method="post" class="d-flex gap-1">
-        <input type="hidden" name="action" value="city_rename"><input type="hidden" name="city_id" value="{{ c.id }}">
-        <input name="name" class="form-control form-control-sm" value="{{ c.name }}" style="width:150px">
-        <button class="btn btn-sm btn-outline-primary" title="Переименовать">✓</button>
-      </form>
-      <form method="post">
-        <input type="hidden" name="action" value="city_toggle"><input type="hidden" name="city_id" value="{{ c.id }}">
-        <button class="btn btn-sm btn-outline-secondary">{{ 'Скрыть' if c.is_active else 'Вернуть' }}</button>
-      </form>
-    </div>
-  {% endfor %}
+  <p class="text-muted small mb-2">Из этого списка клиент выбирает город (СЦ) для каждого направления заявки; по адресам СЦ водителю строится маршрут. Скрытый город в заявке не выбрать, но старые заявки с ним сохраняются.{% if not cities %} Пока список пуст, город в заявке вписывают вручную.{% endif %}</p>
+  <div class="table-responsive">
+  <table class="table table-sm align-middle">
+    <thead><tr><th>Город</th><th>Адрес СЦ Wildberries</th><th>Адрес СЦ Ozon</th><th>Адрес (ФФ / общий)</th><th></th></tr></thead>
+    <tbody>
+    {% for c in cities %}
+      <tr class="{{ '' if c.is_active else 'text-muted table-light' }}">
+        <td><input form="city-{{ c.id }}" name="name" class="form-control form-control-sm" value="{{ c.name }}" style="min-width:120px"></td>
+        <td><input form="city-{{ c.id }}" name="address_wb" class="form-control form-control-sm" value="{{ c.address_wb or '' }}" style="min-width:180px"></td>
+        <td><input form="city-{{ c.id }}" name="address_ozon" class="form-control form-control-sm" value="{{ c.address_ozon or '' }}" style="min-width:180px"></td>
+        <td><input form="city-{{ c.id }}" name="address" class="form-control form-control-sm" value="{{ c.address or '' }}" style="min-width:180px"></td>
+        <td class="text-nowrap">
+          <form method="post" id="city-{{ c.id }}" class="d-inline">
+            <input type="hidden" name="action" value="city_rename"><input type="hidden" name="city_id" value="{{ c.id }}">
+            <button class="btn btn-sm btn-outline-primary">Сохранить</button>
+          </form>
+          <form method="post" class="d-inline">
+            <input type="hidden" name="action" value="city_toggle"><input type="hidden" name="city_id" value="{{ c.id }}">
+            <button class="btn btn-sm btn-outline-secondary">{{ 'Скрыть' if c.is_active else 'Вернуть' }}</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
   </div>
-  <form method="post" class="d-flex flex-wrap gap-2">
+  <form method="post" class="row g-2">
     <input type="hidden" name="action" value="city_add">
-    <input name="name" class="form-control w-auto" placeholder="Город, например Коледино" required>
-    <button class="btn btn-success">+ Город</button>
+    <div class="col-md-2"><input name="name" class="form-control" placeholder="Город *" required></div>
+    <div class="col-md-3"><input name="address_wb" class="form-control" placeholder="Адрес СЦ Wildberries"></div>
+    <div class="col-md-3"><input name="address_ozon" class="form-control" placeholder="Адрес СЦ Ozon"></div>
+    <div class="col-md-2"><input name="address" class="form-control" placeholder="Адрес (ФФ / общий)"></div>
+    <div class="col-md-2"><button class="btn btn-success w-100">+ Город</button></div>
   </form>
 </div>
 

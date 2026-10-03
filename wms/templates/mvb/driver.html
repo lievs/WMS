@@ -41,20 +41,14 @@
       <form method="post" action="{{ url_for('mvb.trip_action', trip_id=t.id, action='arrive') }}"><button class="btn btn-outline-success">Я на погрузке</button></form>
       {% endif %}
     </div>
+    {% if t.route_url() %}<a class="btn btn-primary w-100 mb-2" target="_blank" href="{{ t.route_url() }}">🗺 Маршрут по точкам</a>{% endif %}
     <ol class="list-group list-group-numbered">
       {% for stop in t.stops %}
-      <li class="list-group-item d-flex justify-content-between align-items-center gap-2 flex-wrap">
-        <div class="me-auto">
-          <a target="_blank" href="https://yandex.ru/maps/?text={{ (stop.marketplace_label ~ ' ' ~ (stop.destination or ''))|urlencode }}">📍 {{ stop.label() }}</a>
-          <div class="small text-muted">коробов: {{ stop.boxes|length }}</div>
-        </div>
-        {% if stop.result == 'delivered' %}
-          <span class="text-success">✓ сдано {{ (stop.delivered_at|msk).strftime('%H:%M') }}</span>
-        {% elif stop.result == 'rejected' %}
-          <span class="text-danger">✗ не сдано: {{ stop.delivery_comment }}</span>
-        {% elif t.status == 'departed' %}
-          {% set trip = t %}{% include "mvb/_stop_result.html" %}
-        {% endif %}
+      <li class="list-group-item">
+        <a target="_blank" href="https://yandex.ru/maps/?text={{ stop.map_query()|urlencode }}">📍 {{ stop.label() }}</a>
+        {% if stop.address %}<div class="small">{{ stop.address }}</div>{% endif %}
+        <div class="small text-muted">коробов: {{ stop.boxes|length }}{% if stop.result == 'delivered' %} · <span class="text-success">✓ точка сдана</span>{% elif stop.result == 'rejected' %} · <span class="text-danger">есть не сданные</span>{% endif %}</div>
+        {% set trip = t %}{% include "mvb/_stop_orders.html" %}
       </li>
       {% endfor %}
     </ol>
