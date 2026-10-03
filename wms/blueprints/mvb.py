@@ -24,7 +24,7 @@ from ..extensions import db
 from ..models import (
     MVB_BOX_STATUS_LABELS, MVB_BOX_STATUS_ORDER, MVB_BOX_STATUSES, MVB_DELIVERY_METHODS,
     MVB_MARKETPLACES, MVB_ROLES, MvbCity, MvbDestination, MvbOrderLine, MVB_TRIP_STATUSES, MvbBox, MvbBoxEvent, MvbClient, MvbOrder,
-    MVB_PRICE_KINDS, MvbPallet, MvbPickupZone, MvbPriceTier, MvbTrip, MvbTripStop, MvbVehicle, User,
+    AppSetting, MVB_PRICE_KINDS, MvbPallet, MvbPickupZone, MvbPriceTier, MvbTrip, MvbTripStop, MvbVehicle, User,
 )
 from ..utils.http import content_disposition
 from ..utils.labels_pdf import build_labels_batch_pdf, build_mvb_box_labels_pdf
@@ -533,7 +533,10 @@ def order_delete(order_id):
         return redirect(url_for("mvb.order_detail", order_id=order_id))
     order = db.session.get(MvbOrder, order_id) or abort(404)
     number = order.number
+    others = _orders_on_pallets({b.pallet_id for b in order.boxes}) - {order}
     db.session.delete(order)
+    db.session.flush()
+    _recalc_pallet_costs(others)
     db.session.commit()
     flash(f"Заявка {number} удалена", "success")
     return redirect(url_for("mvb.orders"))
@@ -1214,10 +1217,56 @@ def pallet_scan(pallet_id):
         return jsonify(ok=True, already=True, message=f"{box.barcode} уже на этой паллете", count=len(pallet.boxes),
                        barcode=box.barcode)
     moved_from = box.pallet.number if box.pallet else None
+    affected = _orders_on_pallets([box.pallet_id, pallet.id]) | {box.order}
     box.pallet = pallet
+    _recalc_pallet_costs(affected)
     db.session.commit()
     message = f"{box.barcode} → {pallet.number}" + (f" (снят с {moved_from})" if moved_from else "")
     return jsonify(ok=True, already=False, message=message, count=len(pallet.boxes), barcode=box.barcode)
+
+
+MVB_PALLET_PRICE_KEY = "mvb_pallet_price"
+MVB_PALLET_PRICE_DEFAULT = 500.0
+
+
+def _pallet_price():
+    """Цена палетирования одной паллеты (настраивается в «Прайсе»)."""
+    setting = db.session.get(AppSetting, MVB_PALLET_PRICE_KEY)
+    try:
+        return float(setting.value) if setting and setting.value not in (None, "") else MVB_PALLET_PRICE_DEFAULT
+    except ValueError:
+        return MVB_PALLET_PRICE_DEFAULT
+
+
+def _orders_on_pallets(pallet_ids):
+    pallet_ids = [pid for pid in pallet_ids if pid]
+    if not pallet_ids:
+        return set()
+    return {box.order for box in MvbBox.query.filter(MvbBox.pallet_id.in_(pallet_ids)).all()}
+
+
+def _recalc_pallet_costs(orders):
+    """Палетирование заявки: по каждой паллете с ее коробами — цена паллеты
+    × (короба заявки на паллете / все короба на паллете). Паллета одного
+    клиента целиком ложится на него, сборная — делится по долям."""
+    db.session.flush()
+    price = _pallet_price()
+    totals = {}
+    for order in orders:
+        if order is None:
+            continue
+        if order.client and order.client.is_internal:
+            order.pallet_cost = None
+            continue
+        mine = {}
+        for box in MvbBox.query.filter(MvbBox.order_id == order.id, MvbBox.pallet_id.isnot(None)).all():
+            mine[box.pallet_id] = mine.get(box.pallet_id, 0) + 1
+        cost = 0.0
+        for pallet_id, count in mine.items():
+            if pallet_id not in totals:
+                totals[pallet_id] = MvbBox.query.filter_by(pallet_id=pallet_id).count()
+            cost += price * count / totals[pallet_id]
+        order.pallet_cost = round(cost, 2) if mine else None
 
 
 @bp.route("/pallets/<int:pallet_id>/remove/<int:box_id>", methods=["POST"])
@@ -1227,7 +1276,9 @@ def pallet_remove_box(pallet_id, box_id):
     box = db.session.get(MvbBox, box_id)
     if box is None or box.pallet_id != pallet_id or box.status != "received":
         abort(400)
+    affected = _orders_on_pallets([pallet_id])
     box.pallet_id = None
+    _recalc_pallet_costs(affected)
     db.session.commit()
     return redirect(url_for("mvb.pallet_detail", pallet_id=pallet_id))
 
@@ -1239,8 +1290,10 @@ def pallet_delete(pallet_id):
     if not _require_manage():
         return redirect(url_for("mvb.pallet_detail", pallet_id=pallet_id))
     pallet = db.session.get(MvbPallet, pallet_id) or abort(404)
+    affected = _orders_on_pallets([pallet.id])
     for box in list(pallet.boxes):
         box.pallet_id = None
+    _recalc_pallet_costs(affected)
     number = pallet.number
     db.session.delete(pallet)
     db.session.commit()
@@ -2172,11 +2225,13 @@ def order_costs(order_id):
     order = _get_order_or_404(order_id)
     if request.form.get("action") == "recalc":
         _apply_prices(order)
+        _recalc_pallet_costs({order})
         flash("Стоимость пересчитана по прайсу", "success")
     else:
         try:
             order.pickup_cost = _parse_money(request.form.get("pickup_cost"))
             order.sc_cost = _parse_money(request.form.get("sc_cost"))
+            order.pallet_cost = _parse_money(request.form.get("pallet_cost"))
         except ValueError:
             flash("Стоимость — неотрицательное число", "danger")
             return redirect(url_for("mvb.order_detail", order_id=order.id))
@@ -2199,6 +2254,20 @@ def prices():
             return _prices_city_action(action)
         if action in ("zone_add", "zone_toggle", "zone_save"):
             return _prices_zone_action(action)
+        if action == "pallet_price":
+            try:
+                value = _parse_money(request.form.get("pallet_price"))
+            except ValueError:
+                value = None
+            if value is None:
+                flash("Укажите цену палетирования", "danger")
+            else:
+                setting = db.session.get(AppSetting, MVB_PALLET_PRICE_KEY) or AppSetting(key=MVB_PALLET_PRICE_KEY)
+                setting.value = f"{value:g}"
+                db.session.add(setting)
+                db.session.commit()
+                flash(f"Палетирование — {value:g} руб. за паллету (для новых сборов паллет)", "success")
+            return redirect(url_for("mvb.prices"))
         if action == "delete":
             tier = db.session.get(MvbPriceTier, request.form.get("tier_id", type=int)) or abort(404)
             db.session.delete(tier)
@@ -2248,7 +2317,7 @@ def prices():
     }
     return render_template(
         "mvb/prices.html", tiers=tiers, kinds=MVB_PRICE_KINDS, destinations=destinations, cities=cities,
-        city_tiers=city_tiers, zones=MvbPickupZone.query.order_by(MvbPickupZone.is_active.desc(), MvbPickupZone.price).all(),
+        city_tiers=city_tiers, pallet_price=_pallet_price(), zones=MvbPickupZone.query.order_by(MvbPickupZone.is_active.desc(), MvbPickupZone.price).all(),
     )
 
 
@@ -2397,7 +2466,7 @@ def _report_rows(date_from, date_to):
         return rows.setdefault(client.id, {
             "client": client, "orders": 0, "boxes": 0, "picked_up": 0, "received": 0,
             "shipped": 0, "delivered": 0, "not_delivered": 0,
-            "pickup_cost": 0.0, "sc_cost": 0.0, "total": 0.0,
+            "pickup_cost": 0.0, "sc_cost": 0.0, "pallet_cost": 0.0, "total": 0.0,
         })
 
     orders = MvbOrder.query.filter(
@@ -2422,6 +2491,7 @@ def _report_rows(date_from, date_to):
         row["received"] += sum(1 for b in order.boxes if b.received_at)
         row["pickup_cost"] += order.pickup_cost or 0
         row["sc_cost"] += order.sc_cost or 0
+        row["pallet_cost"] += order.pallet_cost or 0
         row["total"] += order.total_cost or 0
 
     shipped = (
@@ -2439,7 +2509,7 @@ def _report_rows(date_from, date_to):
     result = sorted(rows.values(), key=lambda r: (-r["shipped"], -r["boxes"], r["client"].name))
     totals = {key: sum(r[key] for r in result) for key in (
         "orders", "boxes", "picked_up", "received", "shipped", "delivered", "not_delivered",
-        "pickup_cost", "sc_cost", "total",
+        "pickup_cost", "sc_cost", "pallet_cost", "total",
     )}
     return result, totals, order_rows
 
@@ -2448,7 +2518,7 @@ REPORT_COLUMNS = [
     ("orders", "Заявок"), ("boxes", "Коробов в заявках"), ("picked_up", "Забрано"),
     ("received", "Принято на складе"), ("shipped", "Отправлено на СЦ"), ("delivered", "Сдано на СЦ"),
     ("not_delivered", "Не сдано"), ("pickup_cost", "Забор, руб."), ("sc_cost", "Отправка на СЦ, руб."),
-    ("total", "Итого, руб."),
+    ("pallet_cost", "Палетирование, руб."), ("total", "Итого, руб."),
 ]
 
 

@@ -1559,3 +1559,32 @@ def test_default_prices_seeded_once_and_pickup_zones(db, client):
     client.post("/mvb/prices", data={"action": "zone_save", "zone_id": str(zone.id), "name": "Регионы", "price": "1600"})
     assert db.session.get(MvbPickupZone, zone.id).price == 1600
     assert "Зона *" in client.get("/mvb/prices").get_data(as_text=True)
+
+
+def test_pallet_cost_shared_by_box_share(db, client):
+    """Палетирование: паллета одного клиента — вся цена ему; сборная —
+    делится по доле коробов каждого клиента на паллете."""
+    staff = _user("staff1", "mvb_admin")
+    a = _received_order(client, _user("c1", "mvb_client", _mvb_client("ИП А")), staff, box_count="3")
+    b = _received_order(client, _user("c2", "mvb_client", _mvb_client("ИП Б")), staff, box_count="1")
+    client.post("/mvb/prices", data={"action": "pallet_price", "pallet_price": "500"})
+    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    pallet = MvbPallet.query.one()
+    for box in a.boxes:
+        client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
+    db.session.expire_all()
+    assert db.session.get(MvbOrder, a.id).pallet_cost == 500
+    client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": b.boxes[0].barcode})
+    db.session.expire_all()
+    a, b = db.session.get(MvbOrder, a.id), db.session.get(MvbOrder, b.id)
+    assert a.pallet_cost == 375 and b.pallet_cost == 125
+    assert "палетирование 375.00" in client.get(f"/mvb/orders/{a.id}").get_data(as_text=True)
+
+    # короб снят с паллеты — доли пересчитываются
+    client.post(f"/mvb/pallets/{pallet.id}/remove/{b.boxes[0].id}")
+    db.session.expire_all()
+    assert db.session.get(MvbOrder, a.id).pallet_cost == 500
+    assert db.session.get(MvbOrder, b.id).pallet_cost is None
+    # отчет
+    page = client.get("/mvb/reports?date_from=2000-01-01&date_to=2100-01-01").get_data(as_text=True)
+    assert "Палетирование" in page

@@ -32,6 +32,7 @@
 <form method="post" action="{{ url_for('mvb.order_costs', order_id=order.id) }}" class="card p-3 mb-3 d-flex flex-row flex-wrap gap-2 align-items-end">
   <div><label class="form-label small mb-0">Забор груза, ₽</label><input name="pickup_cost" class="form-control" value="{{ '%.2f'|format(order.pickup_cost) if order.pickup_cost is not none else '' }}" style="max-width:150px"></div>
   <div><label class="form-label small mb-0">Отправка на СЦ, ₽</label><input name="sc_cost" class="form-control" value="{{ '%.2f'|format(order.sc_cost) if order.sc_cost is not none else '' }}" style="max-width:150px"></div>
+  <div><label class="form-label small mb-0">Палетирование, ₽</label><input name="pallet_cost" class="form-control" value="{{ '%.2f'|format(order.pallet_cost) if order.pallet_cost is not none else '' }}" style="max-width:150px"></div>
   <button class="btn btn-outline-success">Сохранить стоимость</button>
   <button class="btn btn-outline-secondary" name="action" value="recalc">Пересчитать по прайсу</button>
 </form>
@@ -51,7 +52,7 @@
       {% if order.status == 'confirmed' and not order.client.is_internal %}
       <div><b>Стоимость:</b>
         {% if order.total_cost is not none %}
-          {% if order.pickup_cost is not none %}забор {{ '%.2f'|format(order.pickup_cost) }} ₽ · {% endif %}{% if order.sc_cost is not none %}отправка на СЦ {{ '%.2f'|format(order.sc_cost) }} ₽ · {% endif %}<b>итого {{ '%.2f'|format(order.total_cost) }} ₽</b>
+          {% if order.pickup_cost is not none %}забор {{ '%.2f'|format(order.pickup_cost) }} ₽ · {% endif %}{% if order.sc_cost is not none %}отправка на СЦ {{ '%.2f'|format(order.sc_cost) }} ₽ · {% endif %}{% if order.pallet_cost is not none %}палетирование {{ '%.2f'|format(order.pallet_cost) }} ₽ · {% endif %}<b>итого {{ '%.2f'|format(order.total_cost) }} ₽</b>
         {% else %}не рассчитана{% endif %}
       </div>
       {% endif %}

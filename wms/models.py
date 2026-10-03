@@ -1677,6 +1677,9 @@ class MvbOrder(db.Model):
     # Зона забора (Черкесск / регионы / ...) — фиксированная цена забора.
     pickup_zone_id = db.Column(db.Integer, db.ForeignKey("mvb_pickup_zones.id"))
     sc_cost = db.Column(db.Float)
+    # Палетирование: цена паллеты делится между заявками по доле их коробов
+    # на паллете (пересчитывается при сборе паллет).
+    pallet_cost = db.Column(db.Float)
 
     client = db.relationship("MvbClient")
     pickup_zone = db.relationship("MvbPickupZone")
@@ -1719,9 +1722,9 @@ class MvbOrder(db.Model):
 
     @property
     def total_cost(self):
-        if self.pickup_cost is None and self.sc_cost is None:
+        if self.pickup_cost is None and self.sc_cost is None and self.pallet_cost is None:
             return None
-        return (self.pickup_cost or 0) + (self.sc_cost or 0)
+        return round((self.pickup_cost or 0) + (self.sc_cost or 0) + (self.pallet_cost or 0), 2)
 
     def status_counts(self):
         counts = {code: 0 for code, _ in MVB_BOX_STATUSES}

@@ -157,6 +157,18 @@
   </div>
   <div class="col-lg-6">
     <div class="card p-3 h-100">
+      <h5>Палетирование</h5>
+      <div class="small text-muted mb-2">Цена за паллету. Паллета одного клиента — вся цена ему; сборная — делится между клиентами по доле их коробов на паллете.</div>
+      <form method="post" class="d-flex flex-wrap gap-2">
+        <input type="hidden" name="action" value="pallet_price">
+        <input name="pallet_price" class="form-control w-auto" value="{{ '%g'|format(pallet_price) }}" style="max-width:130px" required>
+        <span class="align-self-center">руб. за паллету</span>
+        <button class="btn btn-outline-primary">Сохранить</button>
+      </form>
+    </div>
+  </div>
+  <div class="col-lg-6">
+    <div class="card p-3 h-100">
       <h5>{{ kinds['sc'] }} — общий</h5>
       <div class="small text-muted mb-1">Для городов без своего прайса.</div>
       {% call tier_table('sc', tiers['sc']) %}Не заполнено{% endcall %}
