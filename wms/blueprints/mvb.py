@@ -1325,6 +1325,15 @@ def _ready_boxes_query():
     )
 
 
+ACTIVE_TRIP_STATUSES = ("searching", "assigned", "arrived", "loading")
+
+
+def _line_in_active_trip(line):
+    """Направление уже запланировано в действующий рейс — повторно в рейс
+    его не ставим (иначе одну заявку можно отдать двум машинам)."""
+    return line.planned_trip is not None and line.planned_trip.status in ACTIVE_TRIP_STATUSES
+
+
 def _direction_key(marketplace, destination):
     return f"{marketplace}|{(destination or '').strip()}"
 
@@ -1351,6 +1360,8 @@ def _ready_groups():
     groups = {}
     for box in _ready_boxes_query().all():
         line = box.line
+        if _line_in_active_trip(line):
+            continue
         key = _group_key(line)
         group = groups.setdefault(key, {
             "key": key, "direction": _direction_key(line.marketplace, line.destination),
@@ -1372,6 +1383,8 @@ def _ready_order_items(selected=None):
     items = {}
     for box in _ready_boxes_query().all():
         line = box.line
+        if _line_in_active_trip(line):
+            continue
         if selected is not None and not _selected_match(selected, line):
             continue
         key = _group_key(line)
@@ -1428,7 +1441,7 @@ def dispatch():
     capacities = _vehicle_capacities()
     capacity = request.args.get("capacity", type=int) or (capacities[-1] if capacities else 0)
     open_trips = {}
-    for trip in MvbTrip.query.filter(MvbTrip.status.in_(["searching", "assigned", "arrived", "loading"])).all():
+    for trip in MvbTrip.query.filter(MvbTrip.status.in_(ACTIVE_TRIP_STATUSES)).all():
         for stop in trip.stops:
             open_trips.setdefault(_direction_key(stop.marketplace, stop.destination), []).append(trip)
     items = _ready_order_items()
@@ -1499,6 +1512,12 @@ def trip_new():
     mode = request.form.get("mode", "single")
     capacity = request.form.get("capacity", type=int) or 0
     created = []
+    if not _ready_order_items(selected) and any(
+        _line_in_active_trip(box.line) and _selected_match(selected, box.line) for box in _ready_boxes_query().all()
+    ):
+        # Повторное нажатие / второй рейс на те же заявки — не дублируем.
+        flash("Эти направления уже в рейсе — второй рейс не создан", "warning")
+        return redirect(url_for("mvb.dispatch"))
 
     def new_trip():
         trip = MvbTrip(
@@ -2238,6 +2257,12 @@ def order_costs(order_id):
         flash("Стоимость сохранена", "success")
     db.session.commit()
     return redirect(url_for("mvb.order_detail", order_id=order.id))
+
+
+@bp.route("/guide")
+def guide():
+    """Обучение МВБ по ролям — для всех вошедших пользователей МВБ."""
+    return render_template("mvb/guide.html")
 
 
 @bp.route("/prices", methods=["GET", "POST"])

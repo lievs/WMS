@@ -1610,3 +1610,36 @@ def test_client_sees_driver_data_for_pass(db, client):
     page = client.get(f"/mvb/orders/{order.id}").get_data(as_text=True)
     assert "Здесь появятся данные водителя" not in page
     assert "Иванов Иван" in page and "А777АА09" in page and "Газель" in page and "+79991112233" in page
+
+
+def test_mvb_guide_for_every_role(db, client):
+    import os
+    for name, role in [("c", "mvb_client"), ("d", "mvb_driver"), ("o", "mvb_staff"), ("k", "mvb_storekeeper")]:
+        _login(client, _user(name, role, _mvb_client(name) if role == "mvb_client" else None))
+        page = client.get("/mvb/guide").get_data(as_text=True)
+        assert "Как работает доставка коробов на СЦ" in page and "🎓 Обучение" in page
+        assert 'class="mine"' in page
+    static = os.path.join(os.path.dirname(__file__), "..", "wms", "static", "mvb_onboarding")
+    import re
+    for img in set(re.findall(r"mvb_onboarding/([\w.]+\.png)", page)):
+        assert os.path.exists(os.path.join(static, img)), img
+
+
+def test_direction_cannot_be_planned_into_two_trips(db, client):
+    """Направление, уже запланированное в рейс, пропадает из «К отправке» и
+    второй рейс на него не создается (баг: одна заявка — два водителя)."""
+    staff = _user("staff1", "mvb_admin")
+    order = _received_order(client, _user("c1", "mvb_client", _mvb_client()), staff,
+                            marketplace="ozon", destination="Волгоград", box_count="1")
+    key = f"ozon|Волгоград|{order.lines[0].slot_date.isoformat()}"
+    client.post("/mvb/trips/new", data={"dir": [key]})
+    client.post("/mvb/trips/new", data={"dir": [key]})
+    assert MvbTrip.query.count() == 1
+    client.get("/mvb/dispatch")
+    page = client.get("/mvb/dispatch").get_data(as_text=True)
+    assert "Волгоград" not in page and order.number not in page
+    # рейс отменен — направление снова можно отправить
+    trip = MvbTrip.query.one()
+    client.post(f"/mvb/trips/{trip.id}/cancel")
+    client.post("/mvb/trips/new", data={"dir": [key]})
+    assert MvbTrip.query.count() == 2
