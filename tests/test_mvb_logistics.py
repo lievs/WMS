@@ -1659,3 +1659,21 @@ def test_sc_driver_link_expires_day_after_route_finished(db, client):
     db.session.commit()
     resp = client.get(url)
     assert resp.status_code == 410 and "Ссылка больше не действует" in resp.get_data(as_text=True)
+
+
+def test_screens_by_role_driver_and_keeper_do_not_see_orders(db, client):
+    """Водитель не видит раздел заявок (свои экраны забора); кладовщик
+    смотрит карточку заявки без стоимости, но не список и не правку."""
+    seller = _user("seller", "mvb_client", _mvb_client())
+    _login(client, seller)
+    order = _confirmed_order(client)
+    driver, keeper = _user("drv", "mvb_driver"), _user("kpr", "mvb_storekeeper")
+    _login(client, driver)
+    for url in ("/mvb/orders", f"/mvb/orders/{order.id}", "/mvb/orders/new", f"/mvb/orders/{order.id}/labels.pdf"):
+        assert client.get(url).status_code == 302, url
+    assert client.post(f"/mvb/orders/{order.id}/cancel").status_code == 302
+    assert db.session.get(MvbOrder, order.id).status == "confirmed"
+    _login(client, keeper)
+    assert client.get("/mvb/orders").status_code == 302
+    page = client.get(f"/mvb/orders/{order.id}").get_data(as_text=True)
+    assert order.number in page and "Стоимость:" not in page and "Отменить</button>" not in page

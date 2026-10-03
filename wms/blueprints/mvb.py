@@ -110,6 +110,17 @@ def _visible_orders_query():
     return query
 
 
+def _orders_role_ok(read_only=False):
+    """Заявки (список, создание, правка) — клиент и оператор; карточку и
+    этикетки заявки смотрит еще кладовщик. У водителя свои экраны забора."""
+    return _is_client() or _is_operator() or (read_only and _is_storekeeper())
+
+
+def _deny_orders():
+    flash("Этот раздел вам не доступен", "danger")
+    return redirect(url_for("mvb.index"))
+
+
 def _get_order_or_404(order_id):
     order = _visible_orders_query().filter(MvbOrder.id == order_id).first()
     if order is None:
@@ -270,6 +281,8 @@ def index():
 
 @bp.route("/orders")
 def orders():
+    if not _orders_role_ok(read_only=False):
+        return _deny_orders()
     query = _visible_orders_query()
     status = request.args.get("status", "")
     if status in ("draft", "confirmed", "cancelled"):
@@ -404,6 +417,8 @@ def _fill_order_from_form(order):
 
 @bp.route("/orders/new", methods=["GET", "POST"])
 def order_new():
+    if not _orders_role_ok(read_only=False):
+        return _deny_orders()
     clients = [] if _is_client() else MvbClient.query.filter_by(is_active=True).order_by(MvbClient.name).all()
     if request.method == "GET":
         client = current_user.mvb_client if _is_client() else None
@@ -436,6 +451,8 @@ def order_new():
 
 @bp.route("/orders/<int:order_id>")
 def order_detail(order_id):
+    if not _orders_role_ok(read_only=True):
+        return _deny_orders()
     order = _get_order_or_404(order_id)
     drivers = _active_drivers() if _is_staff() else []
     return render_template(
@@ -447,6 +464,8 @@ def order_detail(order_id):
 def order_slot(order_id):
     """Дата слота на СЦ меняется и у оформленной заявки (слот могут
     перенести), пока короба не отправлены на СЦ."""
+    if not _orders_role_ok(read_only=False):
+        return _deny_orders()
     order = _get_order_or_404(order_id)
     line = next((l for l in order.lines if l.id == request.form.get("line_id", type=int)), None)
     if line is None and len(order.lines) == 1:
@@ -469,6 +488,8 @@ def order_slot(order_id):
 
 @bp.route("/orders/<int:order_id>/edit", methods=["GET", "POST"])
 def order_edit(order_id):
+    if not _orders_role_ok(read_only=False):
+        return _deny_orders()
     order = _get_order_or_404(order_id)
     if order.status != "draft":
         flash("Изменить можно только черновик", "warning")
@@ -490,6 +511,8 @@ def order_edit(order_id):
 def order_confirm(order_id):
     """Оформление заявки: способ передачи фиксируется, каждому коробу
     присваивается собственный штрихкод «номер заявки-порядковый номер»."""
+    if not _orders_role_ok(read_only=False):
+        return _deny_orders()
     order = _get_order_or_404(order_id)
     if order.status != "draft":
         flash("Заявка уже оформлена", "warning")
@@ -513,6 +536,8 @@ def order_confirm(order_id):
 
 @bp.route("/orders/<int:order_id>/cancel", methods=["POST"])
 def order_cancel(order_id):
+    if not _orders_role_ok(read_only=False):
+        return _deny_orders()
     order = _get_order_or_404(order_id)
     if order.status == "cancelled":
         return redirect(url_for("mvb.order_detail", order_id=order.id))
@@ -546,6 +571,8 @@ def order_delete(order_id):
 def order_labels_pdf(order_id):
     """Этикетки 58×40 на все короба заявки, на одно направление (?line=id)
     или на выбранные короба (?seq=1,2)."""
+    if not _orders_role_ok(read_only=True):
+        return _deny_orders()
     order = _get_order_or_404(order_id)
     if order.status != "confirmed" or not order.boxes:
         abort(404)

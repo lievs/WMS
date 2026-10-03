@@ -7,7 +7,8 @@
     <div class="text-muted">{{ order.client.name }} · создана {{ (order.created_at|msk).strftime('%d.%m.%Y %H:%M') }}</div>
   </div>
   <div class="d-flex flex-wrap gap-2">
-    {% if order.status == 'draft' %}
+    {% set can_edit = mvb_is_operator or mvb_is_client %}
+    {% if order.status == 'draft' and can_edit %}
       <a class="btn btn-outline-primary" href="{{ url_for('mvb.order_edit', order_id=order.id) }}">Изменить</a>
       <form method="post" action="{{ url_for('mvb.order_confirm', order_id=order.id) }}">
         <button class="btn btn-success">Оформить и присвоить штрихкоды</button>
@@ -15,7 +16,7 @@
     {% elif order.status == 'confirmed' %}
       <a class="btn btn-success" target="_blank" href="{{ url_for('mvb.order_labels_pdf', order_id=order.id) }}">🖨 Этикетки на все короба</a>
     {% endif %}
-    {% if order.status != 'cancelled' and counts.created == order.boxes|length %}
+    {% if can_edit and order.status != 'cancelled' and counts.created == order.boxes|length %}
       <form method="post" action="{{ url_for('mvb.order_cancel', order_id=order.id) }}" onsubmit="return confirm('Отменить заявку?')">
         <button class="btn btn-outline-danger">Отменить</button>
       </form>
@@ -73,7 +74,7 @@
       {% if order.pickup_zone and order.delivery_method == 'pickup' %}<div><b>Зона забора:</b> {{ order.pickup_zone.name }}</div>{% endif %}
       <div><b>Дата забора / сдачи:</b> {{ order.planned_date.strftime('%d.%m.%Y') if order.planned_date else '—' }}{% if order.time_from %} {{ order.time_from }}{% if order.time_to %}–{{ order.time_to }}{% endif %}{% endif %}</div>
       <div><b>Коробов всего:</b> {{ order.box_count }}{% if order.lines|length > 1 %} · направлений {{ order.lines|length }}{% endif %}</div>
-      {% if order.status == 'confirmed' and not order.client.is_internal %}
+      {% if order.status == 'confirmed' and not order.client.is_internal and (mvb_is_operator or mvb_is_client) %}
       <div><b>Стоимость:</b>
         {% if order.total_cost is not none %}
           {% if order.pickup_cost is not none %}забор {{ '%.2f'|format(order.pickup_cost) }} ₽ · {% endif %}{% if order.sc_cost is not none %}отправка на СЦ {{ '%.2f'|format(order.sc_cost) }} ₽ · {% endif %}{% if order.pallet_cost is not none %}палетирование {{ '%.2f'|format(order.pallet_cost) }} ₽ · {% endif %}<b>итого {{ '%.2f'|format(order.total_cost) }} ₽</b>
