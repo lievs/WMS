@@ -11,6 +11,8 @@
     из <b id="mvbPickupTotal">{{ current_progress.order_total if current else 0 }}</b> кор.</div>
   <form method="post" id="mvbPickupForm" action="{{ url_for('mvb.driver_pickup_done', order_id=current.id) if current else '' }}">
     <button class="btn btn-lg w-100 {{ 'btn-success' if current and current_progress.order_done >= current_progress.order_total else 'btn-outline-secondary' }}" id="mvbPickupBtn">✓ Готово</button>
+    <button name="partial" value="1" id="mvbPickupPartial" onclick="return confirm('Забрать только отсканированные короба? Остаток вернётся в заявки на забор.')"
+      class="btn btn-outline-warning w-100 mt-2 {{ '' if current and 0 < current_progress.order_done < current_progress.order_total else 'd-none' }}">Не влезает — забрал часть</button>
   </form>
 </div>
 {% endif %}
@@ -29,6 +31,7 @@ document.addEventListener("mvb:scanned", (e) => {
   document.getElementById("mvbPickupForm").action = "{{ url_for('mvb.driver_pickup_done', order_id=0) }}".replace("/0/", `/${d.order_id}/`);
   const btn = document.getElementById("mvbPickupBtn");
   btn.className = "btn btn-lg w-100 " + (d.order_done >= d.order_total ? "btn-success" : "btn-outline-secondary");
+  document.getElementById("mvbPickupPartial").classList.toggle("d-none", !(d.order_done > 0 && d.order_done < d.order_total));
 });
 </script>
 {% endif %}

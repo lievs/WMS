@@ -720,6 +720,22 @@ def driver_pickup_done(order_id):
     if order.status != "confirmed" or order.delivery_method != "pickup":
         abort(400)
     left = [b for b in order.boxes if b.status == "created"]
+    if left and request.form.get("partial"):
+        # Все короба не влезли в машину: водитель забрал часть, остаток
+        # возвращается в ленту забора (свободная заявка — для другого
+        # водителя или для него же следующим рейсом).
+        taken = len(order.boxes) - len(left)
+        if not taken:
+            flash("Сначала отсканируйте короба, которые забираете", "danger")
+            return redirect(url_for("mvb.scan", mode="pickup", order=order.id))
+        if order.driver_id == current_user.id or not _is_operator():
+            order.driver_id = None
+        db.session.commit()
+        flash(
+            f"Забрано {taken} из {len(order.boxes)} кор. у {order.client.name}. "
+            f"Остаток {len(left)} кор. вернулся в заявки на забор.", "warning",
+        )
+        return redirect(url_for("mvb.driver"))
     if left:
         flash(
             f"Не все короба отсканированы: {len(order.boxes) - len(left)} из {len(order.boxes)}. "

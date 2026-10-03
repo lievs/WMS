@@ -1677,3 +1677,35 @@ def test_screens_by_role_driver_and_keeper_do_not_see_orders(db, client):
     assert client.get("/mvb/orders").status_code == 302
     page = client.get(f"/mvb/orders/{order.id}").get_data(as_text=True)
     assert order.number in page and "Стоимость:" not in page and "Отменить</button>" not in page
+
+
+def test_partial_pickup_when_boxes_do_not_fit(db, client):
+    """Все короба не влезли: водитель забирает часть, остаток возвращается
+    в ленту забора и его берет другой водитель."""
+    _login(client, _user("seller", "mvb_client", _mvb_client()))
+    order = _confirmed_order(client, box_count="5")
+    d1, d2 = _user("driver1", "mvb_driver"), _user("driver2", "mvb_driver")
+    _login(client, d1)
+    client.post(f"/mvb/driver/orders/{order.id}/take")
+    # без сканов «часть» не закрыть
+    client.post(f"/mvb/driver/orders/{order.id}/done", data={"partial": "1"})
+    assert db.session.get(MvbOrder, order.id).driver_id == d1.id
+    for box in order.boxes[:3]:
+        client.post("/mvb/scan/pickup", data={"barcode": box.barcode})
+    page = client.get(f"/mvb/scan/pickup?order={order.id}").get_data(as_text=True)
+    assert "Не влезает — забрал часть" in page
+    resp = client.post(f"/mvb/driver/orders/{order.id}/done", data={"partial": "1"})
+    assert resp.headers["Location"].endswith("/mvb/driver")
+    order = db.session.get(MvbOrder, order.id)
+    assert order.driver_id is None and order.pickup_done_at is None
+    assert sum(1 for b in order.boxes if b.status == "picked_up") == 3
+
+    _login(client, d2)
+    feed = client.get("/mvb/driver").get_data(as_text=True)
+    assert order.number in feed or order.client.name in feed
+    assert "2 (из 5)" in feed
+    client.post(f"/mvb/driver/orders/{order.id}/take")
+    for box in order.boxes[3:]:
+        client.post("/mvb/scan/pickup", data={"barcode": box.barcode})
+    client.post(f"/mvb/driver/orders/{order.id}/done")
+    assert db.session.get(MvbOrder, order.id).pickup_done_at is not None
