@@ -1,6 +1,6 @@
 {% extends "mvb/base.html" %}
 {% block title %}Прайс{% endblock %}
-{% macro tier_table(kind, rows, dest_id=None) %}
+{% macro tier_table(kind, rows, city_id=None) %}
 <table class="table table-sm align-middle">
   <thead><tr><th>От коробов</th><th>Цена за короб, руб.</th><th></th></tr></thead>
   <tbody>
@@ -11,7 +11,7 @@
       <td class="d-flex gap-1">
         <form method="post" id="tier-{{ t.id }}">
           <input type="hidden" name="tier_id" value="{{ t.id }}"><input type="hidden" name="kind" value="{{ kind }}">
-          {% if dest_id %}<input type="hidden" name="destination_id" value="{{ dest_id }}">{% endif %}
+          {% if city_id %}<input type="hidden" name="city_id" value="{{ city_id }}">{% endif %}
           <button class="btn btn-sm btn-outline-primary">Сохранить</button>
         </form>
         <form method="post">
@@ -27,7 +27,7 @@
 </table>
 <form method="post" class="d-flex flex-wrap gap-2">
   <input type="hidden" name="kind" value="{{ kind }}">
-  {% if dest_id %}<input type="hidden" name="destination_id" value="{{ dest_id }}">{% endif %}
+  {% if city_id %}<input type="hidden" name="city_id" value="{{ city_id }}">{% endif %}
   <input name="min_boxes" type="number" min="1" class="form-control w-auto" placeholder="от, кор." style="max-width:110px" required>
   <input name="price_per_box" class="form-control w-auto" placeholder="руб. за короб" style="max-width:140px" required>
   <button class="btn btn-success">+ Ступень</button>
@@ -35,11 +35,43 @@
 {% endmacro %}
 {% block content %}
 <h3 class="mb-1">Прайс</h3>
-<p class="text-muted">Цена за короб с градацией по количеству коробов: «от N коробов — X руб. за короб». Отправка на СЦ считается по каждому направлению заявки по прайсу его города (если у города нет своего прайса — по общему). Стоимость ставится при оформлении заявки, оператор может её поправить.</p>
+<p class="text-muted">Цена за короб с градацией по количеству коробов: «от N коробов — X руб. за короб». Отправка на СЦ считается по каждому направлению заявки по прайсу его города — одинаково для WB, Ozon и ФФ этого города (если у города нет своего прайса — по общему). Стоимость ставится при оформлении заявки, оператор может её поправить.</p>
+
+<div class="card p-3 mb-3">
+  <h5>Города и прайс отправки на СЦ</h5>
+  <p class="text-muted small mb-2">Добавьте город и задайте ему прайс. Скрытый город и его пункты в заявке не выбрать.</p>
+  <form method="post" class="d-flex flex-wrap gap-2 mb-3">
+    <input type="hidden" name="action" value="city_add">
+    <input name="name" class="form-control w-auto" placeholder="Город *" required style="min-width:200px">
+    <button class="btn btn-success">+ Город</button>
+  </form>
+  <div class="row g-3">
+    {% for c in cities %}
+    <div class="col-lg-6">
+      <div class="border rounded p-2 h-100 {{ '' if c.is_active else 'bg-light text-muted' }}">
+        <div class="d-flex flex-wrap gap-2 mb-2">
+          <form method="post" class="d-flex gap-2 flex-grow-1">
+            <input type="hidden" name="action" value="city_save"><input type="hidden" name="city_id" value="{{ c.id }}">
+            <input name="name" class="form-control form-control-sm fw-bold" value="{{ c.name }}" style="max-width:220px">
+            <button class="btn btn-sm btn-outline-primary">Сохранить</button>
+          </form>
+          <form method="post">
+            <input type="hidden" name="action" value="city_toggle"><input type="hidden" name="city_id" value="{{ c.id }}">
+            <button class="btn btn-sm btn-outline-secondary">{{ 'Скрыть' if c.is_active else 'Вернуть' }}</button>
+          </form>
+        </div>
+        {% call tier_table('sc', city_tiers[c.id], c.id) %}Своего прайса нет — считается по общему{% endcall %}
+      </div>
+    </div>
+    {% else %}
+    <div class="col-12 text-muted">Городов пока нет.</div>
+    {% endfor %}
+  </div>
+</div>
 
 <div class="card p-3 mb-3">
   <h5>Пункты назначения</h5>
-  <p class="text-muted small mb-2">Сначала куда — WB, Ozon или фулфилмент, затем город, для ФФ — его название. Из этого списка клиент выбирает направление в заявке; по адресу водителю строится маршрут. Скрытый пункт в заявке не выбрать, старые заявки с ним сохраняются.{% if not destinations %} Пока список пуст, направление в заявке вписывают вручную.{% endif %}</p>
+  <p class="text-muted small mb-2">Сначала куда — WB, Ozon или фулфилмент, затем город из справочника выше, для ФФ — его название. Из этого списка клиент выбирает направление в заявке; по адресу водителю строится маршрут. Скрытый пункт в заявке не выбрать, старые заявки с ним сохраняются.{% if not destinations %} Пока список пуст, направление в заявке вписывают вручную.{% endif %}</p>
   {% if destinations %}
   <div class="table-responsive">
   <table class="table table-sm align-middle">
@@ -50,7 +82,9 @@
         <td><select form="dest-{{ d.id }}" name="marketplace" class="form-select form-select-sm js-dest-mp" style="min-width:120px">
           {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}" {{ 'selected' if d.marketplace == code }}>{{ label }}</option>{% endfor %}
         </select></td>
-        <td><input form="dest-{{ d.id }}" name="city" class="form-control form-control-sm" value="{{ d.city }}" style="min-width:120px"></td>
+        <td><select form="dest-{{ d.id }}" name="city" class="form-select form-select-sm" style="min-width:120px">
+          {% for c in cities %}<option value="{{ c.name }}" {{ 'selected' if c.name == d.city }}>{{ c.name }}</option>{% endfor %}
+        </select></td>
         <td><input form="dest-{{ d.id }}" name="ff_name" class="form-control form-control-sm js-dest-ff" value="{{ d.ff_name or '' }}" style="min-width:120px"></td>
         <td><input form="dest-{{ d.id }}" name="address" class="form-control form-control-sm" value="{{ d.address or '' }}" style="min-width:220px"></td>
         <td class="text-nowrap">
@@ -74,7 +108,10 @@
     <div class="col-md-2"><select name="marketplace" class="form-select js-dest-mp">
       {% for code, label in MVB_MARKETPLACES.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
     </select></div>
-    <div class="col-md-2"><input name="city" class="form-control" placeholder="Город *" required></div>
+    <div class="col-md-2"><select name="city" class="form-select" required>
+      <option value="">Город *</option>
+      {% for c in cities if c.is_active %}<option value="{{ c.name }}">{{ c.name }}</option>{% endfor %}
+    </select></div>
     <div class="col-md-2"><input name="ff_name" class="form-control js-dest-ff" placeholder="Название ФФ *"></div>
     <div class="col-md-4"><input name="address" class="form-control" placeholder="Адрес (для маршрута)"></div>
     <div class="col-md-2"><button class="btn btn-success w-100">+ Добавить</button></div>
@@ -91,18 +128,10 @@
   <div class="col-lg-6">
     <div class="card p-3 h-100">
       <h5>{{ kinds['sc'] }} — общий</h5>
-      <div class="small text-muted mb-1">Для пунктов без своего прайса.</div>
+      <div class="small text-muted mb-1">Для городов без своего прайса.</div>
       {% call tier_table('sc', tiers['sc']) %}Не заполнено{% endcall %}
     </div>
   </div>
-  {% for d in destinations if d.is_active or dest_tiers[d.id] %}
-  <div class="col-lg-6">
-    <div class="card p-3 h-100">
-      <h5>{{ kinds['sc'] }} — {{ d.label() }}</h5>
-      {% call tier_table('sc', dest_tiers[d.id], d.id) %}Своего прайса нет — считается по общему{% endcall %}
-    </div>
-  </div>
-  {% endfor %}
 </div>
 {% endblock %}
 {% block scripts %}

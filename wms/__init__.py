@@ -284,27 +284,47 @@ def _ensure_mvb_lines():
 
 
 def _ensure_mvb_destinations():
-    """МВБ: старый список городов (общий для WB / Ozon) переносится в пункты
-    назначения с выбором маркетплейса; прайс города — на пункт WB."""
+    """МВБ: справочник городов с прайсом + пункты назначения.
+    - старые адреса города (общие для WB / Ozon) переносятся в пункты
+      назначения WB / Ozon, адреса у города очищаются;
+    - у каждого пункта назначения есть город в справочнике;
+    - прайс, заведенный на пункт назначения, переезжает на его город."""
     from .models import MvbCity, MvbDestination, MvbPriceTier
 
-    cities = MvbCity.query.all()
-    if not cities:
-        return
-    for city in cities:
-        wb = MvbDestination(marketplace="wb", city=city.name, address=city.address_wb or city.address,
-                            is_active=city.is_active)
-        db.session.add(wb)
-        if city.address_ozon:
-            db.session.add(MvbDestination(marketplace="ozon", city=city.name, address=city.address_ozon,
-                                          is_active=city.is_active))
-        db.session.flush()
-        for tier in MvbPriceTier.query.filter_by(city_id=city.id).all():
-            tier.destination_id = wb.id
-            tier.city_id = None
-        db.session.delete(city)
-    db.session.commit()
-    print(f"[schema] МВБ: города перенесены в пункты назначения — {len(cities)}")
+    changed = 0
+    for city in MvbCity.query.all():
+        if not (city.address_wb or city.address_ozon or city.address):
+            continue
+        for marketplace, address in (("wb", city.address_wb or city.address), ("ozon", city.address_ozon)):
+            if not address and marketplace == "ozon":
+                continue
+            if not MvbDestination.query.filter_by(marketplace=marketplace, city=city.name, ff_name=None).first():
+                db.session.add(MvbDestination(marketplace=marketplace, city=city.name, address=address,
+                                              is_active=city.is_active))
+        city.address_wb = city.address_ozon = city.address = None
+        changed += 1
+    db.session.flush()
+
+    for dest in MvbDestination.query.all():
+        if MvbCity.find(dest.city) is None:
+            db.session.add(MvbCity(name=dest.city))
+            db.session.flush()
+            changed += 1
+
+    for tier in MvbPriceTier.query.filter(MvbPriceTier.destination_id.isnot(None)).all():
+        dest = db.session.get(MvbDestination, tier.destination_id)
+        city = MvbCity.find(dest.city) if dest else None
+        tier.destination_id = None
+        if city is None or tier.city_id:
+            db.session.delete(tier)
+        elif MvbPriceTier.query.filter_by(kind=tier.kind, city_id=city.id, min_boxes=tier.min_boxes).first():
+            db.session.delete(tier)  # у города уже есть такая ступень
+        else:
+            tier.city_id = city.id
+        changed += 1
+    if changed:
+        db.session.commit()
+        print(f"[schema] МВБ: справочник городов и прайс по городам обновлены — {changed}")
 
 
 def _register_sqlite_tuning():

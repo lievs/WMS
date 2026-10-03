@@ -23,7 +23,7 @@ from flask_login import current_user, login_user, logout_user
 from ..extensions import db
 from ..models import (
     MVB_BOX_STATUS_LABELS, MVB_BOX_STATUS_ORDER, MVB_BOX_STATUSES, MVB_DELIVERY_METHODS,
-    MVB_MARKETPLACES, MVB_ROLES, MvbDestination, MvbOrderLine, MVB_TRIP_STATUSES, MvbBox, MvbBoxEvent, MvbClient, MvbOrder,
+    MVB_MARKETPLACES, MVB_ROLES, MvbCity, MvbDestination, MvbOrderLine, MVB_TRIP_STATUSES, MvbBox, MvbBoxEvent, MvbClient, MvbOrder,
     MVB_PRICE_KINDS, MvbPallet, MvbPriceTier, MvbTrip, MvbTripStop, MvbVehicle, User,
 )
 from ..utils.http import content_disposition
@@ -2131,7 +2131,8 @@ def _apply_prices(order):
     costs = []
     for line in order.lines or []:
         dest = MvbDestination.find(line.marketplace, line.destination)
-        costs.append(MvbPriceTier.cost_for("sc", line.box_count, dest.id if dest else None))
+        city = MvbCity.find(dest.city if dest else line.destination)
+        costs.append(MvbPriceTier.cost_for("sc", line.box_count, city.id if city else None))
     if not order.lines:
         costs.append(MvbPriceTier.cost_for("sc", order.box_count))
     known = [c for c in costs if c is not None]
@@ -2183,6 +2184,8 @@ def prices():
         action = request.form.get("action", "save")
         if action in ("dest_add", "dest_toggle", "dest_save"):
             return _prices_destination_action(action)
+        if action in ("city_add", "city_toggle", "city_save"):
+            return _prices_city_action(action)
         if action == "delete":
             tier = db.session.get(MvbPriceTier, request.form.get("tier_id", type=int)) or abort(404)
             db.session.delete(tier)
@@ -2198,12 +2201,12 @@ def prices():
         if kind not in MVB_PRICE_KINDS or not min_boxes or min_boxes < 1 or price is None:
             flash("Укажите «от скольких коробов» (от 1) и цену за короб", "danger")
             return redirect(url_for("mvb.prices"))
-        dest_id = request.form.get("destination_id", type=int) if kind == "sc" else None
-        if dest_id and db.session.get(MvbDestination, dest_id) is None:
+        city_id = request.form.get("city_id", type=int) if kind == "sc" else None
+        if city_id and db.session.get(MvbCity, city_id) is None:
             abort(404)
         tier_id = request.form.get("tier_id", type=int)
         tier = db.session.get(MvbPriceTier, tier_id) if tier_id else None
-        duplicate = MvbPriceTier.query.filter_by(kind=kind, min_boxes=min_boxes, destination_id=dest_id).first()
+        duplicate = MvbPriceTier.query.filter_by(kind=kind, min_boxes=min_boxes, city_id=city_id).first()
         if duplicate is not None and duplicate is not tier:
             # Одна ступень на количество: правим существующую, лишнюю удаляем.
             if tier is not None:
@@ -2214,23 +2217,25 @@ def prices():
             db.session.add(tier)
         tier.min_boxes = min_boxes
         tier.price_per_box = price
-        tier.destination_id = dest_id
+        tier.city_id = city_id
         db.session.commit()
         flash("Прайс сохранен", "success")
         return redirect(url_for("mvb.prices"))
     destinations = MvbDestination.query.order_by(
         MvbDestination.is_active.desc(), MvbDestination.marketplace, MvbDestination.city, MvbDestination.ff_name,
     ).all()
+    cities = MvbCity.query.order_by(MvbCity.is_active.desc(), MvbCity.name).all()
     tiers = {
         "pickup": MvbPriceTier.query.filter_by(kind="pickup").order_by(MvbPriceTier.min_boxes).all(),
-        "sc": MvbPriceTier.query.filter_by(kind="sc", destination_id=None).order_by(MvbPriceTier.min_boxes).all(),
+        "sc": MvbPriceTier.query.filter_by(kind="sc", city_id=None).order_by(MvbPriceTier.min_boxes).all(),
     }
-    dest_tiers = {
-        d.id: MvbPriceTier.query.filter_by(kind="sc", destination_id=d.id).order_by(MvbPriceTier.min_boxes).all()
-        for d in destinations
+    city_tiers = {
+        c.id: MvbPriceTier.query.filter_by(kind="sc", city_id=c.id).order_by(MvbPriceTier.min_boxes).all()
+        for c in cities
     }
     return render_template(
-        "mvb/prices.html", tiers=tiers, kinds=MVB_PRICE_KINDS, destinations=destinations, dest_tiers=dest_tiers,
+        "mvb/prices.html", tiers=tiers, kinds=MVB_PRICE_KINDS, destinations=destinations, cities=cities,
+        city_tiers=city_tiers,
     )
 
 
@@ -2242,7 +2247,11 @@ def _destination_from_form(dest):
     if marketplace not in MVB_MARKETPLACES:
         return "Выберите: WB, Ozon или ФФ"
     if not city:
-        return "Укажите город"
+        return "Выберите город"
+    city_row = MvbCity.find(city)
+    if city_row is None:
+        return f"Города «{city}» нет в справочнике — сначала добавьте его в «Города»"
+    city = city_row.name
     if marketplace == "ff" and not ff_name:
         return "Укажите название фулфилмента"
     value = ff_name or city
@@ -2281,6 +2290,40 @@ def _prices_destination_action(action):
         else:
             db.session.commit()
             flash(f"Сохранено: {dest.label()}", "success")
+    return redirect(url_for("mvb.prices"))
+
+
+def _prices_city_action(action):
+    """Справочник городов: добавить, переименовать, скрыть/вернуть."""
+    name = " ".join(request.form.get("name", "").split())
+    if action == "city_add":
+        if not name:
+            flash("Укажите название города", "danger")
+        elif MvbCity.find(name):
+            flash(f"Город «{name}» уже есть", "danger")
+        else:
+            db.session.add(MvbCity(name=name))
+            db.session.commit()
+            flash(f"Город добавлен: {name}. Задайте ему прайс отправки ниже.", "success")
+        return redirect(url_for("mvb.prices"))
+    city = db.session.get(MvbCity, request.form.get("city_id", type=int)) or abort(404)
+    if action == "city_toggle":
+        city.is_active = not city.is_active
+        db.session.commit()
+        flash(f"{city.name}: {'снова в списке' if city.is_active else 'скрыт — его пункты в заявке не выбрать'}", "success")
+        return redirect(url_for("mvb.prices"))
+    other = MvbCity.find(name)
+    if not name:
+        flash("Укажите название города", "danger")
+    elif other is not None and other is not city:
+        flash(f"Город «{name}» уже есть", "danger")
+    else:
+        old = city.name
+        for dest in MvbDestination.query.filter_by(city=old).all():
+            dest.city = name
+        city.name = name
+        db.session.commit()
+        flash(f"Сохранено: {name}", "success")
     return redirect(url_for("mvb.prices"))
 
 

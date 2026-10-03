@@ -1270,29 +1270,34 @@ def test_fulfillment_as_destination_for_orders_pallets_and_trips(db, client):
     assert [s.label() for s in trip.stops] == ["Фулфилмент · Север"]
 
 
-def test_destinations_in_prices_and_sc_price_by_destination(db, client):
-    """Пункты назначения задает оператор в прайсе: WB / Ozon / ФФ → город →
-    (для ФФ) название; в заявке выбирают из списка, отправка на СЦ — по
-    прайсу пункта (иначе общий)."""
-    from wms.models import MvbDestination
+def test_cities_with_prices_and_destinations(db, client):
+    """Справочник городов в прайсе: у города свой прайс отправки на СЦ —
+    одинаковый для WB, Ozon и ФФ этого города. Пункты назначения: WB / Ozon /
+    ФФ → город из справочника → (для ФФ) название; в заявке выбирают из
+    списка."""
+    from wms.models import MvbCity, MvbDestination
 
     _login(client, _user("operator", "mvb_staff"))
+    for name in ("Коледино", "Казань", "Москва"):
+        client.post("/mvb/prices", data={"action": "city_add", "name": name})
+    client.post("/mvb/prices", data={"action": "city_add", "name": "казань"})  # дубль
+    assert sorted(c.name for c in MvbCity.active()) == ["Казань", "Коледино", "Москва"]
     for mp, city, ff in [("wb", "Коледино", ""), ("wb", "Казань", ""), ("ozon", "Казань", ""), ("ff", "Москва", "ФФ Север")]:
         client.post("/mvb/prices", data={"action": "dest_add", "marketplace": mp, "city": city, "ff_name": ff})
     client.post("/mvb/prices", data={"action": "dest_add", "marketplace": "wb", "city": "коледино"})  # дубль
     client.post("/mvb/prices", data={"action": "dest_add", "marketplace": "ff", "city": "Москва"})  # без названия ФФ
+    client.post("/mvb/prices", data={"action": "dest_add", "marketplace": "wb", "city": "Тула"})  # нет в справочнике
     assert sorted(d.label() for d in MvbDestination.active()) == [
         "OZON Казань", "WB Казань", "WB Коледино", "ФФ ФФ Север (Москва)",
     ]
-    kazan_wb = MvbDestination.find("wb", "казань")
+    kazan = MvbCity.find("казань")
     client.post("/mvb/prices", data={"kind": "pickup", "min_boxes": "1", "price_per_box": "50"})
     client.post("/mvb/prices", data={"kind": "sc", "min_boxes": "1", "price_per_box": "100"})
-    client.post("/mvb/prices", data={"kind": "sc", "min_boxes": "1", "price_per_box": "300",
-                                     "destination_id": str(kazan_wb.id)})
+    client.post("/mvb/prices", data={"kind": "sc", "min_boxes": "1", "price_per_box": "300", "city_id": str(kazan.id)})
     page = client.get("/mvb/prices").get_data(as_text=True)
-    assert "Пункты назначения" in page and "Отправка на СЦ — WB Казань" in page
-    assert MvbPriceTier.price_for("sc", 5, kazan_wb.id) == 300
-    assert MvbPriceTier.price_for("sc", 5, MvbDestination.find("ozon", "Казань").id) == 100
+    assert "Города и прайс отправки" in page and "Пункты назначения" in page
+    assert MvbPriceTier.price_for("sc", 5, kazan.id) == 300
+    assert MvbPriceTier.price_for("sc", 5, MvbCity.find("Москва").id) == 100
 
     _login(client, _user("seller", "mvb_client", _mvb_client()))
     form = client.get("/mvb/orders/new").get_data(as_text=True)
@@ -1304,20 +1309,24 @@ def test_destinations_in_prices_and_sc_price_by_destination(db, client):
         line_marketplace=["wb", "ozon"], line_destination=["Коледино", "Коледино"])).get_data(as_text=True)
     assert "нет в списке пунктов назначения" in html and MvbOrder.query.count() == 0
     client.post("/mvb/orders/new", data=_multi_order_form(
-        line_marketplace=["wb", "ff"], line_destination=["казань", "ФФ Север"]))
+        line_marketplace=["ozon", "ff"], line_destination=["казань", "ФФ Север"]))
     order = MvbOrder.query.one()
-    assert [l.short_label() for l in order.lines] == ["WB Казань", "ФФ ФФ Север"]
+    assert [l.short_label() for l in order.lines] == ["OZON Казань", "ФФ ФФ Север"]
     client.post(f"/mvb/orders/{order.id}/confirm")
     order = db.session.get(MvbOrder, order.id)
+    # Ozon Казань — по прайсу Казани, ФФ в Москве — по общему
     assert order.sc_cost == 3 * 300 + 2 * 100 and order.pickup_cost == 5 * 50
 
-    # скрытый пункт из списка пропадает
     _login(client, User.query.filter_by(username="operator").one())
-    client.post("/mvb/prices", data={"action": "dest_toggle", "destination_id": str(kazan_wb.id)})
-    assert "WB Казань" not in [d.label() for d in MvbDestination.active()]
+    # переименование города переносится в его пункты
+    client.post("/mvb/prices", data={"action": "city_save", "city_id": str(kazan.id), "name": "Казань-2"})
+    assert {d.city for d in MvbDestination.query.filter_by(marketplace="ozon")} == {"Казань-2"}
+    # скрытый город и его пункты из списка пропадают
+    client.post("/mvb/prices", data={"action": "city_toggle", "city_id": str(kazan.id)})
+    assert not any(d.city == "Казань-2" for d in MvbDestination.active())
 
 
-def test_old_cities_migrate_to_destinations(db, client):
+def test_old_cities_and_destination_prices_migrate(db, client):
     from wms import _ensure_mvb_destinations
     from wms.models import MvbCity, MvbDestination
 
@@ -1325,12 +1334,21 @@ def test_old_cities_migrate_to_destinations(db, client):
     db.session.add(city)
     db.session.flush()
     db.session.add(MvbPriceTier(kind="sc", min_boxes=1, price_per_box=250, city_id=city.id))
+    # прайс, заведенный на пункт назначения (предыдущая версия), — на его город
+    ff = MvbDestination(marketplace="ff", city="Москва", ff_name="ФФ Север")
+    db.session.add(ff)
+    db.session.flush()
+    db.session.add(MvbPriceTier(kind="sc", min_boxes=1, price_per_box=180, destination_id=ff.id))
     db.session.commit()
     _ensure_mvb_destinations()
     _ensure_mvb_destinations()
     wb, oz = MvbDestination.find("wb", "Казань"), MvbDestination.find("ozon", "Казань")
     assert wb.address == "Казань, ул. WB 1" and oz.address == "Казань, ул. Ozon 2"
-    assert MvbPriceTier.price_for("sc", 3, wb.id) == 250 and MvbCity.query.count() == 0
+    assert MvbDestination.query.count() == 3
+    kazan, moscow = MvbCity.find("Казань"), MvbCity.find("Москва")
+    assert kazan.address_wb is None
+    assert MvbPriceTier.price_for("sc", 3, kazan.id) == 250 and MvbPriceTier.price_for("sc", 3, moscow.id) == 180
+
 
 def test_pickup_done_button_requires_all_boxes(db, client):
     """После скана коробов на заборе — «Готово»; пока не все короба
@@ -1362,6 +1380,7 @@ def test_sc_addresses_route_and_driver_sees_only_address_and_count(db, client):
 
     staff = _user("staff1", "mvb_admin")
     _login(client, staff)
+    client.post("/mvb/prices", data={"action": "city_add", "name": "Коледино"})
     client.post("/mvb/prices", data={
         "action": "dest_add", "marketplace": "wb", "city": "Коледино", "address": "Подольск, Коледино, ул. Троицкая 20",
     })

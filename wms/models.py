@@ -2050,24 +2050,41 @@ MVB_PRICE_KINDS = {"pickup": "Забор груза", "sc": "Отправка н
 
 
 class MvbCity(db.Model):
-    """Устаревший список городов (до разделения на WB / Ozon / ФФ) —
-    остается только для переноса в MvbDestination при запуске."""
+    """Город доставки (справочник в «Прайсе»): у города свой прайс отправки
+    на СЦ — одинаковый для WB, Ozon и фулфилментов этого города. Пункты
+    назначения ссылаются на город по названию."""
 
     __tablename__ = "mvb_cities"
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False, unique=True)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
+    # Устаревшие адреса (до пунктов назначения) — переносятся в
+    # MvbDestination при запуске и очищаются.
     address_wb = db.Column(db.String(300))
     address_ozon = db.Column(db.String(300))
     address = db.Column(db.String(300))
+
+    @staticmethod
+    def find(name):
+        name = (name or "").strip().lower()
+        if not name:
+            return None
+        for city in MvbCity.query.all():
+            if city.name.lower() == name:
+                return city
+        return None
+
+    @staticmethod
+    def active():
+        return MvbCity.query.filter_by(is_active=True).order_by(MvbCity.name).all()
 
 
 class MvbDestination(db.Model):
     """Пункт назначения МВБ (ведет оператор в «Прайсе»): куда (WB, Ozon или
     фулфилмент), город, для ФФ — его название, и адрес для маршрута
-    водителя. Из этого списка выбирают направление в заявке; у пункта может
-    быть свой прайс отправки."""
+    водителя. Из этого списка выбирают направление в заявке; прайс отправки
+    берется у города (MvbCity)."""
 
     __tablename__ = "mvb_destinations"
 
@@ -2091,11 +2108,14 @@ class MvbDestination(db.Model):
 
     @staticmethod
     def active():
-        return (
-            MvbDestination.query.filter_by(is_active=True)
+        """Пункты для выбора в заявке: не скрытые и в не скрытом городе."""
+        hidden = {c.name.lower() for c in MvbCity.query.filter_by(is_active=False).all()}
+        return [
+            d for d in MvbDestination.query.filter_by(is_active=True)
             .order_by(MvbDestination.marketplace, MvbDestination.city, MvbDestination.ff_name)
             .all()
-        )
+            if d.city.lower() not in hidden
+        ]
 
     @staticmethod
     def find(marketplace, value):
@@ -2119,29 +2139,29 @@ class MvbPriceTier(db.Model):
     kind = db.Column(db.String(10), nullable=False, index=True)
     min_boxes = db.Column(db.Integer, nullable=False, default=1)
     price_per_box = db.Column(db.Float, nullable=False, default=0)
-    # Отправка на СЦ: прайс конкретного пункта назначения; пусто — общий
-    # прайс (для пунктов без своего прайса). city_id — устаревшая привязка
-    # к городу (переносится в destination_id).
+    # Отправка на СЦ: прайс города; пусто — общий прайс (для городов без
+    # своего прайса). destination_id — устаревшая привязка к пункту
+    # назначения (переносится на его город при запуске).
     city_id = db.Column(db.Integer, db.ForeignKey("mvb_cities.id"), index=True)
     destination_id = db.Column(db.Integer, db.ForeignKey("mvb_destinations.id"), index=True)
 
-    destination = db.relationship("MvbDestination")
+    city = db.relationship("MvbCity")
 
     @staticmethod
-    def price_for(kind, boxes, destination_id=None):
+    def price_for(kind, boxes, city_id=None):
         """Цена за короб для количества boxes: ступень с наибольшим
-        «от N», не превышающим boxes. Для пункта со своим прайсом — по нему,
+        «от N», не превышающим boxes. Для города со своим прайсом — по нему,
         иначе по общему. None — прайс не заполнен."""
-        own = destination_id and MvbPriceTier.query.filter_by(kind=kind, destination_id=destination_id).first()
+        own = city_id and MvbPriceTier.query.filter_by(kind=kind, city_id=city_id).first()
         query = MvbPriceTier.query.filter(MvbPriceTier.kind == kind, MvbPriceTier.min_boxes <= boxes)
         if own:
-            query = query.filter(MvbPriceTier.destination_id == destination_id)
+            query = query.filter(MvbPriceTier.city_id == city_id)
         else:
-            query = query.filter(MvbPriceTier.destination_id.is_(None))
+            query = query.filter(MvbPriceTier.city_id.is_(None), MvbPriceTier.destination_id.is_(None))
         tier = query.order_by(MvbPriceTier.min_boxes.desc()).first()
         return tier.price_per_box if tier else None
 
     @staticmethod
-    def cost_for(kind, boxes, destination_id=None):
-        price = MvbPriceTier.price_for(kind, boxes, destination_id)
+    def cost_for(kind, boxes, city_id=None):
+        price = MvbPriceTier.price_for(kind, boxes, city_id)
         return None if price is None else round(price * boxes, 2)
