@@ -27,7 +27,7 @@ from ..models import (
     MVB_PRICE_KINDS, MvbPallet, MvbPriceTier, MvbTrip, MvbTripStop, MvbVehicle, User,
 )
 from ..utils.http import content_disposition
-from ..utils.labels_pdf import build_labels_batch_pdf
+from ..utils.labels_pdf import build_labels_batch_pdf, build_mvb_box_labels_pdf
 from ..utils.numbering import next_number
 from ..utils.timezone import MOSCOW_OFFSET
 
@@ -444,15 +444,19 @@ def order_labels_pdf(order_id):
             abort(400)
         boxes = [b for b in boxes if b.seq in wanted]
     total = len(order.boxes)
+    # Коротко, как пишут на коробах: «WB Коледино», «OZON Хоругвино».
+    destination = {"wb": "WB", "ozon": "OZON"}.get(order.marketplace, order.marketplace_label)
+    if order.destination:
+        destination += f" {order.destination}"
     entries = [
-        (
-            box.barcode,
-            f"{box.barcode}  ({box.seq}/{total})",
-            f"{order.client.name[:28]} → {order.marketplace_label}",
-        )
+        {
+            "barcode": box.barcode, "destination": destination, "seq": box.seq, "total": total,
+            "slot": order.slot_date.strftime("%d.%m.%Y") if order.slot_date else "",
+            "sender": order.client.name,
+        }
         for box in boxes
     ]
-    pdf = build_labels_batch_pdf(entries, title_font_size=9, max_img_h_ratio=0.6)
+    pdf = build_mvb_box_labels_pdf(entries)
     return Response(
         pdf,
         mimetype="application/pdf",
