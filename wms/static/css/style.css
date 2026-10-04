@@ -12,6 +12,19 @@ body {
   font-weight: 700;
 }
 
+/* Строка фильтров над колонками (movement/list.html) — чуть светлее
+   шапки таблицы, компактные отступы, чтобы не раздувать высоту заголовка. */
+.movement-filter-row th {
+  background-color: #fafbfc;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  font-weight: normal;
+}
+.movement-filter-row .form-select,
+.movement-filter-row .form-control {
+  font-size: 0.8rem;
+}
+
 .autocomplete-box {
   position: relative;
 }

@@ -190,7 +190,11 @@ def _apply_movement_search(query):
     Запрос из нескольких слов ("191 москва", "озон москва") разбивается по
     пробелам — документ должен совпасть по КАЖДОМУ слову (не обязательно в
     одном и том же поле, см. _movement_search_token_condition), а не
-    содержать всю фразу целиком подряд."""
+    содержать всю фразу целиком подряд.
+
+    Плюс отдельные фильтры по колонкам (см. чат — "фильтр над каждой
+    колонкой") — каждый независим от остальных и от общего поиска q,
+    комбинируются через И."""
     q = request.args.get("q", "").strip()
     if q:
         tokens = q.split()
@@ -202,7 +206,71 @@ def _apply_movement_search(query):
         query = query.filter(MovementDocument.marketplace_request_created_at.isnot(None))
     elif mp_request == "no":
         query = query.filter(MovementDocument.marketplace_request_created_at.is_(None))
+
+    number = request.args.get("number", "").strip()
+    if number:
+        query = query.filter(MovementDocument.number.ilike(f"%{number}%"))
+
+    from_warehouse_id = request.args.get("from_warehouse_id", type=int)
+    if from_warehouse_id:
+        query = query.filter(MovementDocument.from_warehouse_id == from_warehouse_id)
+
+    to_warehouse_id = request.args.get("to_warehouse_id", type=int)
+    if to_warehouse_id:
+        query = query.filter(MovementDocument.to_warehouse_id == to_warehouse_id)
+
+    created_by_id = request.args.get("created_by_id", type=int)
+    if created_by_id:
+        query = query.filter(MovementDocument.created_by_id == created_by_id)
+
+    status = request.args.get("status", "").strip()
+    if status:
+        query = query.filter(MovementDocument.status == status)
+
+    # _parse_report_date возвращает datetime на полночь указанного дня —
+    # дальше сравниваем напрямую, без combine().
+    date_from = _parse_report_date(request.args.get("date_from", ""))
+    if date_from:
+        query = query.filter(MovementDocument.created_at >= date_from)
+    date_to = _parse_report_date(request.args.get("date_to", ""))
+    if date_to:
+        query = query.filter(MovementDocument.created_at < date_to + timedelta(days=1))
     return query
+
+
+def _movement_filter_options():
+    """Списки для выпадающих фильтров над колонками (см. чат) — только
+    реально встречающиеся значения, не весь справочник складов/пользователей,
+    чтобы в списке не было складов/авторов, которых ни разу не было в
+    перемещениях."""
+    from_warehouses = (
+        Warehouse.query.join(
+            MovementDocument, MovementDocument.from_warehouse_id == Warehouse.id
+        )
+        .filter(Warehouse.is_active.is_(True))
+        .distinct()
+        .order_by(Warehouse.name)
+        .all()
+    )
+    to_warehouses = (
+        Warehouse.query.join(
+            MovementDocument, MovementDocument.to_warehouse_id == Warehouse.id
+        )
+        .distinct()
+        .order_by(Warehouse.name)
+        .all()
+    )
+    authors = (
+        User.query.join(MovementDocument, MovementDocument.created_by_id == User.id)
+        .distinct()
+        .order_by(User.full_name)
+        .all()
+    )
+    return {
+        "from_warehouses": from_warehouses,
+        "to_warehouses": to_warehouses,
+        "authors": authors,
+    }
 
 
 def _movement_pagination():
@@ -417,6 +485,7 @@ def list_documents():
         route_box=None,
         route_not_found=False,
         routing=[],
+        **_movement_filter_options(),
     )
 
 
