@@ -49,7 +49,11 @@
         {% if mvb_destinations %}
         <div class="col-12 col-md-4">
           <label class="form-label small mb-0">Город *</label>
-          <select class="form-select js-city" required></select>
+          <div class="autocomplete-box js-city-box">
+            <input type="text" class="form-control js-city-input" autocomplete="off" placeholder="Начните вводить город..." required>
+            <input type="hidden" class="js-city">
+            <div class="autocomplete-list"></div>
+          </div>
         </div>
         <div class="col-12 col-md-4 js-ff-wrap">
           <label class="form-label small mb-0">Фулфилмент *</label>
@@ -159,9 +163,13 @@
   }
   rows.forEach(row => {
     const mp = row.querySelector(".js-mp"), city = row.querySelector(".js-city");
+    const cityInput = row.querySelector(".js-city-input"), cityList = row.querySelector(".js-city-box .autocomplete-list");
     const ff = row.querySelector(".js-ff"), ffWrap = row.querySelector(".js-ff-wrap"), dest = row.querySelector(".js-dest");
     if (!city) return;
     const initial = DESTS.find(d => d.mp === mp.value && d.value.toLowerCase() === (dest.dataset.initial || "").toLowerCase());
+    let cities = [];
+    let matches = [];
+    let activeIndex = -1;
     function sync() {
       dest.value = mp.value === "ff" ? ff.value : city.value;
     }
@@ -172,18 +180,66 @@
         .forEach(d => ff.appendChild(option(d.value, d.value, d.value === selected)));
       sync();
     }
+    function closeCityList() {
+      cityList.classList.remove("show");
+      cityList.innerHTML = "";
+      activeIndex = -1;
+    }
+    function updateActive() {
+      [...cityList.children].forEach((el, idx) => el.classList.toggle("active", idx === activeIndex));
+    }
+    function selectCity(c) {
+      city.value = c;
+      cityInput.value = c;
+      closeCityList();
+      if (mp.value === "ff") fillFf(); else sync();
+    }
+    // Список городов фильтруется по подстроке (не только с начала названия) —
+    // проще найти нужный город, зная только часть его названия (см. чат).
+    function renderCityList() {
+      const q = cityInput.value.trim().toLowerCase();
+      matches = q ? cities.filter(c => c.toLowerCase().includes(q)) : cities;
+      activeIndex = -1;
+      cityList.innerHTML = "";
+      if (matches.length === 0) { closeCityList(); return; }
+      matches.forEach(c => {
+        const div = document.createElement("div");
+        div.className = "autocomplete-item";
+        div.textContent = c;
+        div.addEventListener("mousedown", (e) => { e.preventDefault(); selectCity(c); });
+        cityList.appendChild(div);
+      });
+      cityList.classList.add("show");
+    }
     function fillCities(selectedCity, selectedFf) {
-      city.innerHTML = "";
-      city.appendChild(option("", "— выберите —"));
-      [...new Set(DESTS.filter(d => d.mp === mp.value).map(d => d.city))]
-        .forEach(c => city.appendChild(option(c, c, c === selectedCity)));
+      cities = [...new Set(DESTS.filter(d => d.mp === mp.value).map(d => d.city))];
+      city.value = selectedCity || "";
+      cityInput.value = selectedCity || "";
       const isFf = mp.value === "ff";
       ffWrap.classList.toggle("d-none", !isFf);
       ff.required = isFf && !row.classList.contains("d-none");
       if (isFf) fillFf(selectedFf); else sync();
     }
     mp.addEventListener("change", () => fillCities());
-    city.addEventListener("change", () => (mp.value === "ff" ? fillFf() : sync()));
+    cityInput.addEventListener("input", () => { city.value = ""; renderCityList(); });
+    cityInput.addEventListener("focus", renderCityList);
+    cityInput.addEventListener("blur", () => setTimeout(closeCityList, 150));
+    cityInput.addEventListener("keydown", (e) => {
+      if (!cityList.classList.contains("show")) return;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        activeIndex = Math.min(activeIndex + 1, matches.length - 1);
+        updateActive();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        activeIndex = Math.max(activeIndex - 1, 0);
+        updateActive();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (activeIndex >= 0) selectCity(matches[activeIndex]);
+        else if (matches.length === 1) selectCity(matches[0]);
+      }
+    });
     ff.addEventListener("change", sync);
     countSelect.addEventListener("change", () => { ff.required = mp.value === "ff" && !row.classList.contains("d-none"); });
     fillCities(initial ? initial.city : null, initial ? initial.value : null);

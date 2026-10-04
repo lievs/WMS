@@ -299,9 +299,14 @@ def orders():
     items = query.order_by(MvbOrder.created_at.desc()).limit(300).all()
     clients = [] if _is_client() else MvbClient.query.order_by(MvbClient.name).all()
     need_driver = 0 if _is_client() else MvbOrder.query.filter(*need_driver_filter).count()
+    # Раздел "Из WMS" был отдельной страницей — теперь кандидаты на передачу в
+    # МВБ показываются прямо здесь, в "Заявках в работе" (см. чат), отдельная
+    # страница/пункт меню убраны.
+    wms_rows = _wms_candidate_rows() if _is_operator() else []
     return render_template(
         "mvb/orders.html", orders=items, clients=clients, status=status, client_id=client_id,
         need_driver=need_driver, drivers=_active_drivers() if _is_staff() else [],
+        wms_rows=wms_rows,
     )
 
 
@@ -2215,21 +2220,28 @@ def _sync_wms_shipped(orders, now):
                 doc.shipped_at = now
 
 
-@bp.route("/wms")
-def wms_movements():
-    if not _require_operator():
-        return redirect(url_for("mvb.index"))
+def _wms_candidate_rows():
     from ..models import MovementDocument
 
     docs = _wms_candidates_query().order_by(MovementDocument.completed_at.desc()).limit(300).all()
-    rows = []
-    for doc in docs:
-        rows.append({
+    return [
+        {
             "doc": doc,
             "boxes": len({line.box_id for line in doc.lines}),
             "order": _active_order_for_movement(doc.id),
-        })
-    return render_template("mvb/wms.html", rows=rows)
+        }
+        for doc in docs
+    ]
+
+
+@bp.route("/wms")
+def wms_movements():
+    """Отдельная страница не используется из меню (раздел перенесен в
+    "Заявки в работе", см. чат) — маршрут оставлен для прямых ссылок и
+    совместимости."""
+    if not _require_operator():
+        return redirect(url_for("mvb.index"))
+    return render_template("mvb/wms.html", rows=_wms_candidate_rows())
 
 
 @bp.route("/wms/import", methods=["POST"])
