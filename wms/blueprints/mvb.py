@@ -2672,68 +2672,12 @@ def reports():
         return redirect(url_for("mvb.index"))
     date_from, date_to = _report_period()
     rows, totals, order_rows = _report_rows(date_from, date_to)
+    # Отчет по водителям — тот же период, та же страница "Отчет" (см. чат).
+    driver_rows, driver_totals = _driver_report_rows(date_from, date_to)
     return render_template(
         "mvb/reports.html", rows=rows, totals=totals, date_from=date_from, date_to=date_to,
         columns=REPORT_COLUMNS, order_rows=order_rows, order_columns=REPORT_ORDER_COLUMNS,
-    )
-
-
-@bp.route("/reports/drivers")
-def driver_report():
-    if not _require_operator():
-        return redirect(url_for("mvb.index"))
-    date_from, date_to = _report_period()
-    rows, totals = _driver_report_rows(date_from, date_to)
-    return render_template(
-        "mvb/driver_report.html", rows=rows, totals=totals, date_from=date_from, date_to=date_to,
-    )
-
-
-@bp.route("/reports/drivers.xlsx")
-def driver_report_xlsx():
-    if not _require_operator():
-        return redirect(url_for("mvb.index"))
-    import io
-
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
-
-    date_from, date_to = _report_period()
-    rows, totals = _driver_report_rows(date_from, date_to)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "По водителям"
-    ws.append([f"МВБ Логистика — отчет по водителям с {date_from:%d.%m.%Y} по {date_to:%d.%m.%Y}"])
-    ws["A1"].font = Font(bold=True)
-    ws.append([])
-    ws.append(["Водитель", "Заявка", "Клиент", "Дата забора", "Коробов"])
-    for cell in ws[3]:
-        cell.font = Font(bold=True)
-    for row in rows:
-        order = row["order"]
-        ws.append([
-            row["driver"].display_name() if row["driver"] else "Без водителя",
-            order.number, order.client.name,
-            row["picked_up_at"].strftime("%d.%m.%Y %H:%M") if row["picked_up_at"] else "",
-            row["boxes"],
-        ])
-    ws.append([])
-    ws.append(["Итого по водителям:"])
-    for name, boxes in totals:
-        ws.append([name, boxes])
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-    ws.column_dimensions["A"].width = 28
-    ws.column_dimensions["B"].width = 16
-    ws.column_dimensions["C"].width = 28
-    ws.column_dimensions["D"].width = 18
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    fname = f"mvb_driver_report_{date_from:%Y%m%d}_{date_to:%Y%m%d}.xlsx"
-    return Response(
-        buffer.getvalue(),
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": content_disposition(fname)},
+        driver_rows=driver_rows, driver_totals=driver_totals,
     )
 
 
@@ -2777,6 +2721,31 @@ def reports_xlsx():
         ws.cell(row=ws.max_row, column=1).number_format = "DD.MM.YYYY HH:MM"
     for col, width in zip("ABCD", (17, 14, 28, 44)):
         ws.column_dimensions[col].width = width
+
+    driver_rows, driver_totals = _driver_report_rows(date_from, date_to)
+    ws = wb.create_sheet("По водителям")
+    ws.append(["Водитель", "Заявка", "Клиент", "Дата забора", "Коробов"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for row in driver_rows:
+        order = row["order"]
+        ws.append([
+            row["driver"].display_name() if row["driver"] else "Без водителя",
+            order.number, order.client.name,
+            row["picked_up_at"].strftime("%d.%m.%Y %H:%M") if row["picked_up_at"] else "",
+            row["boxes"],
+        ])
+    ws.append([])
+    ws.append(["Итого по водителям:"])
+    for name, boxes in driver_totals:
+        ws.append([name, boxes])
+    for cell in ws[ws.max_row - len(driver_totals)]:
+        cell.font = Font(bold=True)
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 28
+    ws.column_dimensions["D"].width = 18
+
     buffer = io.BytesIO()
     wb.save(buffer)
     fname = f"mvb_report_{date_from:%Y%m%d}_{date_to:%Y%m%d}.xlsx"

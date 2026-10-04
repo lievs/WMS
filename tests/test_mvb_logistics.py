@@ -1010,11 +1010,12 @@ def test_driver_report_counts_boxes_per_order_per_driver(db, client):
     _login(client, driver2)
     client.post("/mvb/scan/pickup", data={"barcode": order_b.boxes[0].barcode})
 
-    assert client.get("/mvb/reports/drivers").status_code == 302  # водителю недоступно
+    assert client.get("/mvb/reports").status_code == 302  # водителю недоступно
 
     _login(client, staff)
     today = datetime.utcnow().date().isoformat()
-    html = client.get(f"/mvb/reports/drivers?date_from={today}&date_to={today}").get_data(as_text=True)
+    html = client.get(f"/mvb/reports?date_from={today}&date_to={today}").get_data(as_text=True)
+    assert "По водителям" in html
     assert driver1.display_name() in html and driver2.display_name() in html
     assert order_a.number in html and order_b.number in html
 
@@ -1029,30 +1030,29 @@ def test_driver_report_counts_boxes_per_order_per_driver(db, client):
     # необзабранные короба не в отчете
     assert sum(by_key.values()) == 3
 
-    xlsx = client.get(f"/mvb/reports/drivers.xlsx?date_from={today}&date_to={today}")
+    xlsx = client.get(f"/mvb/reports.xlsx?date_from={today}&date_to={today}")
     assert xlsx.status_code == 200 and xlsx.data[:2] == b"PK"
     import io
 
     from openpyxl import load_workbook
 
     sheet = load_workbook(io.BytesIO(xlsx.data))["По водителям"]
-    assert sheet["A3"].value == "Водитель" and sheet["B3"].value == "Заявка"
+    assert sheet["A1"].value == "Водитель" and sheet["B1"].value == "Заявка"
 
     # другой период — пусто
     assert _driver_report_rows(datetime(2020, 1, 1).date(), datetime(2020, 1, 31).date())[0] == []
 
 
-def test_driver_report_hidden_from_clients_drivers_keepers_menu(db, client):
+def test_driver_report_hidden_from_clients_drivers_keepers(db, client):
+    """Отчет по водителям живет внутри общего "Отчета" (см. чат: "положить
+    в отчет, что логично") — доступ к нему для клиента/водителя/кладовщика
+    закрыт тем же _require_operator(), что и у остального /mvb/reports."""
     seller = _user("seller", "mvb_client", _mvb_client())
     driver = _user("driver", "mvb_driver")
     keeper = _user("keeper", "mvb_storekeeper")
-    pages = {"seller": "/mvb/orders", "driver": "/mvb/driver", "keeper": "/mvb/pallets"}
-    for name, user in (("seller", seller), ("driver", driver), ("keeper", keeper)):
+    for user in (seller, driver, keeper):
         _login(client, user)
-        html = client.get(pages[name]).get_data(as_text=True)
-        nav = html.split("</nav>")[0]
-        assert "Отчёт по водителям" not in nav
-        assert client.get("/mvb/reports/drivers").status_code == 302
+        assert client.get("/mvb/reports").status_code == 302
 
 
 # ---------- регистрация клиента ----------
