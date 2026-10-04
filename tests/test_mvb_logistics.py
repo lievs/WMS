@@ -990,6 +990,71 @@ def test_client_report_for_period(db, client):
     assert _report_rows(datetime(2020, 1, 1).date(), datetime(2020, 1, 31).date())[0] == []
 
 
+def test_driver_report_counts_boxes_per_order_per_driver(db, client):
+    """Отчет по водителям (см. чат: "кто сколько коробов забрал по какой
+    заявке") — только оператору, считает по дате скана забора."""
+    staff = _user("staff1", "mvb_admin")
+    ca = _user("ca", "mvb_client", _mvb_client("Альфа"))
+    cb = _user("cb", "mvb_client", _mvb_client("Бета"))
+    driver1 = _user("driver1", "mvb_driver")
+    driver2 = _user("driver2", "mvb_driver")
+
+    _login(client, ca)
+    order_a = _confirmed_order(client, box_count="3")
+    _login(client, cb)
+    order_b = _confirmed_order(client, box_count="2")
+
+    _login(client, driver1)
+    for box in order_a.boxes[:2]:
+        client.post("/mvb/scan/pickup", data={"barcode": box.barcode})
+    _login(client, driver2)
+    client.post("/mvb/scan/pickup", data={"barcode": order_b.boxes[0].barcode})
+
+    assert client.get("/mvb/reports/drivers").status_code == 302  # водителю недоступно
+
+    _login(client, staff)
+    today = datetime.utcnow().date().isoformat()
+    html = client.get(f"/mvb/reports/drivers?date_from={today}&date_to={today}").get_data(as_text=True)
+    assert driver1.display_name() in html and driver2.display_name() in html
+    assert order_a.number in html and order_b.number in html
+
+    from wms.blueprints.mvb import _driver_report_rows
+
+    rows, totals = _driver_report_rows(datetime.utcnow().date(), datetime.utcnow().date())
+    by_key = {(r["driver"].id if r["driver"] else None, r["order"].number): r["boxes"] for r in rows}
+    assert by_key[(driver1.id, order_a.number)] == 2
+    assert by_key[(driver2.id, order_b.number)] == 1
+    assert dict(totals)[driver1.display_name()] == 2
+    assert dict(totals)[driver2.display_name()] == 1
+    # необзабранные короба не в отчете
+    assert sum(by_key.values()) == 3
+
+    xlsx = client.get(f"/mvb/reports/drivers.xlsx?date_from={today}&date_to={today}")
+    assert xlsx.status_code == 200 and xlsx.data[:2] == b"PK"
+    import io
+
+    from openpyxl import load_workbook
+
+    sheet = load_workbook(io.BytesIO(xlsx.data))["По водителям"]
+    assert sheet["A3"].value == "Водитель" and sheet["B3"].value == "Заявка"
+
+    # другой период — пусто
+    assert _driver_report_rows(datetime(2020, 1, 1).date(), datetime(2020, 1, 31).date())[0] == []
+
+
+def test_driver_report_hidden_from_clients_drivers_keepers_menu(db, client):
+    seller = _user("seller", "mvb_client", _mvb_client())
+    driver = _user("driver", "mvb_driver")
+    keeper = _user("keeper", "mvb_storekeeper")
+    pages = {"seller": "/mvb/orders", "driver": "/mvb/driver", "keeper": "/mvb/pallets"}
+    for name, user in (("seller", seller), ("driver", driver), ("keeper", keeper)):
+        _login(client, user)
+        html = client.get(pages[name]).get_data(as_text=True)
+        nav = html.split("</nav>")[0]
+        assert "Отчёт по водителям" not in nav
+        assert client.get("/mvb/reports/drivers").status_code == 302
+
+
 # ---------- регистрация клиента ----------
 
 

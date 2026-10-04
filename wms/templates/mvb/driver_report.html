@@ -1,0 +1,46 @@
+{% extends "mvb/base.html" %}
+{% block title %}Отчет по водителям{% endblock %}
+{% block content %}
+<h3 class="mb-3">Отчет по водителям</h3>
+<form method="get" class="d-flex flex-wrap align-items-end gap-2 mb-3">
+  <div><label class="form-label small mb-0">С</label><input type="date" name="date_from" value="{{ date_from.isoformat() }}" class="form-control"></div>
+  <div><label class="form-label small mb-0">По</label><input type="date" name="date_to" value="{{ date_to.isoformat() }}" class="form-control"></div>
+  <button class="btn btn-outline-success">Показать</button>
+  <a class="btn btn-outline-secondary" href="{{ url_for('mvb.driver_report_xlsx', date_from=date_from.isoformat(), date_to=date_to.isoformat()) }}">⬇ Excel</a>
+</form>
+<p class="text-muted small">Кто из водителей сколько коробов забрал и по каким заявкам — по дате скана забора в периоде.</p>
+
+<h5 class="mt-2">Итого по водителям</h5>
+<div class="table-responsive mb-4">
+<table class="table table-sm align-middle" style="max-width:420px">
+  <thead><tr><th>Водитель</th><th class="text-end">Коробов</th></tr></thead>
+  <tbody>
+  {% for name, boxes in totals %}
+    <tr><td>{{ name }}</td><td class="text-end fw-bold">{{ boxes }}</td></tr>
+  {% else %}
+    <tr><td colspan="2" class="text-muted">За период данных нет</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h5>По заявкам</h5>
+<div class="table-responsive">
+<table class="table table-sm align-middle">
+  <thead><tr><th>Водитель</th><th>Заявка</th><th>Клиент</th><th>Дата забора</th><th class="text-end">Коробов</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td>{{ r.driver.display_name() if r.driver else 'Без водителя' }}</td>
+      <td><a href="{{ url_for('mvb.order_detail', order_id=r.order.id) }}">{{ r.order.number }}</a></td>
+      <td>{{ r.order.client.name }}</td>
+      <td class="text-nowrap">{{ r.picked_up_at.strftime('%d.%m.%Y %H:%M') if r.picked_up_at else '—' }}</td>
+      <td class="text-end fw-bold">{{ r.boxes }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="text-muted">За период заборов нет</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

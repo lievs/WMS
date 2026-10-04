@@ -2612,6 +2612,44 @@ def _report_rows(date_from, date_to):
     return result, totals, order_rows
 
 
+def _driver_report_rows(date_from, date_to):
+    """Отчет по водителям за период (по дате скана забора picked_up_at, по
+    Москве): кто из водителей сколько коробов забрал и по каким заявкам
+    (см. чат)."""
+    from datetime import time
+
+    start = datetime.combine(date_from, time.min) - MOSCOW_OFFSET
+    end = datetime.combine(date_to, time.max) - MOSCOW_OFFSET
+
+    boxes = (
+        MvbBox.query.join(MvbOrder)
+        .filter(MvbBox.picked_up_at.isnot(None), MvbBox.picked_up_at >= start, MvbBox.picked_up_at <= end)
+        .all()
+    )
+    drivers = {u.id: u for u in User.query.filter(User.id.in_({b.picked_up_by_id for b in boxes if b.picked_up_by_id}))}
+
+    order_rows = {}
+    for box in boxes:
+        key = (box.picked_up_by_id, box.order_id)
+        row = order_rows.setdefault(key, {
+            "driver": drivers.get(box.picked_up_by_id), "order": box.order, "boxes": 0, "picked_up_at": None,
+        })
+        row["boxes"] += 1
+        if row["picked_up_at"] is None or box.picked_up_at > row["picked_up_at"]:
+            row["picked_up_at"] = box.picked_up_at + MOSCOW_OFFSET
+
+    def driver_name(row):
+        return row["driver"].display_name() if row["driver"] else "Без водителя"
+
+    rows = sorted(order_rows.values(), key=lambda r: (driver_name(r), r["picked_up_at"] or datetime.min))
+    driver_totals = {}
+    for r in rows:
+        name = driver_name(r)
+        driver_totals[name] = driver_totals.get(name, 0) + r["boxes"]
+    totals = sorted(driver_totals.items(), key=lambda kv: (-kv[1], kv[0]))
+    return rows, totals
+
+
 REPORT_COLUMNS = [
     ("orders", "Заявок"), ("boxes", "Коробов в заявках"), ("picked_up", "Забрано"),
     ("received", "Принято на складе"), ("shipped", "Отправлено на СЦ"), ("delivered", "Сдано на СЦ"),
@@ -2637,6 +2675,65 @@ def reports():
     return render_template(
         "mvb/reports.html", rows=rows, totals=totals, date_from=date_from, date_to=date_to,
         columns=REPORT_COLUMNS, order_rows=order_rows, order_columns=REPORT_ORDER_COLUMNS,
+    )
+
+
+@bp.route("/reports/drivers")
+def driver_report():
+    if not _require_operator():
+        return redirect(url_for("mvb.index"))
+    date_from, date_to = _report_period()
+    rows, totals = _driver_report_rows(date_from, date_to)
+    return render_template(
+        "mvb/driver_report.html", rows=rows, totals=totals, date_from=date_from, date_to=date_to,
+    )
+
+
+@bp.route("/reports/drivers.xlsx")
+def driver_report_xlsx():
+    if not _require_operator():
+        return redirect(url_for("mvb.index"))
+    import io
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    date_from, date_to = _report_period()
+    rows, totals = _driver_report_rows(date_from, date_to)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "По водителям"
+    ws.append([f"МВБ Логистика — отчет по водителям с {date_from:%d.%m.%Y} по {date_to:%d.%m.%Y}"])
+    ws["A1"].font = Font(bold=True)
+    ws.append([])
+    ws.append(["Водитель", "Заявка", "Клиент", "Дата забора", "Коробов"])
+    for cell in ws[3]:
+        cell.font = Font(bold=True)
+    for row in rows:
+        order = row["order"]
+        ws.append([
+            row["driver"].display_name() if row["driver"] else "Без водителя",
+            order.number, order.client.name,
+            row["picked_up_at"].strftime("%d.%m.%Y %H:%M") if row["picked_up_at"] else "",
+            row["boxes"],
+        ])
+    ws.append([])
+    ws.append(["Итого по водителям:"])
+    for name, boxes in totals:
+        ws.append([name, boxes])
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 28
+    ws.column_dimensions["D"].width = 18
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    fname = f"mvb_driver_report_{date_from:%Y%m%d}_{date_to:%Y%m%d}.xlsx"
+    return Response(
+        buffer.getvalue(),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": content_disposition(fname)},
     )
 
 
