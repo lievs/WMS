@@ -989,12 +989,13 @@ class MovementDocument(db.Model):
         """Фактически принято на складе назначения с учетом расхождений."""
         if self.received_at is None:
             return None
-        if self.received_qty_snapshot is not None:
-            return self.received_qty_snapshot
-        return self.total_item_qty() + sum(
-            discrepancy.received_qty - discrepancy.expected_qty
-            for discrepancy in self.discrepancies
-        )
+        # Считаем по живым данным, а не по снимку на момент приемки: недовоз
+        # при приемке уже списан из коробов (см. movement._apply_receipt_
+        # stock_difference), излишек в короба не попадает — значит принято =
+        # что сейчас в коробах + излишек. Снимок устаревал после правки
+        # коробов, а для старых документов без снимка недовоз вычитался
+        # дважды (10 отправлено, 7 принято → показывало 4).
+        return self.total_item_qty() + sum(d.excess_qty() for d in self.discrepancies)
 
     def total_sent_qty(self):
         """Текущее количество товара в коробах документа — то же самое, что
@@ -1002,8 +1003,12 @@ class MovementDocument(db.Model):
         эти цифры сравнивают с заявками на самом маркетплейсе, а значит
         нужны актуальные данные, а не снимок на момент отправки (см. чат:
         "экспорт показывает 2220, строка показывает 2147" — после правки
-        короба цифры разъехались)."""
-        return self.total_item_qty()
+        короба цифры разъехались).
+
+        После приемки с недовозом недостающее списано из коробов, поэтому
+        отправленное = в коробах + недовоз (иначе «отправлено» совпадало бы
+        с принятым)."""
+        return self.total_item_qty() + self.total_shortage_qty()
 
     def total_shortage_qty(self):
         """Сколько товара не принято на складе назначения и нужно найти."""

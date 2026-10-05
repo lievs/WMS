@@ -242,3 +242,26 @@ def test_admin_returns_received_movement_to_work_and_receives_again(db, client_l
     assert MovementDocument.query.get(doc.id).received_at is not None
     assert ShipmentPlanLine.query.get(plan_line.id).fulfilled_qty == 10
     assert MovementReceiptDiscrepancy.query.filter_by(document_id=doc.id).count() == 0
+
+
+def test_list_shows_sent_and_actually_received_in_brackets(db, client_logged_in):
+    """Отправлено 10, принято 7: «10 (7)»; без снимка (старые документы)
+    недовоз не вычитается дважды; правка короба после приемки учитывается."""
+    doc, item, _ = _make_completed_document(qty=10)
+    client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "7"})
+    db.session.expire_all()
+    doc = MovementDocument.query.get(doc.id)
+    assert (doc.total_sent_qty(), doc.total_received_qty()) == (10, 7)
+    doc.received_qty_snapshot = None
+    db.session.commit()
+    assert MovementDocument.query.get(doc.id).total_received_qty() == 7
+    page = client_logged_in.get("/movement/").get_data(as_text=True)
+    assert 'title="Фактически принято на маркетплейсе">(7)</span>' in page
+
+
+def test_excess_shown_in_brackets(db, client_logged_in):
+    doc, item, _ = _make_completed_document(qty=10)
+    client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "12"})
+    db.session.expire_all()
+    doc = MovementDocument.query.get(doc.id)
+    assert (doc.total_sent_qty(), doc.total_received_qty()) == (10, 12)
