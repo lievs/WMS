@@ -988,9 +988,10 @@ def admin_users():
 
 def _assignable_roles():
     """Оператор заводит всех, кроме администраторов МВБ."""
+    roles = {code: label for code, label in MVB_ROLES.items() if code != "mvb_driver"}
     if current_user.can_manage_mvb():
-        return dict(MVB_ROLES)
-    return {code: label for code, label in MVB_ROLES.items() if code != "mvb_admin"}
+        return roles
+    return {code: label for code, label in roles.items() if code != "mvb_admin"}
 
 
 TEST_CLIENT_NAME = "Тестовый клиент"
@@ -1196,6 +1197,101 @@ def vehicles():
         "mvb/vehicles.html",
         vehicles=MvbVehicle.query.order_by(MvbVehicle.is_active.desc(), MvbVehicle.plate).all(),
         drivers=_active_drivers(),
+    )
+
+
+# ---------- водители ----------
+
+
+def _driver_vehicle(user):
+    return (
+        MvbVehicle.query.filter_by(driver_id=user.id)
+        .order_by(MvbVehicle.is_active.desc(), MvbVehicle.id)
+        .first()
+    )
+
+
+def _driver_form_vehicle(vehicle):
+    """Авто из формы водителя: госномер, модель и вместимость обязательны."""
+    plate = request.form.get("plate", "").strip().upper()
+    model = request.form.get("model", "").strip()
+    try:
+        capacity = int(request.form.get("capacity_boxes") or 0)
+    except ValueError:
+        capacity = 0
+    if not plate or not model or capacity <= 0:
+        return "Укажите модель авто, госномер и сколько коробов вмещает машина"
+    vehicle.plate = plate
+    vehicle.model = model
+    vehicle.capacity_boxes = capacity
+    return None
+
+
+@bp.route("/drivers", methods=["GET", "POST"])
+def drivers():
+    """Водителей заводит оператор: ФИО, авто (модель, госномер, вместимость),
+    логин и пароль, которые он выдает водителю. Авто закрепляется за водителем."""
+    if not _require_operator():
+        return redirect(url_for("mvb.index"))
+    if request.method == "POST":
+        driver_id = request.form.get("driver_id", type=int)
+        full_name = request.form.get("full_name", "").strip()
+        password = request.form.get("password", "")
+        if driver_id:
+            user = db.session.get(User, driver_id)
+            if user is None or user.role != "mvb_driver":
+                abort(404)
+            vehicle = _driver_vehicle(user) or MvbVehicle(driver_id=user.id)
+            error = None if full_name else "Укажите ФИО водителя"
+            error = error or _driver_form_vehicle(vehicle)
+            if not error and password and len(password) < 6:
+                error = "Пароль не короче 6 символов"
+            if error:
+                flash(error, "danger")
+                return redirect(url_for("mvb.drivers"))
+            user.full_name = full_name
+            active = request.form.get("is_active") == "1"
+            if password or (user.is_active_user and not active):
+                user.session_version = (user.session_version or 0) + 1
+            if password:
+                user.set_password(password)
+            user.is_active_user = active
+            vehicle.is_active = active
+            db.session.add(vehicle)
+            db.session.commit()
+            flash(f"Водитель {user.display_name()} сохранен" + (" · пароль изменен" if password else ""), "success")
+            return redirect(url_for("mvb.drivers"))
+
+        username = request.form.get("username", "").strip()
+        vehicle = MvbVehicle()
+        error = None if full_name else "Укажите ФИО водителя"
+        error = error or _driver_form_vehicle(vehicle)
+        if not error and not username:
+            error = "Придумайте логин водителю"
+        if not error and User.query.filter(db.func.lower(User.username) == username.lower()).first():
+            error = "Такой логин уже занят"
+        if not error and len(password) < 6:
+            error = "Пароль не короче 6 символов"
+        if error:
+            flash(error, "danger")
+            session["mvb_driver_form"] = {k: request.form.get(k, "") for k in ("full_name", "model", "plate", "capacity_boxes", "username")}
+            return redirect(url_for("mvb.drivers"))
+        user = User(username=username, full_name=full_name, role="mvb_driver", is_admin=False, allowed_sections="none")
+        user.set_password(password)
+        vehicle.driver = user
+        db.session.add_all([user, vehicle])
+        db.session.commit()
+        flash(f"Водитель {full_name} добавлен. Выдайте ему логин «{username}» и пароль «{password}» — вход на странице МВБ.", "success")
+        return redirect(url_for("mvb.drivers"))
+
+    rows = [
+        {"user": u, "vehicle": _driver_vehicle(u)}
+        for u in User.query.filter(User.role == "mvb_driver")
+        .order_by(User.is_active_user.desc(), User.full_name, User.username).all()
+    ]
+    return render_template(
+        "mvb/drivers.html", rows=rows, form=session.pop("mvb_driver_form", {}),
+        free_vehicles=MvbVehicle.query.filter(MvbVehicle.driver_id.is_(None), MvbVehicle.is_active.is_(True)).count(),
     )
 
 

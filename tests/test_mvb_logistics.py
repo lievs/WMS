@@ -1709,3 +1709,36 @@ def test_partial_pickup_when_boxes_do_not_fit(db, client):
         client.post("/mvb/scan/pickup", data={"barcode": box.barcode})
     client.post(f"/mvb/driver/orders/{order.id}/done")
     assert db.session.get(MvbOrder, order.id).pickup_done_at is not None
+
+
+def test_operator_creates_pickup_driver_with_vehicle(db, client):
+    _login(client, _user("oper_drv", "mvb_staff"))
+    assert client.get("/mvb/drivers").status_code == 200
+    # Роль «Водитель» в «Пользователях» больше не выдается — только через «Водители».
+    client.post("/mvb/admin/users", data={"username": "d0", "password": "secret1", "role": "mvb_driver"})
+    assert User.query.filter_by(username="d0").first() is None
+    # Без авто водителя не создать.
+    client.post("/mvb/drivers", data={"full_name": "Иванов И.И.", "username": "ivanov", "password": "secret1"})
+    assert User.query.filter_by(username="ivanov").first() is None
+    client.post("/mvb/drivers", data={
+        "full_name": "Иванов Иван", "model": "ГАЗель", "plate": "а001аа09", "capacity_boxes": "120",
+        "username": "ivanov", "password": "secret1",
+    })
+    driver = User.query.filter_by(username="ivanov").one()
+    assert driver.role == "mvb_driver" and driver.check_password("secret1")
+    vehicle = MvbVehicle.query.filter_by(driver_id=driver.id).one()
+    assert (vehicle.plate, vehicle.model, vehicle.capacity_boxes) == ("А001АА09", "ГАЗель", 120)
+    page = client.get("/mvb/drivers").get_data(as_text=True)
+    assert "Иванов Иван" in page and "А001АА09" in page
+    # Правка авто, новый пароль, отключение.
+    client.post("/mvb/drivers", data={
+        "driver_id": str(driver.id), "full_name": "Иванов Иван", "model": "Ford Transit", "plate": "в002вв09",
+        "capacity_boxes": "150", "password": "newpass1",
+    })
+    db.session.refresh(driver)
+    db.session.refresh(vehicle)
+    assert vehicle.plate == "В002ВВ09" and vehicle.capacity_boxes == 150
+    assert driver.check_password("newpass1") and not driver.is_active_user and not vehicle.is_active
+    # Водитель сам сюда не попадает.
+    _login(client, _user("drv_other", "mvb_driver"))
+    assert client.get("/mvb/drivers").status_code == 302

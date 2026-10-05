@@ -22,6 +22,7 @@
 {% endif %}
 <form method="post" class="card p-3 mb-4">
   <h6>Новый пользователь</h6>
+  <div class="small text-muted mb-2">Водителей на забор заводят вместе с авто в <a href="{{ url_for('mvb.drivers') }}">«Водители»</a>.</div>
   <div class="row g-2">
     <div class="col-md-2"><input name="username" class="form-control" placeholder="Логин *" required></div>
     <div class="col-md-2"><input name="password" type="text" class="form-control" placeholder="Пароль (от 6) *" required></div>
