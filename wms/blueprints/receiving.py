@@ -1249,6 +1249,30 @@ def _apply_defect_qty_from_form(line):
     return None
 
 
+def _unboxed_credit_qty(doc, line, good_qty):
+    """Сколько из годного количества строки накладной зачислить в
+    неразмещенный остаток. Товар, который в этой же приемке уже упаковали в
+    короб (строки с box_id), — это те же единицы из накладной: они уже
+    лежат в коробе, и зачислять их еще раз неразмещенными нельзя (иначе
+    остаток задваивается: 40 в коробах + 40 «неразмещенных»). Упакованное
+    вычитается из строк накладной по этому товару по мере их завершения —
+    и при завершении целиком, и построчно."""
+    if line.box_id:
+        return 0
+    lines = list(doc.lines)
+    boxed = sum(
+        l.qty or 0 for l in lines if l.box_id and l.nomenclature_id == line.nomenclature_id
+    )
+    if not boxed:
+        return good_qty
+    done = sum(
+        l.good_qty() for l in lines
+        if not l.box_id and l.id != line.id and l.nomenclature_id == line.nomenclature_id
+        and l.line_completed_at is not None
+    )
+    return max(done + good_qty - boxed, 0) - max(done - boxed, 0)
+
+
 def _credit_receiving_line(doc, line):
     """Зачисляет годное количество строки в неразмещенный остаток и, если
     есть брак, заводит возврат поставщику — общая логика для завершения
@@ -1256,8 +1280,9 @@ def _credit_receiving_line(doc, line):
     Расхождение с накладной не является возвратом — SupplierReturn
     создается только из явно указанного defect_qty."""
     good_qty = line.good_qty()
-    if good_qty > 0:
-        UnplacedStock.add(doc.warehouse_id, line.nomenclature_id, good_qty, receiving_document=doc)
+    credit_qty = _unboxed_credit_qty(doc, line, good_qty)
+    if credit_qty > 0:
+        UnplacedStock.add(doc.warehouse_id, line.nomenclature_id, credit_qty, receiving_document=doc)
     if line.defect_qty:
         db.session.add(
             SupplierReturn(
