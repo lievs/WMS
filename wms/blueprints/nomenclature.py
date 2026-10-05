@@ -263,6 +263,19 @@ def locate():
                 .order_by(Warehouse.code)
                 .all()
             )
+            # Откуда взялся неразмещенный остаток: партии по приемкам; что
+            # не покрыто партиями — излишек приемки перемещения/старые данные.
+            lots_by_warehouse = {}
+            for lot in (
+                UnplacedStockLot.query.filter_by(nomenclature_id=item.id)
+                .filter(UnplacedStockLot.qty_remaining > 0)
+                .order_by(UnplacedStockLot.received_at)
+                .all()
+            ):
+                lots_by_warehouse.setdefault(lot.warehouse_id, []).append(lot)
+            for row in unplaced_rows:
+                row.source_lots = lots_by_warehouse.get(row.warehouse_id, [])
+                row.unexplained_qty = max(row.qty - sum(l.qty_remaining for l in row.source_lots), 0)
 
     return render_template(
         "nomenclature/locate.html",
@@ -367,6 +380,20 @@ def list_nomenclature():
         if item_ids
         else {}
     )
+    # Неразмещенная часть остатка отдельно — чтобы было видно, сколько в
+    # коробах, а сколько числится принятым, но не упакованным.
+    unplaced_by_item_warehouse = {}
+    if item_ids:
+        for nid, wid, qty in (
+            db.session.query(UnplacedStock.nomenclature_id, UnplacedStock.warehouse_id, UnplacedStock.qty)
+            .filter(
+                UnplacedStock.qty > 0,
+                UnplacedStock.nomenclature_id.in_(item_ids),
+                UnplacedStock.warehouse_id.in_([wh.id for wh in stock_warehouses]),
+            )
+            .all()
+        ):
+            unplaced_by_item_warehouse[(nid, wid)] = qty
 
     return render_template(
         "nomenclature/list.html",
@@ -376,6 +403,7 @@ def list_nomenclature():
         categories=categories,
         stock_warehouses=stock_warehouses,
         stock_by_item_warehouse=stock_by_item_warehouse,
+        unplaced_by_item_warehouse=unplaced_by_item_warehouse,
     )
 
 

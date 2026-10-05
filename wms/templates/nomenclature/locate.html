@@ -56,15 +56,23 @@
       </h5>
       <p class="text-muted small d-none d-md-block">Принято на складе, но еще не упаковано в короб.</p>
       <table class="table table-sm table-mobile-compact">
-        <thead><tr><th>Склад</th><th>Кол-во</th></tr></thead>
+        <thead><tr><th>Склад</th><th>Кол-во</th><th>Откуда</th></tr></thead>
         <tbody>
         {% for row in unplaced_rows %}
           <tr>
             <td>{{ row.warehouse.name }}</td>
             <td>{{ row.qty | round(0) }} {{ item.unit }}</td>
+            <td class="small">
+              {% for lot in row.source_lots %}
+                <div>{{ '%g' % lot.qty_remaining }} {{ item.unit }} —
+                  {% if lot.receiving_document %}<a href="{{ url_for('receiving.detail', doc_id=lot.receiving_document_id) }}">приемка {{ lot.receiving_document.number }}</a>{% else %}без документа приемки (излишек при приемке перемещения, корректировка){% endif %}
+                  {{ (lot.received_at | msk).strftime('%d.%m.%Y') if lot.received_at }}{% if lot.supplier_name %}, {{ lot.supplier_name }}{% endif %}</div>
+              {% endfor %}
+              {% if row.unexplained_qty %}<div class="text-muted">{{ '%g' % row.unexplained_qty }} {{ item.unit }} — без документа приемки (излишек при приемке перемещения или старые данные)</div>{% endif %}
+            </td>
           </tr>
         {% else %}
-          <tr><td colspan="2" class="text-muted">Неразмещенного остатка нет</td></tr>
+          <tr><td colspan="3" class="text-muted">Неразмещенного остатка нет</td></tr>
         {% endfor %}
         </tbody>
       </table>
