@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 
 from ..extensions import db
 from ..models import (
+    AppSetting,
     Box,
     BoxItem,
     Nomenclature,
@@ -1491,6 +1492,72 @@ def revert_to_sorting(doc_id):
         )
     flash(message, "warning" if synced_returns else "success")
     return redirect(url_for("receiving.detail", doc_id=doc.id))
+
+
+def _doubled_receipts():
+    """Завершенные приемки, где товар упаковали в короба прямо в приемке и
+    одновременно зачислили строкой накладной в неразмещенный остаток (до
+    исправления _unboxed_credit_qty). Задвоено = зачислено − (годное по
+    строкам накладной − упаковано), не меньше 0. Уже исправленные отмечены
+    в AppSetting «rcv_dedup:<док>:<товар>»."""
+    rows = []
+    docs = (
+        ReceivingDocument.query.filter(ReceivingDocument.status == "completed")
+        .order_by(ReceivingDocument.completed_at.desc()).all()
+    )
+    for doc in docs:
+        lines = list(doc.lines)
+        boxed, good, expected = {}, {}, {}
+        for line in lines:
+            nid = line.nomenclature_id
+            if line.box_id:
+                boxed[nid] = boxed.get(nid, 0) + (line.qty or 0)
+            elif line.line_completed_at is not None:
+                good[nid] = good.get(nid, 0) + line.good_qty()
+                expected[nid] = expected.get(nid, 0) + (line.expected_qty or 0)
+        for nid in set(boxed) & set(good):
+            lots = UnplacedStockLot.query.filter_by(receiving_document_id=doc.id, nomenclature_id=nid).all()
+            credited = sum(l.qty_received for l in lots) if lots else good[nid]
+            doubled = credited - max(good[nid] - boxed[nid], 0)
+            if doubled <= 0:
+                continue
+            fixed = db.session.get(AppSetting, f"rcv_dedup:{doc.id}:{nid}")
+            rows.append({
+                "doc": doc, "item": db.session.get(Nomenclature, nid), "boxed": boxed[nid],
+                "credited": credited, "expected": expected[nid], "doubled": doubled,
+                "unplaced": UnplacedStock.available(doc.warehouse_id, nid),
+                "fixed": fixed.value if fixed else None,
+            })
+    return rows
+
+
+@bp.route("/doubled", methods=["GET", "POST"])
+def doubled_receipts():
+    """Отчет «Задвоенные приемки» и списание задвоения (только админ)."""
+    if not current_user.is_admin:
+        flash("Доступно только администратору", "danger")
+        return redirect(url_for("receiving.list_documents"))
+    rows = _doubled_receipts()
+    if request.method == "POST":
+        wanted = request.form.getlist("key")
+        done = 0
+        for row in rows:
+            key = f"rcv_dedup:{row['doc'].id}:{row['item'].id}"
+            if row["fixed"] or (key not in wanted and request.form.get("all") != "1"):
+                continue
+            qty = min(row["doubled"], row["unplaced"])
+            if qty > 0:
+                UnplacedStock.consume(row["doc"].warehouse_id, row["item"].id, qty)
+            db.session.add(AppSetting(key=key, value=f"{qty:g} {datetime.utcnow():%d.%m.%Y} {current_user.username}"[:200]))
+            current_app.logger.warning(
+                "Задвоение приемки %s списано: %s, %g (пользователь %s)",
+                row["doc"].number, row["item"].name, qty, current_user.username,
+            )
+            done += 1
+        db.session.commit()
+        flash(f"Задвоение списано по {done} строкам", "success")
+        return redirect(url_for("receiving.doubled_receipts"))
+    return render_template("receiving/doubled.html", rows=rows)
 
 
 @bp.route("/<int:doc_id>/export.xlsx")

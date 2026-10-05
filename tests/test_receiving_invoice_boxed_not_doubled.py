@@ -44,3 +44,37 @@ def test_only_unboxed_rest_of_invoice_line_goes_to_unplaced(db, client_logged_in
     client_logged_in.post(f"/receiving/{doc.id}/boxes/{box.id}/lines/add", data={"nomenclature_id": item.id, "qty": "40"})
     _finish(client_logged_in, doc, item)
     assert UnplacedStock.available(wh.id, item.id) == 10
+
+
+def test_doubled_report_finds_old_receipts_and_writes_off_once(db, client_logged_in):
+    """Старая приемка (до исправления): 40 в коробе и 40 зачислено строкой
+    накладной — отчет ее находит, списание убирает 40 и второй раз не идет."""
+    from datetime import datetime
+    from wms.models import AppSetting
+    wh, item, box, doc = _setup(40)
+    line = ReceivingLine.query.filter_by(document_id=doc.id).one()
+    line.confirmed = True
+    line.line_completed_at = datetime.utcnow()
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=40, box_id=box.id))
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=40))
+    doc.status = "completed"
+    doc.completed_at = datetime.utcnow()
+    UnplacedStock.add(wh.id, item.id, 40, receiving_document=doc)
+    db.session.commit()
+
+    page = client_logged_in.get("/receiving/doubled").get_data(as_text=True)
+    assert "PR-DBL-1" in page and "кардиган синий" in page
+    client_logged_in.post("/receiving/doubled", data={"all": "1"})
+    assert UnplacedStock.available(wh.id, item.id) == 0
+    assert AppSetting.query.get(f"rcv_dedup:{doc.id}:{item.id}") is not None
+    UnplacedStock.add(wh.id, item.id, 5)
+    db.session.commit()
+    client_logged_in.post("/receiving/doubled", data={"all": "1"})
+    assert UnplacedStock.available(wh.id, item.id) == 5
+
+
+def test_doubled_report_ignores_receipts_completed_after_fix(db, client_logged_in):
+    wh, item, box, doc = _setup(50)
+    client_logged_in.post(f"/receiving/{doc.id}/boxes/{box.id}/lines/add", data={"nomenclature_id": item.id, "qty": "40"})
+    _finish(client_logged_in, doc, item)
+    assert "Задвоенных приемок не найдено" in client_logged_in.get("/receiving/doubled").get_data(as_text=True)
