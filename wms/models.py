@@ -1585,7 +1585,9 @@ class ProductionOrder(db.Model):
 
 # Направления отправки: склады маркетплейсов и фулфилменты (в поле СЦ —
 # название фулфилмента).
-MVB_MARKETPLACES = {"wb": "Wildberries", "ozon": "Ozon", "ff": "Фулфилмент"}
+MVB_MARKETPLACES = {
+    "wb": "Wildberries", "ozon": "Ozon", "lamoda": "Lamoda", "yandex": "Яндекс Маркет", "ff": "Фулфилмент",
+}
 MVB_DELIVERY_METHODS = {"pickup": "Забор транспортной компанией", "self": "Самопривоз"}
 MVB_ORDER_STATUSES = {"draft": "Черновик", "confirmed": "Оформлена", "cancelled": "Отменена"}
 # Порядок важен: короб движется только вперед по этому списку.
@@ -1783,7 +1785,7 @@ class MvbOrderLine(db.Model):
         return None
     wms_movement = db.relationship("MovementDocument")
 
-    SHORT_MARKETPLACES = {"wb": "WB", "ozon": "OZON", "ff": "ФФ"}
+    SHORT_MARKETPLACES = {"wb": "WB", "ozon": "OZON", "lamoda": "Lamoda", "yandex": "ЯМ", "ff": "ФФ"}
 
     @property
     def marketplace_label(self):

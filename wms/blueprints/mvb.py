@@ -11,6 +11,7 @@
 (кроме администраторов) — наоборот, сюда не попадают.
 """
 
+import math
 import secrets
 from datetime import date, datetime, timedelta
 
@@ -983,7 +984,11 @@ def admin_users():
             db.session.commit()
             flash(f"Пользователь «{username}» создан", "success")
         return redirect(url_for("mvb.admin_users"))
-    users = User.query.filter(User.role.in_(list(MVB_ROLES))).order_by(User.username).all()
+    # Водители заводятся и правятся только в «Водители» — здесь их нет.
+    users = (
+        User.query.filter(User.role.in_([r for r in MVB_ROLES if r != "mvb_driver"]))
+        .order_by(User.username).all()
+    )
     clients = MvbClient.query.filter_by(is_active=True).order_by(MvbClient.name).all()
     return render_template(
         "mvb/admin_users.html", users=users, clients=clients, roles=_assignable_roles(),
@@ -1176,8 +1181,8 @@ def vehicles():
     if request.method == "POST":
         vehicle_id = request.form.get("vehicle_id", type=int)
         vehicle = db.session.get(MvbVehicle, vehicle_id) if vehicle_id else MvbVehicle()
-        if vehicle is None:
-            abort(404)
+        if vehicle is None or vehicle.driver_id:
+            abort(404)  # авто штатного водителя правится в «Водители»
         plate = request.form.get("plate", "").strip().upper()
         try:
             capacity = int(request.form.get("capacity_boxes") or 0)
@@ -1186,12 +1191,10 @@ def vehicles():
         if not plate or capacity < 0:
             flash("Укажите госномер и вместимость (число коробов)", "danger")
             return redirect(url_for("mvb.vehicles"))
-        driver_id = request.form.get("driver_id", type=int)
         vehicle.plate = plate
         vehicle.model = request.form.get("model", "").strip() or None
         vehicle.carrier = request.form.get("carrier", "").strip() or None
         vehicle.capacity_boxes = capacity
-        vehicle.driver_id = driver_id or None
         if vehicle_id:
             vehicle.is_active = request.form.get("is_active") == "1"
         db.session.add(vehicle)
@@ -1200,8 +1203,8 @@ def vehicles():
         return redirect(url_for("mvb.vehicles"))
     return render_template(
         "mvb/vehicles.html",
-        vehicles=MvbVehicle.query.order_by(MvbVehicle.is_active.desc(), MvbVehicle.plate).all(),
-        drivers=_active_drivers(),
+        vehicles=MvbVehicle.query.filter(MvbVehicle.driver_id.is_(None))
+        .order_by(MvbVehicle.is_active.desc(), MvbVehicle.plate).all(),
     )
 
 
@@ -1360,6 +1363,9 @@ def pallet_scan(pallet_id):
     if box.pallet_id == pallet.id:
         return jsonify(ok=True, already=True, message=f"{box.barcode} уже на этой паллете", count=len(pallet.boxes),
                        barcode=box.barcode)
+    limit = _pallet_setting(MVB_PALLET_MAX_KEY, MVB_PALLET_MAX_DEFAULT)
+    if limit and len(pallet.boxes) >= limit:
+        return jsonify(ok=False, message=f"Паллета {pallet.number} заполнена: максимум {limit:g} кор. Начните новую паллету"), 409
     moved_from = box.pallet.number if box.pallet else None
     affected = _orders_on_pallets([box.pallet_id, pallet.id]) | {box.order}
     box.pallet = pallet
@@ -1371,15 +1377,23 @@ def pallet_scan(pallet_id):
 
 MVB_PALLET_PRICE_KEY = "mvb_pallet_price"
 MVB_PALLET_PRICE_DEFAULT = 500.0
+MVB_PALLET_MIN_KEY = "mvb_pallet_min_boxes"
+MVB_PALLET_MIN_DEFAULT = 10
+MVB_PALLET_MAX_KEY = "mvb_pallet_max_boxes"
+MVB_PALLET_MAX_DEFAULT = 20
+
+
+def _pallet_setting(key, default):
+    setting = db.session.get(AppSetting, key)
+    try:
+        return float(setting.value) if setting and setting.value not in (None, "") else default
+    except ValueError:
+        return default
 
 
 def _pallet_price():
     """Цена палетирования одной паллеты (настраивается в «Прайсе»)."""
-    setting = db.session.get(AppSetting, MVB_PALLET_PRICE_KEY)
-    try:
-        return float(setting.value) if setting and setting.value not in (None, "") else MVB_PALLET_PRICE_DEFAULT
-    except ValueError:
-        return MVB_PALLET_PRICE_DEFAULT
+    return _pallet_setting(MVB_PALLET_PRICE_KEY, MVB_PALLET_PRICE_DEFAULT)
 
 
 def _orders_on_pallets(pallet_ids):
@@ -1390,27 +1404,27 @@ def _orders_on_pallets(pallet_ids):
 
 
 def _recalc_pallet_costs(orders):
-    """Палетирование заявки: по каждой паллете с ее коробами — цена паллеты
-    × (короба заявки на паллете / все короба на паллете). Паллета одного
-    клиента целиком ложится на него, сборная — делится по долям."""
+    """Палетирование заявки: выставляется, только если на паллетах от
+    MVB_PALLET_MIN (10) коробов заявки; цена паллеты × число полных паллет
+    по MVB_PALLET_MAX (20) коробов, остаток — тоже паллета. Меньше 10
+    коробов — палетирование клиенту не выставляется."""
     db.session.flush()
     price = _pallet_price()
-    totals = {}
+    min_boxes = _pallet_setting(MVB_PALLET_MIN_KEY, MVB_PALLET_MIN_DEFAULT)
+    max_boxes = _pallet_setting(MVB_PALLET_MAX_KEY, MVB_PALLET_MAX_DEFAULT) or 1
     for order in orders:
         if order is None:
             continue
         if order.client and order.client.is_internal:
             order.pallet_cost = None
             continue
-        mine = {}
-        for box in MvbBox.query.filter(MvbBox.order_id == order.id, MvbBox.pallet_id.isnot(None)).all():
-            mine[box.pallet_id] = mine.get(box.pallet_id, 0) + 1
-        cost = 0.0
-        for pallet_id, count in mine.items():
-            if pallet_id not in totals:
-                totals[pallet_id] = MvbBox.query.filter_by(pallet_id=pallet_id).count()
-            cost += price * count / totals[pallet_id]
-        order.pallet_cost = round(cost, 2) if mine else None
+        count = MvbBox.query.filter(MvbBox.order_id == order.id, MvbBox.pallet_id.isnot(None)).count()
+        if not count:
+            order.pallet_cost = None
+        elif count < min_boxes:
+            order.pallet_cost = 0.0
+        else:
+            order.pallet_cost = round(price * math.ceil(count / max_boxes), 2)
 
 
 @bp.route("/pallets/<int:pallet_id>/remove/<int:box_id>", methods=["POST"])
@@ -2453,14 +2467,19 @@ def prices():
                 value = _parse_money(request.form.get("pallet_price"))
             except ValueError:
                 value = None
+            min_boxes = request.form.get("pallet_min", type=int)
+            max_boxes = request.form.get("pallet_max", type=int)
             if value is None:
                 flash("Укажите цену палетирования", "danger")
+            elif not min_boxes or not max_boxes or min_boxes < 1 or max_boxes < min_boxes:
+                flash("Укажите порог и максимум коробов на паллете (максимум не меньше порога)", "danger")
             else:
-                setting = db.session.get(AppSetting, MVB_PALLET_PRICE_KEY) or AppSetting(key=MVB_PALLET_PRICE_KEY)
-                setting.value = f"{value:g}"
-                db.session.add(setting)
+                for key, val in ((MVB_PALLET_PRICE_KEY, value), (MVB_PALLET_MIN_KEY, min_boxes), (MVB_PALLET_MAX_KEY, max_boxes)):
+                    setting = db.session.get(AppSetting, key) or AppSetting(key=key)
+                    setting.value = f"{val:g}"
+                    db.session.add(setting)
                 db.session.commit()
-                flash(f"Палетирование — {value:g} руб. за паллету (для новых сборов паллет)", "success")
+                flash(f"Палетирование — {value:g} руб. за паллету до {max_boxes} кор., клиенту от {min_boxes} кор. (для новых сборов паллет)", "success")
             return redirect(url_for("mvb.prices"))
         if action == "delete":
             tier = db.session.get(MvbPriceTier, request.form.get("tier_id", type=int)) or abort(404)
@@ -2511,7 +2530,9 @@ def prices():
     }
     return render_template(
         "mvb/prices.html", tiers=tiers, kinds=MVB_PRICE_KINDS, destinations=destinations, cities=cities,
-        city_tiers=city_tiers, pallet_price=_pallet_price(), zones=MvbPickupZone.query.order_by(MvbPickupZone.is_active.desc(), MvbPickupZone.price).all(),
+        city_tiers=city_tiers, pallet_price=_pallet_price(),
+        pallet_min=_pallet_setting(MVB_PALLET_MIN_KEY, MVB_PALLET_MIN_DEFAULT),
+        pallet_max=_pallet_setting(MVB_PALLET_MAX_KEY, MVB_PALLET_MAX_DEFAULT), zones=MvbPickupZone.query.order_by(MvbPickupZone.is_active.desc(), MvbPickupZone.price).all(),
     )
 
 

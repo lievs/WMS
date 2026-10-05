@@ -41,7 +41,7 @@
 {% else %}
 <p class="text-muted">Водителей пока нет.</p>
 {% endfor %}
-<p class="small text-muted mt-3">Машины без водителя (наёмные рейсы на СЦ): <a href="{{ url_for('mvb.vehicles') }}">Транспорт</a>{% if free_vehicles %} · {{ free_vehicles }} шт.{% endif %}.</p>
+<p class="small text-muted mt-3">Наёмные машины без водителя для рейсов на СЦ: <a href="{{ url_for('mvb.vehicles') }}">«Машины для СЦ»</a>{% if free_vehicles %} · {{ free_vehicles }} шт.{% endif %}.</p>
 {% endblock %}
 {% block scripts %}
 <script>
