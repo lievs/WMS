@@ -114,3 +114,23 @@ def test_doubled_report_ignores_receipts_completed_after_fix(db, client_logged_i
     client_logged_in.post(f"/receiving/{doc.id}/boxes/{box.id}/lines/add", data={"nomenclature_id": item.id, "qty": "40"})
     _finish(client_logged_in, doc, item)
     assert "Явных задвоений не найдено" in client_logged_in.get("/receiving/doubled").get_data(as_text=True)
+
+
+def test_doubled_report_survives_old_rows_without_dates(db, client_logged_in):
+    """Партии без даты и удаленный товар не роняют отчет."""
+    from datetime import datetime
+    from wms.models import UnplacedStockLot
+    wh = Warehouse(code="WH-D4", name="Склад")
+    item = Nomenclature(sku="k4", barcode="2056700000097", name="шарф", unit="шт")
+    db.session.add_all([wh, item])
+    db.session.flush()
+    box_doc = _box_receipt(wh, item, "PR-BOX4", 10, datetime(2026, 9, 1, 10))
+    inv_doc = _invoice_credit(wh, item, "PR-INV4", 10, datetime(2026, 9, 2, 10))
+    db.session.commit()
+    try:
+        db.session.execute(db.text("UPDATE unplaced_stock_lots SET received_at = NULL"))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+    db.session.expire_all()
+    assert client_logged_in.get("/receiving/doubled").status_code == 200

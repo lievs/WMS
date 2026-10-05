@@ -1512,7 +1512,7 @@ def _doubled_receipts():
         events.setdefault(key, []).append((when or datetime.min, kind, qty, ref))
 
     for lot in UnplacedStockLot.query.all():
-        add((lot.warehouse_id, lot.nomenclature_id), lot.received_at, lot.qty_received, "credit", lot)
+        add((lot.warehouse_id, lot.nomenclature_id), lot.received_at, lot.qty_received or 0, "credit", lot)
 
     for doc in ReceivingDocument.query.all():
         lines = list(doc.lines)
@@ -1533,12 +1533,12 @@ def _doubled_receipts():
                 )
                 qty -= min(max(good[nid] - credited, 0), qty)
             if qty > 0:
-                add((doc.warehouse_id, nid), doc.created_at, qty, "box", doc)
+                add((doc.warehouse_id, nid), doc.created_at or doc.completed_at, qty, "box", doc)
 
     for line in PlacementLine.query.all():
         pdoc = line.document
         if pdoc is not None:
-            add((pdoc.warehouse_id, line.nomenclature_id), pdoc.created_at, line.qty, "place", pdoc)
+            add((pdoc.warehouse_id, line.nomenclature_id), pdoc.created_at or pdoc.completed_at, line.qty or 0, "place", pdoc)
 
     pairs = {}
     for (warehouse_id, nid), items in events.items():
@@ -1583,16 +1583,21 @@ def _doubled_receipts():
     for (box_doc_id, credit_doc_id, nid), qty in pairs.items():
         box_doc = db.session.get(ReceivingDocument, box_doc_id)
         credit_doc = db.session.get(ReceivingDocument, credit_doc_id)
+        item = db.session.get(Nomenclature, nid)
+        if box_doc is None or credit_doc is None or item is None:
+            continue  # документ или товар удалены — показывать нечего
         fixed = db.session.get(AppSetting, f"rcv_dbl:{box_doc_id}:{credit_doc_id}:{nid}")
         rows.append({
             "key": f"rcv_dbl:{box_doc_id}:{credit_doc_id}:{nid}",
-            "box_doc": box_doc, "credit_doc": credit_doc, "item": db.session.get(Nomenclature, nid),
+            "box_doc": box_doc, "credit_doc": credit_doc, "item": item,
             "warehouse": box_doc.warehouse, "doubled": round(qty, 3),
             "box_qty": sum(l.qty or 0 for l in box_doc.lines if l.box_id and l.nomenclature_id == nid),
             "unplaced": UnplacedStock.available(box_doc.warehouse_id, nid),
             "fixed": fixed.value if fixed else None,
         })
-    rows.sort(key=lambda r: (r["fixed"] is not None, -(r["box_doc"].created_at or datetime.min).timestamp()))
+    # Старые документы могут быть без даты создания (колонку добавили позже).
+    rows.sort(key=lambda r: r["box_doc"].created_at or r["box_doc"].completed_at or datetime.min, reverse=True)
+    rows.sort(key=lambda r: r["fixed"] is not None)
     return rows
 
 
@@ -1602,7 +1607,12 @@ def doubled_receipts():
     if not current_user.is_admin:
         flash("Доступно только администратору", "danger")
         return redirect(url_for("receiving.list_documents"))
-    rows = _doubled_receipts()
+    try:
+        rows = _doubled_receipts()
+    except Exception as exc:  # noqa: BLE001 — отчет по старым данным не должен ронять страницу
+        current_app.logger.exception("Отчет «Задвоенные приемки» не построился")
+        flash(f"Отчет не построился: {type(exc).__name__}: {exc}. Пришлите этот текст разработчику.", "danger")
+        return redirect(url_for("receiving.list_documents"))
     if request.method == "POST":
         wanted = set(request.form.getlist("key"))
         done = 0
