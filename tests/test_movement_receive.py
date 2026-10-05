@@ -234,7 +234,7 @@ def test_admin_returns_received_movement_to_work_and_receives_again(db, client_l
     doc = MovementDocument.query.get(doc.id)
     assert doc.received_at is None and doc.received_qty_snapshot is None
     assert MovementReceiptDiscrepancy.query.filter_by(document_id=doc.id).count() == 0
-    assert BoxItem.query.filter_by(nomenclature_id=item.id).one().qty == 10  # недовоз вернулся в короб
+    assert BoxItem.query.filter_by(nomenclature_id=item.id).one().qty == 10  # короба приемка не трогала
     assert ShipmentPlanLine.query.get(plan_line.id).fulfilled_qty == 0
 
     client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "10"})
@@ -244,24 +244,44 @@ def test_admin_returns_received_movement_to_work_and_receives_again(db, client_l
     assert MovementReceiptDiscrepancy.query.filter_by(document_id=doc.id).count() == 0
 
 
-def test_list_shows_sent_and_actually_received_in_brackets(db, client_logged_in):
-    """Отправлено 10, принято 7: «10 (7)»; без снимка (старые документы)
-    недовоз не вычитается дважды; правка короба после приемки учитывается."""
+def test_receipt_keeps_boxes_and_shows_actually_received(db, client_logged_in):
+    """Приемка короба не трогает: отправлено 10, принято 7 → «10 (7)», в
+    коробе по-прежнему 10; излишек не идет в неразмещенный остаток."""
+    from wms.models import UnplacedStock
     doc, item, _ = _make_completed_document(qty=10)
     client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "7"})
     db.session.expire_all()
     doc = MovementDocument.query.get(doc.id)
+    assert BoxItem.query.filter_by(nomenclature_id=item.id).one().qty == 10
     assert (doc.total_sent_qty(), doc.total_received_qty()) == (10, 7)
     doc.received_qty_snapshot = None
     db.session.commit()
     assert MovementDocument.query.get(doc.id).total_received_qty() == 7
     page = client_logged_in.get("/movement/").get_data(as_text=True)
     assert 'title="Фактически принято на маркетплейсе">(7)</span>' in page
+    assert UnplacedStock.query.count() == 0
 
 
-def test_excess_shown_in_brackets(db, client_logged_in):
+def test_excess_shown_in_brackets_without_unplaced_stock(db, client_logged_in):
+    from wms.models import UnplacedStock
     doc, item, _ = _make_completed_document(qty=10)
     client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "12"})
     db.session.expire_all()
     doc = MovementDocument.query.get(doc.id)
     assert (doc.total_sent_qty(), doc.total_received_qty()) == (10, 12)
+    assert BoxItem.query.filter_by(nomenclature_id=item.id).one().qty == 10
+    assert UnplacedStock.query.count() == 0
+
+
+def test_old_receipt_that_reduced_boxes_still_shows_right_numbers(db, client_logged_in):
+    """Старая приемка (до изменения) списала недовоз из коробов: 10 → 7.
+    Показываем «10 (7)», а не «7 (4)»."""
+    from datetime import datetime
+    doc, item, _ = _make_completed_document(qty=10)
+    BoxItem.query.filter_by(nomenclature_id=item.id).one().qty = 7
+    doc.received_at = datetime.utcnow()
+    db.session.add(MovementReceiptDiscrepancy(document_id=doc.id, nomenclature_id=item.id, expected_qty=10, received_qty=7))
+    db.session.commit()
+    doc = MovementDocument.query.get(doc.id)
+    assert doc.receipt_changed_boxes is None
+    assert (doc.total_sent_qty(), doc.total_received_qty()) == (10, 7)
