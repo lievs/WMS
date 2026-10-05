@@ -222,3 +222,23 @@ def test_marking_marketplace_request_unblocks_receive(db, client_logged_in):
     )
     assert resp.status_code == 200
     assert MovementDocument.query.get(doc.id).received_at is not None
+
+
+def test_admin_returns_received_movement_to_work_and_receives_again(db, client_logged_in):
+    doc, item, plan_line = _make_completed_document(qty=10)
+    client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "7"})
+    assert "Вернуть в работу" in client_logged_in.get(f"/movement/{doc.id}").get_data(as_text=True)
+
+    client_logged_in.post(f"/movement/{doc.id}/unreceive")
+    db.session.expire_all()
+    doc = MovementDocument.query.get(doc.id)
+    assert doc.received_at is None and doc.received_qty_snapshot is None
+    assert MovementReceiptDiscrepancy.query.filter_by(document_id=doc.id).count() == 0
+    assert BoxItem.query.filter_by(nomenclature_id=item.id).one().qty == 10  # недовоз вернулся в короб
+    assert ShipmentPlanLine.query.get(plan_line.id).fulfilled_qty == 0
+
+    client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "10"})
+    db.session.expire_all()
+    assert MovementDocument.query.get(doc.id).received_at is not None
+    assert ShipmentPlanLine.query.get(plan_line.id).fulfilled_qty == 10
+    assert MovementReceiptDiscrepancy.query.filter_by(document_id=doc.id).count() == 0

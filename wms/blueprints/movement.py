@@ -1,6 +1,6 @@
 from datetime import date, datetime, timedelta
 
-from flask import Blueprint, Response, abort, flash, jsonify, redirect, render_template, request, url_for
+from flask import Blueprint, Response, abort, current_app, flash, jsonify, redirect, render_template, request, url_for
 from flask_login import current_user
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
@@ -1365,6 +1365,33 @@ def _revert_document_receipt(doc):
                 discrepancy.nomenclature_id,
                 discrepancy.excess_qty(),
             )
+
+
+@bp.route("/<int:doc_id>/unreceive", methods=["POST"])
+def unreceive(doc_id):
+    """Администратор возвращает «Принято на складе» в работу, чтобы
+    поправить принятое количество: откатывается учет приемки (недовоз
+    возвращается в короба, излишек снимается с неразмещенного остатка,
+    выполнение плана отгрузок уменьшается), расхождения удаляются. После
+    этого кнопка «Принято на складе» снова доступна."""
+    if not current_user.is_admin:
+        flash("Вернуть приемку в работу может только администратор", "danger")
+        return redirect(url_for("movement.detail", doc_id=doc_id))
+    doc = MovementDocument.query.get_or_404(doc_id)
+    if doc.received_at is None:
+        flash("Перемещение еще не принято на складе", "danger")
+        return redirect(url_for("movement.detail", doc_id=doc.id))
+    _revert_document_receipt(doc)
+    for discrepancy in list(doc.discrepancies):
+        db.session.delete(discrepancy)
+    doc.received_at = None
+    doc.received_qty_snapshot = None
+    if doc.synced_to_1c_at is not None:
+        doc.composition_changed_at = datetime.utcnow()
+    db.session.commit()
+    current_app.logger.warning("Приемка перемещения %s возвращена в работу (%s)", doc.number, current_user.username)
+    flash(f"Приемка перемещения {doc.number} возвращена в работу — поправьте и снова нажмите «Принято на складе»", "success")
+    return redirect(url_for("movement.detail", doc_id=doc.id))
 
 
 @bp.route("/<int:doc_id>/receive", methods=["GET", "POST"])
