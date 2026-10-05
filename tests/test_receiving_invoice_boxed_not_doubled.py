@@ -46,35 +46,71 @@ def test_only_unboxed_rest_of_invoice_line_goes_to_unplaced(db, client_logged_in
     assert UnplacedStock.available(wh.id, item.id) == 10
 
 
-def test_doubled_report_finds_old_receipts_and_writes_off_once(db, client_logged_in):
-    """Старая приемка (до исправления): 40 в коробе и 40 зачислено строкой
-    накладной — отчет ее находит, списание убирает 40 и второй раз не идет."""
+def _box_receipt(wh, item, number, qty, when):
+    from wms.models import Box
+    box = Box(box_number=f"BOX-{number}", warehouse_id=wh.id)
+    doc = ReceivingDocument(number=number, warehouse_id=wh.id, status="completed", created_at=when, completed_at=when)
+    db.session.add_all([box, doc])
+    db.session.flush()
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=qty, box_id=box.id))
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=qty))
+    return doc
+
+
+def _invoice_credit(wh, item, number, qty, when):
+    from wms.models import UnplacedStockLot
+    doc = ReceivingDocument(number=number, warehouse_id=wh.id, invoice_file_name="н.xlsx", status="completed",
+                            created_at=when, completed_at=when, supplier="ООО Пряжа")
+    db.session.add(doc)
+    db.session.flush()
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=qty, expected_qty=qty,
+                                 confirmed=True, line_completed_at=when))
+    UnplacedStock.add(wh.id, item.id, qty, receiving_document=doc)
+    UnplacedStockLot.query.filter_by(receiving_document_id=doc.id).one().received_at = when
+    return doc
+
+
+def test_boxed_before_invoice_receipt_is_explicit_double(db, client_logged_in):
+    """Короба приняли (40) раньше, чем завели приемку накладной на тот же
+    товар (+40 неразмещенных): остаток ушел бы в минус −40, зачисление его
+    закрыло — 40 задвоено. Списание один раз."""
     from datetime import datetime
     from wms.models import AppSetting
-    wh, item, box, doc = _setup(40)
-    line = ReceivingLine.query.filter_by(document_id=doc.id).one()
-    line.confirmed = True
-    line.line_completed_at = datetime.utcnow()
-    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=40, box_id=box.id))
-    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=40))
-    doc.status = "completed"
-    doc.completed_at = datetime.utcnow()
-    UnplacedStock.add(wh.id, item.id, 40, receiving_document=doc)
+    wh = Warehouse(code="WH-D2", name="Склад №2 (Шоссейная 167)")
+    item = Nomenclature(sku="k2", barcode="2056700000099", name="кардиган ласковый синий", unit="шт")
+    db.session.add_all([wh, item])
+    db.session.flush()
+    box_doc = _box_receipt(wh, item, "PR-BOX", 40, datetime(2026, 9, 1, 10))
+    inv_doc = _invoice_credit(wh, item, "PR-INV", 40, datetime(2026, 9, 3, 10))
     db.session.commit()
 
     page = client_logged_in.get("/receiving/doubled").get_data(as_text=True)
-    assert "PR-DBL-1" in page and "кардиган синий" in page
+    assert "PR-BOX" in page and "PR-INV" in page
     client_logged_in.post("/receiving/doubled", data={"all": "1"})
     assert UnplacedStock.available(wh.id, item.id) == 0
-    assert AppSetting.query.get(f"rcv_dedup:{doc.id}:{item.id}") is not None
+    assert AppSetting.query.get(f"rcv_dbl:{box_doc.id}:{inv_doc.id}:{item.id}") is not None
     UnplacedStock.add(wh.id, item.id, 5)
     db.session.commit()
     client_logged_in.post("/receiving/doubled", data={"all": "1"})
     assert UnplacedStock.available(wh.id, item.id) == 5
 
 
+def test_box_receipt_with_stock_available_or_credit_before_is_not_double(db, client_logged_in):
+    """Накладную зачислили раньше (+40), потом приняли в короб 40 — остаток
+    был, в минус не ушли: задвоения нет."""
+    from datetime import datetime
+    wh = Warehouse(code="WH-D3", name="Склад")
+    item = Nomenclature(sku="k3", barcode="2056700000098", name="шапка", unit="шт")
+    db.session.add_all([wh, item])
+    db.session.flush()
+    _invoice_credit(wh, item, "PR-INV3", 40, datetime(2026, 9, 1, 10))
+    _box_receipt(wh, item, "PR-BOX3", 40, datetime(2026, 9, 2, 10))
+    db.session.commit()
+    assert "Явных задвоений не найдено" in client_logged_in.get("/receiving/doubled").get_data(as_text=True)
+
+
 def test_doubled_report_ignores_receipts_completed_after_fix(db, client_logged_in):
     wh, item, box, doc = _setup(50)
     client_logged_in.post(f"/receiving/{doc.id}/boxes/{box.id}/lines/add", data={"nomenclature_id": item.id, "qty": "40"})
     _finish(client_logged_in, doc, item)
-    assert "Задвоенных приемок не найдено" in client_logged_in.get("/receiving/doubled").get_data(as_text=True)
+    assert "Явных задвоений не найдено" in client_logged_in.get("/receiving/doubled").get_data(as_text=True)

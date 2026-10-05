@@ -23,6 +23,7 @@ from ..models import (
     Box,
     BoxItem,
     Nomenclature,
+    PlacementLine,
     ReceivingDocument,
     ReceivingLine,
     Supplier,
@@ -1495,39 +1496,103 @@ def revert_to_sorting(doc_id):
 
 
 def _doubled_receipts():
-    """Завершенные приемки, где товар упаковали в короба прямо в приемке и
-    одновременно зачислили строкой накладной в неразмещенный остаток (до
-    исправления _unboxed_credit_qty). Задвоено = зачислено − (годное по
-    строкам накладной − упаковано), не меньше 0. Уже исправленные отмечены
-    в AppSetting «rcv_dedup:<док>:<товар>»."""
-    rows = []
-    docs = (
-        ReceivingDocument.query.filter(ReceivingDocument.status == "completed")
-        .order_by(ReceivingDocument.completed_at.desc()).all()
-    )
-    for doc in docs:
+    """Явные задвоения неразмещенного остатка. По каждому товару и складу
+    проигрываем историю по времени, разрешая остатку уходить в минус:
+      + партия неразмещенного остатка (зачисление приемки, излишек и т.п.);
+      − приемка сразу в короб (время — создание документа приемки);
+      − размещение из неразмещенного в короба (время — создание документа).
+    Приемка в короб, когда неразмещенного остатка не было, уводит остаток в
+    минус; если потом этот минус закрывает зачисление другой (или той же)
+    приемки — это те же единицы, посчитанные второй раз: явное задвоение.
+    Приемки, где упакованное уже вычтено при завершении (после
+    исправления), учитываются без двойного вычета."""
+    events = {}
+
+    def add(key, when, qty, kind, ref):
+        events.setdefault(key, []).append((when or datetime.min, kind, qty, ref))
+
+    for lot in UnplacedStockLot.query.all():
+        add((lot.warehouse_id, lot.nomenclature_id), lot.received_at, lot.qty_received, "credit", lot)
+
+    for doc in ReceivingDocument.query.all():
         lines = list(doc.lines)
-        boxed, good, expected = {}, {}, {}
+        boxed, good = {}, {}
         for line in lines:
-            nid = line.nomenclature_id
             if line.box_id:
-                boxed[nid] = boxed.get(nid, 0) + (line.qty or 0)
+                boxed[line.nomenclature_id] = boxed.get(line.nomenclature_id, 0) + (line.qty or 0)
             elif line.line_completed_at is not None:
-                good[nid] = good.get(nid, 0) + line.good_qty()
-                expected[nid] = expected.get(nid, 0) + (line.expected_qty or 0)
-        for nid in set(boxed) & set(good):
-            lots = UnplacedStockLot.query.filter_by(receiving_document_id=doc.id, nomenclature_id=nid).all()
-            credited = sum(l.qty_received for l in lots) if lots else good[nid]
-            doubled = credited - max(good[nid] - boxed[nid], 0)
-            if doubled <= 0:
-                continue
-            fixed = db.session.get(AppSetting, f"rcv_dedup:{doc.id}:{nid}")
-            rows.append({
-                "doc": doc, "item": db.session.get(Nomenclature, nid), "boxed": boxed[nid],
-                "credited": credited, "expected": expected[nid], "doubled": doubled,
-                "unplaced": UnplacedStock.available(doc.warehouse_id, nid),
-                "fixed": fixed.value if fixed else None,
-            })
+                good[line.nomenclature_id] = good.get(line.nomenclature_id, 0) + line.good_qty()
+        for nid, qty in boxed.items():
+            # Упакованное, которое приемка сама уже вычла из зачисления строки
+            # накладной (после исправления), повторно не вычитаем.
+            if nid in good:
+                credited = sum(
+                    l.qty_received for l in UnplacedStockLot.query.filter_by(
+                        receiving_document_id=doc.id, nomenclature_id=nid
+                    )
+                )
+                qty -= min(max(good[nid] - credited, 0), qty)
+            if qty > 0:
+                add((doc.warehouse_id, nid), doc.created_at, qty, "box", doc)
+
+    for line in PlacementLine.query.all():
+        pdoc = line.document
+        if pdoc is not None:
+            add((pdoc.warehouse_id, line.nomenclature_id), pdoc.created_at, line.qty, "place", pdoc)
+
+    pairs = {}
+    for (warehouse_id, nid), items in events.items():
+        if not any(kind == "box" for _, kind, _, _ in items):
+            continue
+        # При равном времени сначала списания, потом зачисления.
+        items.sort(key=lambda e: (e[0], 0 if e[1] != "credit" else 1))
+        balance = 0.0
+        holes = []  # [кол-во в минусе, документ приемки в короб]
+        for when, kind, qty, ref in items:
+            if kind == "credit":
+                if balance < 0 and ref.receiving_document_id:
+                    cover = qty
+                    while cover > 0 and holes:
+                        take = min(holes[0][0], cover)
+                        key = (holes[0][1].id, ref.receiving_document_id, nid)
+                        pairs[key] = pairs.get(key, 0) + take
+                        holes[0][0] -= take
+                        cover -= take
+                        if holes[0][0] <= 0:
+                            holes.pop(0)
+                elif balance < 0:
+                    # Зачисление без приемки (излишек и т.п.) тоже закрывает минус,
+                    # но задвоением приемки не считается.
+                    cover = qty
+                    while cover > 0 and holes:
+                        take = min(holes[0][0], cover)
+                        holes[0][0] -= take
+                        cover -= take
+                        if holes[0][0] <= 0:
+                            holes.pop(0)
+                balance += qty
+            elif kind == "box":
+                shortfall = qty - max(balance, 0)
+                if shortfall > 0:
+                    holes.append([shortfall, ref])
+                balance -= qty
+            else:
+                balance -= qty
+
+    rows = []
+    for (box_doc_id, credit_doc_id, nid), qty in pairs.items():
+        box_doc = db.session.get(ReceivingDocument, box_doc_id)
+        credit_doc = db.session.get(ReceivingDocument, credit_doc_id)
+        fixed = db.session.get(AppSetting, f"rcv_dbl:{box_doc_id}:{credit_doc_id}:{nid}")
+        rows.append({
+            "key": f"rcv_dbl:{box_doc_id}:{credit_doc_id}:{nid}",
+            "box_doc": box_doc, "credit_doc": credit_doc, "item": db.session.get(Nomenclature, nid),
+            "warehouse": box_doc.warehouse, "doubled": round(qty, 3),
+            "box_qty": sum(l.qty or 0 for l in box_doc.lines if l.box_id and l.nomenclature_id == nid),
+            "unplaced": UnplacedStock.available(box_doc.warehouse_id, nid),
+            "fixed": fixed.value if fixed else None,
+        })
+    rows.sort(key=lambda r: (r["fixed"] is not None, -(r["box_doc"].created_at or datetime.min).timestamp()))
     return rows
 
 
@@ -1539,19 +1604,18 @@ def doubled_receipts():
         return redirect(url_for("receiving.list_documents"))
     rows = _doubled_receipts()
     if request.method == "POST":
-        wanted = request.form.getlist("key")
+        wanted = set(request.form.getlist("key"))
         done = 0
         for row in rows:
-            key = f"rcv_dedup:{row['doc'].id}:{row['item'].id}"
-            if row["fixed"] or (key not in wanted and request.form.get("all") != "1"):
+            if row["fixed"] or (row["key"] not in wanted and request.form.get("all") != "1"):
                 continue
-            qty = min(row["doubled"], row["unplaced"])
+            qty = min(row["doubled"], UnplacedStock.available(row["warehouse"].id, row["item"].id))
             if qty > 0:
-                UnplacedStock.consume(row["doc"].warehouse_id, row["item"].id, qty)
-            db.session.add(AppSetting(key=key, value=f"{qty:g} {datetime.utcnow():%d.%m.%Y} {current_user.username}"[:200]))
+                UnplacedStock.consume(row["warehouse"].id, row["item"].id, qty)
+            db.session.add(AppSetting(key=row["key"], value=f"{qty:g} {datetime.utcnow():%d.%m.%Y} {current_user.username}"[:200]))
             current_app.logger.warning(
-                "Задвоение приемки %s списано: %s, %g (пользователь %s)",
-                row["doc"].number, row["item"].name, qty, current_user.username,
+                "Задвоение списано: короба %s, зачисление %s, %s, %g (пользователь %s)",
+                row["box_doc"].number, row["credit_doc"].number, row["item"].name, qty, current_user.username,
             )
             done += 1
         db.session.commit()
