@@ -46,7 +46,17 @@
   <b>Google Таблица:</b> данные обновляются только вручную — кнопкой в таблице или кнопкой выше.
   {% if google_sync.last_sync_at %}Последнее успешное обновление: {{ google_sync.last_sync_at }}.{% endif %}
   {% if google_sync.last_error %}<br>Ошибка: {{ google_sync.last_error }}{% endif %}
+  {% if google_sync.sheet_names %}
+  <br><span class="small text-muted">Листы с «Распределение», найденные в таблице при последней синхронизации: {{ google_sync.sheet_names }}</span>
+  {% endif %}
 </div>
+{% if google_sync.missing_marketplaces %}
+<div class="alert alert-danger py-2">
+  ⚠ На последней синхронизации НЕ найден подходящий лист «Распределение» для: <b>{{ google_sync.missing_marketplaces }}</b> —
+  план(ы) этой площадки остались прежними (не обновились). Проверьте название листа в Google Таблице — скорее всего,
+  его переименовали, удалили или в имени нет нужного маркера площадки («озон»/«вб»).
+</div>
+{% endif %}
 {% endif %}
 
 {% if summary.in_transit_by_marketplace %}

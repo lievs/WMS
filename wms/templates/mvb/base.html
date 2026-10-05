@@ -27,7 +27,6 @@
         {% if mvb_is_operator %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.admin_clients') }}">Клиенты{% if mvb_pending_clients %} <span class="badge bg-warning text-dark" title="Новые регистрации">{{ mvb_pending_clients }}</span>{% endif %}</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.orders') }}">Заявки в работе</a></li>
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.wms_movements') }}">Из WMS</a></li>
         {% endif %}
         {% if mvb_is_driver %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.driver') }}">Заявки на забор</a></li>

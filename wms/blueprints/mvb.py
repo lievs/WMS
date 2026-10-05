@@ -299,9 +299,14 @@ def orders():
     items = query.order_by(MvbOrder.created_at.desc()).limit(300).all()
     clients = [] if _is_client() else MvbClient.query.order_by(MvbClient.name).all()
     need_driver = 0 if _is_client() else MvbOrder.query.filter(*need_driver_filter).count()
+    # Раздел "Из WMS" был отдельной страницей — теперь кандидаты на передачу в
+    # МВБ показываются прямо здесь, в "Заявках в работе" (см. чат), отдельная
+    # страница/пункт меню убраны.
+    wms_rows = _wms_candidate_rows() if _is_operator() else []
     return render_template(
         "mvb/orders.html", orders=items, clients=clients, status=status, client_id=client_id,
         need_driver=need_driver, drivers=_active_drivers() if _is_staff() else [],
+        wms_rows=wms_rows,
     )
 
 
@@ -2311,21 +2316,28 @@ def _sync_wms_shipped(orders, now):
                 doc.shipped_at = now
 
 
-@bp.route("/wms")
-def wms_movements():
-    if not _require_operator():
-        return redirect(url_for("mvb.index"))
+def _wms_candidate_rows():
     from ..models import MovementDocument
 
     docs = _wms_candidates_query().order_by(MovementDocument.completed_at.desc()).limit(300).all()
-    rows = []
-    for doc in docs:
-        rows.append({
+    return [
+        {
             "doc": doc,
             "boxes": len({line.box_id for line in doc.lines}),
             "order": _active_order_for_movement(doc.id),
-        })
-    return render_template("mvb/wms.html", rows=rows)
+        }
+        for doc in docs
+    ]
+
+
+@bp.route("/wms")
+def wms_movements():
+    """Отдельная страница не используется из меню (раздел перенесен в
+    "Заявки в работе", см. чат) — маршрут оставлен для прямых ссылок и
+    совместимости."""
+    if not _require_operator():
+        return redirect(url_for("mvb.index"))
+    return render_template("mvb/wms.html", rows=_wms_candidate_rows())
 
 
 @bp.route("/wms/import", methods=["POST"])
@@ -2696,6 +2708,44 @@ def _report_rows(date_from, date_to):
     return result, totals, order_rows
 
 
+def _driver_report_rows(date_from, date_to):
+    """Отчет по водителям за период (по дате скана забора picked_up_at, по
+    Москве): кто из водителей сколько коробов забрал и по каким заявкам
+    (см. чат)."""
+    from datetime import time
+
+    start = datetime.combine(date_from, time.min) - MOSCOW_OFFSET
+    end = datetime.combine(date_to, time.max) - MOSCOW_OFFSET
+
+    boxes = (
+        MvbBox.query.join(MvbOrder)
+        .filter(MvbBox.picked_up_at.isnot(None), MvbBox.picked_up_at >= start, MvbBox.picked_up_at <= end)
+        .all()
+    )
+    drivers = {u.id: u for u in User.query.filter(User.id.in_({b.picked_up_by_id for b in boxes if b.picked_up_by_id}))}
+
+    order_rows = {}
+    for box in boxes:
+        key = (box.picked_up_by_id, box.order_id)
+        row = order_rows.setdefault(key, {
+            "driver": drivers.get(box.picked_up_by_id), "order": box.order, "boxes": 0, "picked_up_at": None,
+        })
+        row["boxes"] += 1
+        if row["picked_up_at"] is None or box.picked_up_at > row["picked_up_at"]:
+            row["picked_up_at"] = box.picked_up_at + MOSCOW_OFFSET
+
+    def driver_name(row):
+        return row["driver"].display_name() if row["driver"] else "Без водителя"
+
+    rows = sorted(order_rows.values(), key=lambda r: (driver_name(r), r["picked_up_at"] or datetime.min))
+    driver_totals = {}
+    for r in rows:
+        name = driver_name(r)
+        driver_totals[name] = driver_totals.get(name, 0) + r["boxes"]
+    totals = sorted(driver_totals.items(), key=lambda kv: (-kv[1], kv[0]))
+    return rows, totals
+
+
 REPORT_COLUMNS = [
     ("orders", "Заявок"), ("boxes", "Коробов в заявках"), ("picked_up", "Забрано"),
     ("received", "Принято на складе"), ("shipped", "Отправлено на СЦ"), ("delivered", "Сдано на СЦ"),
@@ -2718,9 +2768,12 @@ def reports():
         return redirect(url_for("mvb.index"))
     date_from, date_to = _report_period()
     rows, totals, order_rows = _report_rows(date_from, date_to)
+    # Отчет по водителям — тот же период, та же страница "Отчет" (см. чат).
+    driver_rows, driver_totals = _driver_report_rows(date_from, date_to)
     return render_template(
         "mvb/reports.html", rows=rows, totals=totals, date_from=date_from, date_to=date_to,
         columns=REPORT_COLUMNS, order_rows=order_rows, order_columns=REPORT_ORDER_COLUMNS,
+        driver_rows=driver_rows, driver_totals=driver_totals,
     )
 
 
@@ -2764,6 +2817,31 @@ def reports_xlsx():
         ws.cell(row=ws.max_row, column=1).number_format = "DD.MM.YYYY HH:MM"
     for col, width in zip("ABCD", (17, 14, 28, 44)):
         ws.column_dimensions[col].width = width
+
+    driver_rows, driver_totals = _driver_report_rows(date_from, date_to)
+    ws = wb.create_sheet("По водителям")
+    ws.append(["Водитель", "Заявка", "Клиент", "Дата забора", "Коробов"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for row in driver_rows:
+        order = row["order"]
+        ws.append([
+            row["driver"].display_name() if row["driver"] else "Без водителя",
+            order.number, order.client.name,
+            row["picked_up_at"].strftime("%d.%m.%Y %H:%M") if row["picked_up_at"] else "",
+            row["boxes"],
+        ])
+    ws.append([])
+    ws.append(["Итого по водителям:"])
+    for name, boxes in driver_totals:
+        ws.append([name, boxes])
+    for cell in ws[ws.max_row - len(driver_totals)]:
+        cell.font = Font(bold=True)
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 28
+    ws.column_dimensions["D"].width = 18
+
     buffer = io.BytesIO()
     wb.save(buffer)
     fname = f"mvb_report_{date_from:%Y%m%d}_{date_to:%Y%m%d}.xlsx"
