@@ -1,4 +1,4 @@
-from flask import Blueprint, Response, flash, redirect, render_template, request, url_for
+from flask import Blueprint, Response, current_app, flash, redirect, render_template, request, url_for
 from flask_login import current_user
 
 from ..extensions import db
@@ -285,6 +285,32 @@ def locate():
         unplaced_rows=unplaced_rows,
         not_found=not_found,
     )
+
+
+@bp.route("/locate/unplaced/<int:stock_id>/set", methods=["POST"])
+def unplaced_set(stock_id):
+    """Администратор приводит неразмещенный остаток склада к факту — для
+    исправления задвоений (товар уже лежит в коробах, а остаток числится
+    еще и неразмещенным). Только уменьшение: лишнее списывается по партиям
+    (FIFO), как при размещении."""
+    row = UnplacedStock.query.get_or_404(stock_id)
+    barcode = row.nomenclature.barcode
+    if not current_user.is_admin:
+        flash("Списывать остаток может только администратор", "danger")
+        return redirect(url_for("nomenclature.locate", barcode=barcode))
+    qty = request.form.get("qty", type=float)
+    if qty is None or qty < 0 or qty >= row.qty:
+        flash(f"Укажите фактический остаток от 0 до {row.qty:g}", "danger")
+        return redirect(url_for("nomenclature.locate", barcode=barcode))
+    write_off = row.qty - qty
+    UnplacedStock.consume(row.warehouse_id, row.nomenclature_id, write_off)
+    db.session.commit()
+    current_app.logger.warning(
+        "Неразмещенный остаток списан: %s, склад %s, %g -> %g (пользователь %s)",
+        row.nomenclature.name, row.warehouse.name, qty + write_off, qty, current_user.username,
+    )
+    flash(f"Неразмещенный остаток «{row.nomenclature.name}» на складе «{row.warehouse.name}»: списано {write_off:g}, осталось {qty:g}", "success")
+    return redirect(url_for("nomenclature.locate", barcode=barcode))
 
 
 NOMENCLATURE_PAGE_SIZE = 100

@@ -68,6 +68,13 @@
                   {% if lot.receiving_document %}<a href="{{ url_for('receiving.detail', doc_id=lot.receiving_document_id) }}">приемка {{ lot.receiving_document.number }}</a>{% else %}без документа приемки (излишек при приемке перемещения, корректировка){% endif %}
                   {{ (lot.received_at | msk).strftime('%d.%m.%Y') if lot.received_at }}{% if lot.supplier_name %}, {{ lot.supplier_name }}{% endif %}</div>
               {% endfor %}
+              {% if current_user.is_admin %}
+              <form method="post" action="{{ url_for('nomenclature.unplaced_set', stock_id=row.id) }}" class="d-flex gap-1 mt-1"
+                    onsubmit="return confirm('Списать неразмещённый остаток до введённого факта? Отменить нельзя.')">
+                <input name="qty" type="number" min="0" max="{{ '%g' % row.qty }}" step="any" value="0" class="form-control form-control-sm" style="max-width:90px" title="Фактически лежит неупакованным">
+                <button class="btn btn-sm btn-outline-danger text-nowrap">Списать до факта</button>
+              </form>
+              {% endif %}
               {% if row.unexplained_qty %}<div class="text-muted">{{ '%g' % row.unexplained_qty }} {{ item.unit }} — без документа приемки (излишек при приемке перемещения или старые данные)</div>{% endif %}
             </td>
           </tr>

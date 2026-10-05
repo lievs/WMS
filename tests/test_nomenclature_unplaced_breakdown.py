@@ -31,3 +31,19 @@ def test_unplaced_part_shown_separately(db, client_logged_in):
 
     page = client_logged_in.get("/nomenclature/locate?barcode=2056744446961").get_data(as_text=True)
     assert "без документа приемки" in page
+
+
+def test_admin_writes_off_unplaced_to_fact(db, client_logged_in):
+    wh = _wh("Основной склад", "MAIN")
+    item = Nomenclature(name="кардиган", sku="k-2", barcode="2056700000002", unit="шт")
+    db.session.add(item)
+    db.session.flush()
+    UnplacedStock.add(wh.id, item.id, 60)
+    db.session.commit()
+    row = UnplacedStock.query.one()
+    page = client_logged_in.get("/nomenclature/locate?barcode=2056700000002").get_data(as_text=True)
+    assert "Списать до факта" in page
+    client_logged_in.post(f"/nomenclature/locate/unplaced/{row.id}/set", data={"qty": "100"})
+    assert UnplacedStock.available(wh.id, item.id) == 60  # увеличить нельзя
+    client_logged_in.post(f"/nomenclature/locate/unplaced/{row.id}/set", data={"qty": "0"})
+    assert UnplacedStock.available(wh.id, item.id) == 0
