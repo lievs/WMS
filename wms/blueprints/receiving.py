@@ -1631,7 +1631,8 @@ def doubled_receipts():
         db.session.commit()
         flash(f"Задвоение списано по {done} строкам", "success")
         return redirect(url_for("receiving.doubled_receipts"))
-    return render_template("receiving/doubled.html", rows=rows)
+    # Списанные строки в отчете больше не показываем.
+    return render_template("receiving/doubled.html", rows=[r for r in rows if not r["fixed"]])
 
 
 @bp.route("/<int:doc_id>/export.xlsx")

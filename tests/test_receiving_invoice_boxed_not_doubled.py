@@ -89,6 +89,7 @@ def test_boxed_before_invoice_receipt_is_explicit_double(db, client_logged_in):
     client_logged_in.post("/receiving/doubled", data={"all": "1"})
     assert UnplacedStock.available(wh.id, item.id) == 0
     assert AppSetting.query.get(f"rcv_dbl:{box_doc.id}:{inv_doc.id}:{item.id}") is not None
+    assert "PR-BOX" not in client_logged_in.get("/receiving/doubled").get_data(as_text=True)
     UnplacedStock.add(wh.id, item.id, 5)
     db.session.commit()
     client_logged_in.post("/receiving/doubled", data={"all": "1"})
