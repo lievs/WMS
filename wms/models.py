@@ -1017,31 +1017,31 @@ class MovementDocument(db.Model):
         ) or 0
 
     def total_received_qty(self):
-        """Фактически принято на складе назначения с учетом расхождений."""
+        """Фактически принято на складе назначения — после приемки это
+        зафиксированный на тот момент факт (received_qty_snapshot), а не
+        текущее содержимое короба (см. чат: "если поменять кол-во в
+        перемещении, он минусует еще больше" — правка короба после приемки
+        по любой другой причине не должна задним числом менять то, что
+        когда-то фактически приняли на складе). У документов без снимка
+        (старые данные до появления этого поля) — прежняя формула по живым
+        данным короба."""
         if self.received_at is None:
             return None
-        # По живым данным, а не по снимку: снимок устаревал после правки
-        # коробов. Сейчас приемка короба не трогает — принято = в коробах +
-        # (принято − ожидалось) по расхождениям. У старых приемок недовоз
-        # уже списан из коробов — к ним прибавляем только излишек.
-        if self.receipt_changed_boxes is False:
-            return self.total_item_qty() + sum(
-                d.received_qty - d.expected_qty for d in self.discrepancies
-            )
+        if self.received_qty_snapshot is not None:
+            return self.received_qty_snapshot
         return self.total_item_qty() + sum(d.excess_qty() for d in self.discrepancies)
 
     def total_sent_qty(self):
-        """Текущее количество товара в коробах документа — то же самое, что
-        total_item_qty(). Раньше отдавал замороженный sent_qty_snapshot, но
-        эти цифры сравнивают с заявками на самом маркетплейсе, а значит
-        нужны актуальные данные, а не снимок на момент отправки (см. чат:
-        "экспорт показывает 2220, строка показывает 2147" — после правки
-        короба цифры разъехались).
-
-        У старых приемок с недовозом недостающее списано из коробов, поэтому
-        для них отправленное = в коробах + недовоз. Сейчас приемка короба не
-        трогает — отправленное это просто содержимое коробов."""
-        if self.received_at is not None and self.receipt_changed_boxes is not False:
+        """Сколько отправлено. До приемки — живое содержимое короба (его
+        можно поправить, например если заметили ошибку упаковки раньше, чем
+        МП подтвердил приемку, см. чат: "экспорт показывает 2220, строка
+        показывает 2147"). После приемки — зафиксированный на тот момент
+        снимок (sent_qty_snapshot), не зависящий от более поздних правок
+        короба по другим причинам — то же соображение, что и у
+        total_received_qty(). У документов без снимка — прежняя формула."""
+        if self.received_at is not None:
+            if self.sent_qty_snapshot is not None:
+                return self.sent_qty_snapshot
             return self.total_item_qty() + self.total_shortage_qty()
         return self.total_item_qty()
 
@@ -1437,6 +1437,28 @@ class ShipmentPlanLine(db.Model):
             return 0.0
         fulfilled_qty = getattr(self, "current_fulfilled_qty", self.fulfilled_qty)
         return max(self.planned_qty - fulfilled_qty, 0)
+
+
+class ShipmentPlanCityDeadline(db.Model):
+    """Дата, к которой нужно отгрузить план по конкретному городу-складу
+    площадки — одна дата на пару (план, склад), проставляется вручную в
+    «Выполнении плана» на дашборде (см. чат: колонка «Дата плана»).
+    Хранится отдельно от ShipmentPlanLine, потому что это один параметр на
+    весь город, а не на отдельную строку/товар."""
+
+    __tablename__ = "shipment_plan_city_deadlines"
+
+    id = db.Column(db.Integer, primary_key=True)
+    plan_id = db.Column(db.Integer, db.ForeignKey("shipment_plans.id"), nullable=False)
+    warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=False)
+    ship_by_date = db.Column(db.Date, nullable=True)
+
+    plan = db.relationship("ShipmentPlan")
+    warehouse = db.relationship("Warehouse")
+
+    __table_args__ = (
+        db.UniqueConstraint("plan_id", "warehouse_id", name="uq_plan_city_deadline"),
+    )
 
 
 class SupplierReturn(db.Model):

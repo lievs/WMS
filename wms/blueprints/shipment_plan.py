@@ -34,6 +34,7 @@ from ..models import (
     ReceivingDocument,
     ReceivingLine,
     ShipmentPlan,
+    ShipmentPlanCityDeadline,
     ShipmentPlanLine,
     UnplacedStock,
     Warehouse,
@@ -49,6 +50,7 @@ from ..utils.shipment_plan_import import (
 from ..utils.google_sheets import (
     google_sheets_configured,
     load_distribution_workbook,
+    movement_sender_totals,
     movement_wms_totals,
     received_wms_totals,
     write_distribution_facts,
@@ -1098,6 +1100,11 @@ def _dashboard_context():
         stock[nomenclature_id] = stock.get(nomenclature_id, 0) + qty
         unplaced_stock[nomenclature_id] = unplaced_stock.get(nomenclature_id, 0) + qty
     movement_totals_by_period = {}
+    sender_totals_by_period = {}
+    city_deadlines = {
+        (d.plan_id, d.warehouse_id): d.ship_by_date
+        for d in ShipmentPlanCityDeadline.query.all()
+    }
 
     marketplaces_data = []
     lines_by_marketplace = {}
@@ -1170,6 +1177,9 @@ def _dashboard_context():
         for warehouse_id, row in by_warehouse.items():
             row["in_transit"] = shipped_by_warehouse.get(warehouse_id, 0.0)
             row["fulfilled_with_transit"] = row["in_transit"]
+        sender_totals = sender_totals_by_period.setdefault(
+            plan.period_start, movement_sender_totals(plan.period_start)
+        )
         cities = sorted(by_warehouse.values(), key=lambda r: r["warehouse"].marketplace_city)
         for row in cities:
             row["remaining"] = max(row["planned"] - row["fulfilled_with_transit"], 0)
@@ -1179,6 +1189,28 @@ def _dashboard_context():
             row["percent"] = (
                 100 * row["fulfilled_with_transit"] / row["planned"] if row["planned"] else None
             )
+            # Дата, к которой нужно отгрузить план по этому городу —
+            # проставляется вручную на дашборде (см. чат).
+            row["deadline"] = city_deadlines.get((plan.id, row["warehouse"].id))
+            # Вклад каждого склада-отправителя в то, что уже уехало на этот
+            # город — в штуках и в процентах от суммы по всем отправителям
+            # (не от плана города — она может не сойтись с планом, если
+            # отгрузили больше/меньше заявленного, см. чат).
+            sender_qty_by_warehouse = {
+                wh.id: sender_totals.get((row["warehouse"].id, wh.id), 0.0) for wh in sender_warehouses
+            }
+            sender_total_qty = sum(sender_qty_by_warehouse.values())
+            row["sender_breakdown"] = [
+                {
+                    "warehouse": wh,
+                    "qty": sender_qty_by_warehouse[wh.id],
+                    "percent": (
+                        100 * sender_qty_by_warehouse[wh.id] / sender_total_qty
+                        if sender_total_qty else None
+                    ),
+                }
+                for wh in sender_warehouses
+            ]
 
         # Штрихкоды с невыполненным остатком, для которых нечем отгружать —
         # только для значка-счетчика на карточке; сам список товаров теперь
@@ -1459,6 +1491,34 @@ def dashboard():
         **_dashboard_context(),
         google_sync=_google_sync_status(),
     )
+
+
+@bp.route("/<int:plan_id>/cities/<int:warehouse_id>/deadline", methods=["POST"])
+def update_city_deadline(plan_id, warehouse_id):
+    """Дата, к которой нужно отгрузить план по конкретному городу (см.
+    чат) — одна запись на (план, склад), перезаписывается при повторном
+    сохранении. Пустое значение из календаря удаляет дату."""
+    plan = ShipmentPlan.query.get_or_404(plan_id)
+    warehouse = Warehouse.query.get_or_404(warehouse_id)
+    raw = request.form.get("ship_by_date", "").strip()
+    try:
+        ship_by_date = date.fromisoformat(raw) if raw else None
+    except ValueError:
+        flash("Некорректная дата", "danger")
+        return redirect(url_for("shipment_plan.dashboard"))
+
+    deadline = ShipmentPlanCityDeadline.query.filter_by(plan_id=plan.id, warehouse_id=warehouse.id).first()
+    if ship_by_date is None:
+        if deadline:
+            db.session.delete(deadline)
+    elif deadline:
+        deadline.ship_by_date = ship_by_date
+    else:
+        db.session.add(
+            ShipmentPlanCityDeadline(plan_id=plan.id, warehouse_id=warehouse.id, ship_by_date=ship_by_date)
+        )
+    db.session.commit()
+    return redirect(url_for("shipment_plan.dashboard"))
 
 
 @bp.route("/comment/<path:barcode>", methods=["POST"])
