@@ -1,4 +1,4 @@
-from flask import Blueprint, Response, flash, redirect, render_template, request, url_for
+from flask import Blueprint, Response, current_app, flash, redirect, render_template, request, url_for
 from flask_login import current_user
 
 from ..extensions import db
@@ -6,13 +6,16 @@ from ..models import (
     Box,
     BoxItem,
     InventoryLine,
+    MovementReceiptDiscrepancy,
     Nomenclature,
     PlacementLine,
     ProductCategory,
     ProductionRecord,
     ReceivingLine,
     ShipmentPlanLine,
+    SupplierReturn,
     UnplacedStock,
+    UnplacedStockLot,
     Warehouse,
 )
 from ..utils.categorize import classify_by_name
@@ -90,6 +93,146 @@ def clear_nomenclature():
     return redirect(url_for("nomenclature.list_nomenclature"))
 
 
+# Таблицы, где ограничение уникальности включает nomenclature_id — просто
+# перевесить ссылку на объединенный товар нельзя, если у него уже есть своя
+# строка с тем же вторым ключом (см. _merge_nomenclature): такую строку
+# нужно слить (сложить qty), а не задвоить нарушением constraint.
+_MERGE_UNIQUE_KEY_BY_MODEL = {
+    UnplacedStock: "warehouse_id",
+    InventoryLine: "document_id",
+}
+# Остальные таблицы со ссылкой на номенклатуру — ограничений уникальности
+# по нomenclature_id нет, просто перевешиваем ссылку. Сводные отчеты и так
+# считают суммы через SUM/GROUP BY nomenclature_id, задвоение строк внутри
+# одного документа на суммы не влияет.
+_MERGE_SIMPLE_MODELS = (
+    BoxItem, UnplacedStockLot, ReceivingLine, PlacementLine,
+    MovementReceiptDiscrepancy, ProductionRecord, ShipmentPlanLine, SupplierReturn,
+)
+
+
+def _duplicate_name_groups():
+    """Группирует номенклатуру по совпадающему наименованию (без учета
+    регистра и краевых пробелов) — каждая группа из 2+ товаров возможный
+    кандидат на объединение (см. чат). Не объединяем автоматически: разные
+    размеры/цвета иногда имеют одинаковое "Наименование" в исходном файле и
+    это НЕ дубли — решение всегда принимает человек на странице /duplicates,
+    видя штрихкод/артикул/размер/остаток каждого кандидата."""
+    key = db.func.lower(db.func.trim(Nomenclature.name))
+    names_with_dupes = (
+        db.session.query(key)
+        .group_by(key)
+        .having(db.func.count(Nomenclature.id) > 1)
+        .all()
+    )
+    if not names_with_dupes:
+        return []
+
+    stock_by_item = {}
+    for nomenclature_id, qty in (
+        db.session.query(UnplacedStock.nomenclature_id, db.func.sum(UnplacedStock.qty))
+        .group_by(UnplacedStock.nomenclature_id)
+        .all()
+    ):
+        stock_by_item[nomenclature_id] = stock_by_item.get(nomenclature_id, 0) + (qty or 0)
+    for nomenclature_id, qty in (
+        db.session.query(BoxItem.nomenclature_id, db.func.sum(BoxItem.qty))
+        .group_by(BoxItem.nomenclature_id)
+        .all()
+    ):
+        stock_by_item[nomenclature_id] = stock_by_item.get(nomenclature_id, 0) + (qty or 0)
+
+    groups = []
+    for (normalized_name,) in names_with_dupes:
+        items = (
+            Nomenclature.query.filter(db.func.lower(db.func.trim(Nomenclature.name)) == normalized_name)
+            .order_by(Nomenclature.id)
+            .all()
+        )
+        groups.append(
+            {
+                "name": items[0].name,
+                "rows": [
+                    {"item": item, "stock": stock_by_item.get(item.id, 0)} for item in items
+                ],
+            }
+        )
+    groups.sort(key=lambda g: g["name"])
+    return groups
+
+
+@bp.route("/duplicates")
+def duplicates():
+    if not _require_edit():
+        return redirect(url_for("nomenclature.list_nomenclature"))
+    return render_template("nomenclature/duplicates.html", groups=_duplicate_name_groups())
+
+
+def _merge_nomenclature(primary, duplicate):
+    """Переносит все ссылки на duplicate на primary и удаляет duplicate.
+    Обходит ВСЕ таблицы со ссылкой на номенклатуру (не только те, что
+    считаются "историей" в _referenced_nomenclature_ids) — иначе документы,
+    которые не входят в этот список (например, SupplierReturn), остались бы
+    ссылаться на удаленную строку."""
+    for model, key_field in _MERGE_UNIQUE_KEY_BY_MODEL.items():
+        for dup_row in model.query.filter_by(nomenclature_id=duplicate.id).all():
+            key_value = getattr(dup_row, key_field)
+            primary_row = model.query.filter_by(
+                nomenclature_id=primary.id, **{key_field: key_value}
+            ).first()
+            if primary_row:
+                primary_row.qty += dup_row.qty
+                db.session.delete(dup_row)
+            else:
+                dup_row.nomenclature_id = primary.id
+
+    for model in _MERGE_SIMPLE_MODELS:
+        for row in model.query.filter_by(nomenclature_id=duplicate.id).all():
+            row.nomenclature_id = primary.id
+
+    # Доп. штрихкод объединяемого товара не теряем — иначе короб/этикетка со
+    # старым штрихкодом дубля перестанет находиться после слияния. Если у
+    # primary доп. штрихкод уже занят другим кодом, штрихкоды дубля просто
+    # пропадают (крайний случай — у товара может быть только один доп.
+    # штрихкод, см. чат).
+    if primary.barcode2 is None:
+        primary.barcode2 = duplicate.barcode or duplicate.barcode2
+
+    db.session.delete(duplicate)
+
+
+@bp.route("/duplicates/merge", methods=["POST"])
+def merge_duplicates():
+    """Объединяет выбранные позиции внутри одной группы дублей в одну — все
+    остатки/строки документов переносятся на оставленный товар (см.
+    _merge_nomenclature), дубли удаляются. Необратимо, поэтому только
+    администратор — как и остальные удаляющие действия в номенклатуре
+    (delete_nomenclature/clear_nomenclature)."""
+    if not current_user.is_admin:
+        flash("Объединять дубли может только администратор", "danger")
+        return redirect(url_for("nomenclature.duplicates"))
+
+    keep_id = request.form.get("keep_id", type=int)
+    merge_ids = [i for i in request.form.getlist("merge_ids", type=int) if i != keep_id]
+    primary = Nomenclature.query.get(keep_id) if keep_id else None
+    if not primary or not merge_ids:
+        flash("Выберите товар для объединения и хотя бы один дубль", "danger")
+        return redirect(url_for("nomenclature.duplicates"))
+
+    duplicates_qs = Nomenclature.query.filter(Nomenclature.id.in_(merge_ids)).all()
+    if len(duplicates_qs) != len(merge_ids):
+        flash("Не удалось найти все выбранные товары — возможно, список уже изменился", "danger")
+        return redirect(url_for("nomenclature.duplicates"))
+
+    merged_names = ", ".join(d.name for d in duplicates_qs)
+    for duplicate in duplicates_qs:
+        _merge_nomenclature(primary, duplicate)
+    db.session.commit()
+
+    flash(f"«{primary.name}» (id {primary.id}) объединен с: {merged_names}. Дубли удалены.", "success")
+    return redirect(url_for("nomenclature.duplicates"))
+
+
 @bp.route("/locate")
 def locate():
     """Поиск товара по штрихкоду: где он сейчас физически лежит — по
@@ -102,7 +245,7 @@ def locate():
     not_found = False
 
     if barcode:
-        item = Nomenclature.query.filter_by(barcode=barcode).first()
+        item = Nomenclature.find_by_barcode(barcode)
         if item is None:
             not_found = True
         else:
@@ -120,6 +263,19 @@ def locate():
                 .order_by(Warehouse.code)
                 .all()
             )
+            # Откуда взялся неразмещенный остаток: партии по приемкам; что
+            # не покрыто партиями — излишек приемки перемещения/старые данные.
+            lots_by_warehouse = {}
+            for lot in (
+                UnplacedStockLot.query.filter_by(nomenclature_id=item.id)
+                .filter(UnplacedStockLot.qty_remaining > 0)
+                .order_by(UnplacedStockLot.received_at)
+                .all()
+            ):
+                lots_by_warehouse.setdefault(lot.warehouse_id, []).append(lot)
+            for row in unplaced_rows:
+                row.source_lots = lots_by_warehouse.get(row.warehouse_id, [])
+                row.unexplained_qty = max(row.qty - sum(l.qty_remaining for l in row.source_lots), 0)
 
     return render_template(
         "nomenclature/locate.html",
@@ -129,6 +285,32 @@ def locate():
         unplaced_rows=unplaced_rows,
         not_found=not_found,
     )
+
+
+@bp.route("/locate/unplaced/<int:stock_id>/set", methods=["POST"])
+def unplaced_set(stock_id):
+    """Администратор приводит неразмещенный остаток склада к факту — для
+    исправления задвоений (товар уже лежит в коробах, а остаток числится
+    еще и неразмещенным). Только уменьшение: лишнее списывается по партиям
+    (FIFO), как при размещении."""
+    row = UnplacedStock.query.get_or_404(stock_id)
+    barcode = row.nomenclature.barcode
+    if not current_user.is_admin:
+        flash("Списывать остаток может только администратор", "danger")
+        return redirect(url_for("nomenclature.locate", barcode=barcode))
+    qty = request.form.get("qty", type=float)
+    if qty is None or qty < 0 or qty >= row.qty:
+        flash(f"Укажите фактический остаток от 0 до {row.qty:g}", "danger")
+        return redirect(url_for("nomenclature.locate", barcode=barcode))
+    write_off = row.qty - qty
+    UnplacedStock.consume(row.warehouse_id, row.nomenclature_id, write_off)
+    db.session.commit()
+    current_app.logger.warning(
+        "Неразмещенный остаток списан: %s, склад %s, %g -> %g (пользователь %s)",
+        row.nomenclature.name, row.warehouse.name, qty + write_off, qty, current_user.username,
+    )
+    flash(f"Неразмещенный остаток «{row.nomenclature.name}» на складе «{row.warehouse.name}»: списано {write_off:g}, осталось {qty:g}", "success")
+    return redirect(url_for("nomenclature.locate", barcode=barcode))
 
 
 NOMENCLATURE_PAGE_SIZE = 100
@@ -205,6 +387,7 @@ def list_nomenclature():
                     Nomenclature.name.ilike(like),
                     Nomenclature.sku.ilike(like),
                     Nomenclature.barcode.ilike(like),
+                    Nomenclature.barcode2.ilike(like),
                 )
             )
     pagination = query.order_by(Nomenclature.name).paginate(
@@ -223,6 +406,20 @@ def list_nomenclature():
         if item_ids
         else {}
     )
+    # Неразмещенная часть остатка отдельно — чтобы было видно, сколько в
+    # коробах, а сколько числится принятым, но не упакованным.
+    unplaced_by_item_warehouse = {}
+    if item_ids:
+        for nid, wid, qty in (
+            db.session.query(UnplacedStock.nomenclature_id, UnplacedStock.warehouse_id, UnplacedStock.qty)
+            .filter(
+                UnplacedStock.qty > 0,
+                UnplacedStock.nomenclature_id.in_(item_ids),
+                UnplacedStock.warehouse_id.in_([wh.id for wh in stock_warehouses]),
+            )
+            .all()
+        ):
+            unplaced_by_item_warehouse[(nid, wid)] = qty
 
     return render_template(
         "nomenclature/list.html",
@@ -232,6 +429,7 @@ def list_nomenclature():
         categories=categories,
         stock_warehouses=stock_warehouses,
         stock_by_item_warehouse=stock_by_item_warehouse,
+        unplaced_by_item_warehouse=unplaced_by_item_warehouse,
     )
 
 
@@ -241,11 +439,11 @@ def create_nomenclature():
         return redirect(url_for("nomenclature.list_nomenclature"))
 
     barcode = request.form.get("barcode", "").strip()
+    barcode2 = request.form.get("barcode2", "").strip()
     name = request.form.get("name", "").strip()
     size = request.form.get("size", "").strip()
     sku = request.form.get("sku", "").strip()
     unit = request.form.get("unit", "шт").strip() or "шт"
-    description = request.form.get("description", "").strip()
     norm_minutes = request.form.get("norm_minutes", type=float)
 
     if not barcode or not name:
@@ -255,8 +453,12 @@ def create_nomenclature():
     if not sku:
         sku = barcode
 
-    if Nomenclature.query.filter_by(barcode=barcode).first():
+    if Nomenclature.find_by_barcode(barcode):
         flash(f"Штрихкод '{barcode}' уже используется", "danger")
+        return redirect(url_for("nomenclature.list_nomenclature"))
+
+    if barcode2 and Nomenclature.find_by_barcode(barcode2):
+        flash(f"Доп. штрихкод '{barcode2}' уже используется", "danger")
         return redirect(url_for("nomenclature.list_nomenclature"))
 
     if Nomenclature.query.filter_by(sku=sku).first():
@@ -268,10 +470,10 @@ def create_nomenclature():
     item = Nomenclature(
         sku=sku,
         barcode=barcode,
+        barcode2=barcode2 or None,
         name=name,
         size=size or None,
         unit=unit,
-        description=description,
         norm_minutes=norm_minutes,
         category_id=category.id if category else None,
     )
@@ -325,7 +527,7 @@ def update_barcode(item_id):
         flash("Штрихкод не может быть пустым", "danger")
         return redirect(url_for("nomenclature.list_nomenclature", q=q))
 
-    existing = Nomenclature.query.filter_by(barcode=barcode).first()
+    existing = Nomenclature.find_by_barcode(barcode)
     if existing and existing.id != item.id:
         flash(f"Штрихкод '{barcode}' уже используется у товара «{existing.name}»", "danger")
         return redirect(url_for("nomenclature.list_nomenclature", q=q))
@@ -333,6 +535,31 @@ def update_barcode(item_id):
     item.barcode = barcode
     db.session.commit()
     flash(f"Штрихкод для «{item.name}» обновлен", "success")
+    return redirect(url_for("nomenclature.list_nomenclature", q=q))
+
+
+@bp.route("/<int:item_id>/barcode2", methods=["POST"])
+def update_barcode2(item_id):
+    """Доп. штрихкод — второй код, по которому тоже находится этот же товар
+    (см. Nomenclature.find_by_barcode и чат: старый штрихкод от поставщика,
+    который уже разошелся по коробам/этикеткам, менять сразу на новый
+    рискованно). Пустое значение снимает доп. штрихкод."""
+    if not _require_edit():
+        return redirect(url_for("nomenclature.list_nomenclature"))
+
+    item = Nomenclature.query.get_or_404(item_id)
+    barcode2 = request.form.get("barcode2", "").strip()
+    q = request.form.get("q", "")
+
+    if barcode2:
+        existing = Nomenclature.find_by_barcode(barcode2)
+        if existing and existing.id != item.id:
+            flash(f"Штрихкод '{barcode2}' уже используется у товара «{existing.name}»", "danger")
+            return redirect(url_for("nomenclature.list_nomenclature", q=q))
+
+    item.barcode2 = barcode2 or None
+    db.session.commit()
+    flash(f"Доп. штрихкод для «{item.name}» обновлен", "success")
     return redirect(url_for("nomenclature.list_nomenclature", q=q))
 
 

@@ -163,19 +163,16 @@ def cell_label_pdf(cell_id):
 def zone_label(zone_id):
     zone = Zone.query.get_or_404(zone_id)
     img = generate_barcode_data_uri(zone.code)
-    cell_codes = [c.code for c in zone.cells.order_by(Cell.code).all()]
     return render_template(
-        "labels/zone.html", zone=zone, barcode_img=img, cell_codes=cell_codes, autoprint=_autoprint()
+        "labels/zone.html", zone=zone, barcode_img=img, autoprint=_autoprint()
     )
 
 
 @bp.route("/zone/<int:zone_id>.pdf")
 def zone_label_pdf(zone_id):
     zone = Zone.query.get_or_404(zone_id)
-    subtitle = zone.warehouse.name if zone.warehouse else ""
     title = f"Ряд {zone.code}" + (f" — {zone.name}" if zone.name else "")
-    cell_codes = [c.code for c in zone.cells.order_by(Cell.code).all()]
-    pdf = build_zone_label_pdf(zone.code, title, subtitle, cell_codes)
+    pdf = build_zone_label_pdf(zone.code, title)
     return Response(
         pdf,
         mimetype="application/pdf",

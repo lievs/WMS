@@ -86,7 +86,7 @@ def scan():
     if not barcode:
         return jsonify({"ok": False, "error": "Отсканируйте штрихкод товара"}), 400
 
-    item = Nomenclature.query.filter_by(barcode=barcode).first()
+    item = Nomenclature.find_by_barcode(barcode)
     if not item:
         return jsonify({"ok": False, "error": f"Товар со штрихкодом '{barcode}' не найден"}), 404
 

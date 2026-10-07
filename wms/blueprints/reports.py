@@ -2,7 +2,8 @@ import statistics
 from collections import defaultdict
 from datetime import datetime
 
-from flask import Blueprint, Response, render_template, request
+from flask import Blueprint, Response, flash, redirect, render_template, request, url_for
+from flask_login import current_user
 
 from ..extensions import db
 from ..models import (
@@ -277,10 +278,52 @@ def movement_shortages_report():
 
 @bp.route("/one-c-quantity-mismatches")
 def one_c_quantity_mismatches():
-    rows = OneCQuantityCheck.query.order_by(
+    """По умолчанию показывает только неразобранные расхождения — то, что
+    перенесено "в архив" (см. dismiss_one_c_quantity_check), скрыто, чтобы
+    тестовые/неисправимые документы не висели в списке вечно. ?archived=1
+    показывает архив отдельно, для проверки/возврата."""
+    show_archived = request.args.get("archived") == "1"
+    query = OneCQuantityCheck.query
+    query = query.filter(
+        OneCQuantityCheck.dismissed_at.isnot(None)
+        if show_archived
+        else OneCQuantityCheck.dismissed_at.is_(None)
+    )
+    rows = query.order_by(
         OneCQuantityCheck.checked_at.desc(), OneCQuantityCheck.document_number
     ).all()
-    return render_template("reports/one_c_quantity_mismatches.html", rows=rows)
+    return render_template(
+        "reports/one_c_quantity_mismatches.html", rows=rows, show_archived=show_archived
+    )
+
+
+@bp.route("/one-c-quantity-mismatches/<int:row_id>/dismiss", methods=["POST"])
+def dismiss_one_c_quantity_check(row_id):
+    """Переносит расхождение "в архив" — для документов, которые уже
+    нельзя исправить (например, тестовые документы, реально никогда не
+    будут пересверены с 1С), чтобы они не засоряли основной список."""
+    if not current_user.is_admin:
+        flash("Переносить расхождения в архив может только администратор", "danger")
+        return redirect(url_for("reports.one_c_quantity_mismatches"))
+
+    row = OneCQuantityCheck.query.get_or_404(row_id)
+    row.dismissed_at = datetime.utcnow()
+    db.session.commit()
+    flash(f"Расхождение по документу {row.document_number} перенесено в архив", "success")
+    return redirect(url_for("reports.one_c_quantity_mismatches"))
+
+
+@bp.route("/one-c-quantity-mismatches/<int:row_id>/restore", methods=["POST"])
+def restore_one_c_quantity_check(row_id):
+    if not current_user.is_admin:
+        flash("Возвращать расхождения из архива может только администратор", "danger")
+        return redirect(url_for("reports.one_c_quantity_mismatches", archived=1))
+
+    row = OneCQuantityCheck.query.get_or_404(row_id)
+    row.dismissed_at = None
+    db.session.commit()
+    flash(f"Расхождение по документу {row.document_number} возвращено из архива", "success")
+    return redirect(url_for("reports.one_c_quantity_mismatches", archived=1))
 
 
 def _shipped_rows():

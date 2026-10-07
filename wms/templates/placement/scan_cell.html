@@ -43,13 +43,18 @@
       · <a href="{{ url_for('placement.scan_cell') }}">сменить склад</a>
     </div>
     <div class="mb-3">
+      {% if cell.unlimited %}
+      <span class="fs-4"><b>Ряд {{ cell.code }}</b></span>
+      <span class="text-muted">— без ограничения по вместимости</span>
+      {% else %}
       <span class="fs-4"><b>{{ cell.code }}</b></span>
       <span class="text-muted">— свободно {{ cell.free_space() }} из {{ CELL_CAPACITY }}</span>
+      {% endif %}
     </div>
 
     {% if cell.boxes.count() %}
     <div class="mb-3">
-      <div class="small text-muted mb-1">Уже в этой ячейке:</div>
+      <div class="small text-muted mb-1">{% if cell.unlimited %}Уже в этом ряду:{% else %}Уже в этой ячейке:{% endif %}</div>
       <ul class="list-unstyled mb-0 small">
         {% for b in cell.boxes %}
           <li>📦 <a href="{{ url_for('boxes.detail', box_id=b.id) }}">{{ b.box_number }}</a></li>
@@ -67,7 +72,7 @@
       <button type="submit" class="btn btn-success">Разместить</button>
     </form>
 
-    <a class="btn btn-outline-secondary mt-3" href="{{ url_for('placement.scan_cell', warehouse_id=warehouse.id) }}">✅ Завершить размещение (следующая ячейка)</a>
+    <a class="btn btn-outline-secondary mt-3" href="{{ url_for('placement.scan_cell', warehouse_id=warehouse.id) }}">✅ Завершить размещение ({% if cell.unlimited %}следующий ряд{% else %}следующая ячейка{% endif %})</a>
   {% else %}
     <div class="mb-2 text-muted">
       Склад: <b>{{ warehouse.name }}</b>

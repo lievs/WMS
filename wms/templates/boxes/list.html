@@ -9,7 +9,10 @@
     <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
             data-bs-placement="bottom" data-bs-content="{{ hint_boxes }}" aria-label="Подсказка">?</button>
   </h3>
-  <a class="btn btn-outline-secondary" href="{{ url_for('boxes.bulk_create') }}">📦 Массовое создание коробов</a>
+  <div class="d-flex gap-2">
+    <a class="btn btn-outline-secondary" href="{{ url_for('boxes.export_boxes', warehouse_id=warehouse_id) }}">📊 Выгрузить непустые короба по складам</a>
+    <a class="btn btn-outline-secondary" href="{{ url_for('boxes.bulk_create') }}">📦 Массовое создание коробов</a>
+  </div>
 </div>
 
 <p class="text-muted small d-none d-md-block">{{ hint_boxes }}</p>

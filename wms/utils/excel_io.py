@@ -413,6 +413,42 @@ def export_movement_summary_to_excel(documents) -> bytes:
         box_count, item_qty = daily[day]
         ws2.append([day.strftime("%Y-%m-%d"), box_count, item_qty])
 
+    # Сводная таблица "сколько коробов куда и когда поехало" (см. чат) —
+    # строки это дни отгрузки (shipped_at), колонки — склады назначения;
+    # в отличие от "Отгрузки по дням" выше (только итог за день без
+    # разбивки по направлению), здесь видно именно распределение по
+    # городам/складам день за днем. Тот же критерий включения, что и у
+    # "Отгрузки по дням" — только документы с отметкой об отгрузке.
+    destinations_box_counts = {}  # (day, warehouse_name) -> кол-во коробов
+    destination_names = []
+    seen_destinations = set()
+    for doc in documents:
+        if not doc.shipped_at or not doc.to_warehouse:
+            continue
+        day = doc.shipped_at.date()
+        name = doc.to_warehouse.name
+        if name not in seen_destinations:
+            seen_destinations.add(name)
+            destination_names.append(name)
+        key = (day, name)
+        destinations_box_counts[key] = destinations_box_counts.get(key, 0) + doc.lines.count()
+    destination_names.sort()
+
+    ws3 = wb.create_sheet("Куда и когда (короба)")
+    headers3 = ["Дата отгрузки"] + destination_names + ["Итого"]
+    _style_header(ws3, headers3)
+    column_totals = [0] * len(destination_names)
+    for day in sorted({d for d, _ in destinations_box_counts}):
+        row_counts = [destinations_box_counts.get((day, name), 0) for name in destination_names]
+        for i, count in enumerate(row_counts):
+            column_totals[i] += count
+        ws3.append([day.strftime("%Y-%m-%d")] + row_counts + [sum(row_counts)])
+    if destination_names:
+        ws3.append(["Итого"] + column_totals + [sum(column_totals)])
+        last_row = ws3.max_row
+        for cell in ws3[last_row]:
+            cell.font = Font(bold=True)
+
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
@@ -465,6 +501,77 @@ INVENTORY_HEADERS = [
     "Кол-во",
     "Ед. изм.",
 ]
+
+
+BOXES_SHEET_HEADERS = [
+    "Номер короба",
+    "Статус",
+    "Место",
+    "Позиций",
+    "Штук всего",
+    "Создан",
+]
+
+_EXCEL_SHEET_NAME_FORBIDDEN = set('[]:*?/\\')
+
+
+def _safe_sheet_name(name, used_names):
+    """Имя листа Excel не может быть длиннее 31 символа и не может
+    содержать [ ] : * ? / \\ (см. чат — название склада может быть длинным
+    или содержать что угодно) — обрезаем и вычищаем запрещенные символы,
+    а при совпадении после обрезки добавляем счетчик, чтобы не потерять
+    один из складов молча (openpyxl иначе просто откажется создать лист
+    с повторным именем)."""
+    cleaned = "".join(ch for ch in (name or "Склад") if ch not in _EXCEL_SHEET_NAME_FORBIDDEN).strip()
+    cleaned = cleaned[:31] or "Склад"
+    candidate = cleaned
+    suffix = 2
+    while candidate.lower() in used_names:
+        tail = f" ({suffix})"
+        candidate = cleaned[: 31 - len(tail)] + tail
+        suffix += 1
+    used_names.add(candidate.lower())
+    return candidate
+
+
+def export_boxes_to_excel(boxes) -> bytes:
+    """Список непустых коробов, разбитых по складам (см. чат) — отдельный
+    лист на каждый склад-отправитель коробов, чтобы сразу видеть остаток
+    по конкретному складу, не листая общий список. boxes — уже
+    отфильтрованные непустые короба (см. boxes.export_boxes), в любом
+    порядке; здесь только группируются по складу и сортируются внутри
+    склада по номеру."""
+    boxes_by_warehouse = {}
+    for box in boxes:
+        boxes_by_warehouse.setdefault(box.warehouse, []).append(box)
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    used_sheet_names = set()
+    status_map = {"open": "Открыт", "stored": "Расставлен"}
+
+    for warehouse in sorted(boxes_by_warehouse.keys(), key=lambda wh: wh.code if wh else ""):
+        ws = wb.create_sheet(_safe_sheet_name(warehouse.name if warehouse else "Без склада", used_sheet_names))
+        _style_header(ws, BOXES_SHEET_HEADERS)
+        for box in sorted(boxes_by_warehouse[warehouse], key=lambda b: b.box_number):
+            ws.append(
+                [
+                    box.box_number,
+                    status_map.get(box.status, box.status),
+                    box.location_label() or "",
+                    box.items.count(),
+                    box.total_qty(),
+                    box.created_at.strftime("%Y-%m-%d %H:%M") if box.created_at else "",
+                ]
+            )
+
+    if not wb.sheetnames:
+        ws = wb.create_sheet("Короба")
+        _style_header(ws, BOXES_SHEET_HEADERS)
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
 
 
 def export_inventory_to_excel(documents) -> bytes:
@@ -566,10 +673,18 @@ def export_shipment_plan_to_excel(picking_list, picking_totals, ozon_cities, wb_
         next_column = end_column + 1
 
     # Последняя колонка с числами (общие показатели + города) — все, что
-    # правее нее, это уже "Комментарий закупщиков", свободный текст без
-    # суммы и без правого выравнивания/числового формата.
+    # правее нее, это уже доп. поля исходного плана (приоритет/новинка) и
+    # "Комментарий закупщиков" — свободный текст без суммы и без правого
+    # выравнивания/числового формата.
     last_numeric_column = max(next_column - 1, len(common_headers))
-    comment_column = last_numeric_column + 1
+    priority_column = last_numeric_column + 1
+    novelty_column = last_numeric_column + 2
+    comment_column = last_numeric_column + 3
+    for column, title in ((priority_column, "Приоритет"), (novelty_column, "Новинка")):
+        ws.merge_cells(start_row=1, start_column=column, end_row=2, end_column=column)
+        cell = ws.cell(1, column, title)
+        cell.font = Font(name="Arial", size=10, bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     ws.merge_cells(start_row=1, start_column=comment_column, end_row=2, end_column=comment_column)
     comment_header = ws.cell(1, comment_column, "Комментарий закупщиков")
     comment_header.font = Font(name="Arial", size=10, bold=True)
@@ -611,6 +726,10 @@ def export_shipment_plan_to_excel(picking_list, picking_totals, ozon_cities, wb_
         ws.cell(row_number, 7, product["unplaced"])
         ws.cell(row_number, 8, product["ready_to_ship"])
         ws.cell(row_number, 9, product["in_transit_total"])
+        ws.cell(row_number, priority_column, product.get("priority"))
+        novelty = product.get("novelty_marketplace")
+        novelty_label = ("Новинка ВБ" if novelty == "wb" else "Новинка Ozon") if novelty else ""
+        ws.cell(row_number, novelty_column, novelty_label)
         ws.cell(row_number, comment_column, product.get("comment") or "")
 
         for (marketplace, city), column in city_columns.items():
@@ -642,7 +761,10 @@ def export_shipment_plan_to_excel(picking_list, picking_totals, ozon_cities, wb_
             badge.font = Font(name="Arial", size=8, bold=True, color="FFFFFF")
             badge.alignment = Alignment(horizontal="center", vertical="center")
 
-    widths = {1: 30, 2: 12, 3: 19, 4: 16, 5: 14, 6: 16, 7: 18, 8: 22, 9: 12, comment_column: 32}
+    widths = {
+        1: 30, 2: 12, 3: 19, 4: 16, 5: 14, 6: 16, 7: 18, 8: 22, 9: 12,
+        priority_column: 11, novelty_column: 14, comment_column: 32,
+    }
     for column, width in widths.items():
         ws.column_dimensions[get_column_letter(column)].width = width
     ws.row_dimensions[1].height = 20

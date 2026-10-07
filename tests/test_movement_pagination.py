@@ -184,3 +184,87 @@ def test_search_with_marketplace_alias_and_city(db, client_logged_in):
     assert ozon_moscow.number in html
     assert wb_moscow.number not in html
     assert ozon_kazan.number not in html
+
+
+def test_filter_by_number_matches_substring(db, client_logged_in):
+    matching = _make_box_document("PER-COL-001", "BOX-COL-1", "Основной", "Москва", dest_marketplace="ozon")
+    other = _make_box_document("PER-COL-002", "BOX-COL-2", "Основной", "Москва", dest_marketplace="ozon")
+
+    html = client_logged_in.get("/movement/?number=COL-001").get_data(as_text=True)
+
+    assert matching.number in html
+    assert other.number not in html
+
+
+def test_filter_by_destination_warehouse(db, client_logged_in):
+    moscow = _make_box_document("PER-COL-011", "BOX-COL-11", "Основной", "Москва", dest_marketplace="ozon")
+    kazan = _make_box_document("PER-COL-012", "BOX-COL-12", "Основной", "Казань", dest_marketplace="ozon")
+
+    html = client_logged_in.get(f"/movement/?to_warehouse_id={moscow.to_warehouse_id}").get_data(as_text=True)
+
+    assert moscow.number in html
+    assert kazan.number not in html
+
+
+def test_filter_by_source_warehouse(db, client_logged_in):
+    from_a = _make_box_document("PER-COL-021", "BOX-COL-21", "Склад А", "Москва", dest_marketplace="ozon")
+    from_b = _make_box_document("PER-COL-022", "BOX-COL-22", "Склад Б", "Москва", dest_marketplace="ozon")
+
+    html = client_logged_in.get(f"/movement/?from_warehouse_id={from_a.from_warehouse_id}").get_data(as_text=True)
+
+    assert from_a.number in html
+    assert from_b.number not in html
+
+
+def test_filter_by_status(db, client_logged_in):
+    draft = _make_box_document("PER-COL-031", "BOX-COL-31", "Основной", "Москва", dest_marketplace="ozon")
+    completed = _make_box_document("PER-COL-032", "BOX-COL-32", "Основной", "Москва", dest_marketplace="ozon")
+    completed.status = "completed"
+    db.session.commit()
+
+    html = client_logged_in.get("/movement/?status=completed").get_data(as_text=True)
+
+    assert completed.number in html
+    assert draft.number not in html
+
+
+def test_filter_by_author(db, client_logged_in, admin_user):
+    mine = _make_box_document("PER-COL-041", "BOX-COL-41", "Основной", "Москва", dest_marketplace="ozon")
+    mine.created_by_id = admin_user.id
+    other = _make_box_document("PER-COL-042", "BOX-COL-42", "Основной", "Москва", dest_marketplace="ozon")
+    db.session.commit()
+
+    html = client_logged_in.get(f"/movement/?created_by_id={admin_user.id}").get_data(as_text=True)
+
+    assert mine.number in html
+    assert other.number not in html
+
+
+def test_filter_by_date_range(db, client_logged_in):
+    from datetime import datetime as dt
+
+    old = _make_box_document("PER-COL-051", "BOX-COL-51", "Основной", "Москва", dest_marketplace="ozon")
+    old.created_at = dt(2026, 1, 1)
+    new = _make_box_document("PER-COL-052", "BOX-COL-52", "Основной", "Москва", dest_marketplace="ozon")
+    new.created_at = dt(2026, 6, 1)
+    db.session.commit()
+
+    html = client_logged_in.get("/movement/?date_from=2026-05-01&date_to=2026-07-01").get_data(as_text=True)
+
+    assert new.number in html
+    assert old.number not in html
+
+
+def test_column_filters_combine_with_text_search(db, client_logged_in):
+    """Фильтры над колонками и общий поиск q должны сочетаться через И, а
+    не перетирать друг друга (все поля отправляются в одну общую форму,
+    см. movement/list.html)."""
+    matching = _make_box_document("PER-COL-061", "BOX-COL-61", "Основной", "Москва", dest_marketplace="ozon")
+    wrong_status = _make_box_document("PER-COL-061-B", "BOX-COL-61B", "Основной", "Москва", dest_marketplace="ozon")
+    wrong_status.status = "completed"
+    db.session.commit()
+
+    html = client_logged_in.get("/movement/?q=COL-061&status=draft").get_data(as_text=True)
+
+    assert matching.number in html
+    assert wrong_status.number not in html

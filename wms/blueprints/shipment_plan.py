@@ -29,6 +29,7 @@ from ..models import (
     MovementDocument,
     MovementLine,
     Nomenclature,
+    ProductCategory,
     ProductionRecord,
     ReceivingDocument,
     ReceivingLine,
@@ -53,6 +54,7 @@ from ..utils.google_sheets import (
     write_distribution_facts,
     write_wms_movement_sheet,
 )
+from .integration_1c import DIRECT_TRANSFER_WAREHOUSE_NAMES
 from .warehouses import (
     consolidate_marketplace_warehouses,
     default_fulfillment_1c_name,
@@ -66,6 +68,13 @@ PERIOD_DAYS = 14
 GOOGLE_SYNC_AT_KEY = "google_sheets_last_sync_at"
 GOOGLE_SYNC_ERROR_KEY = "google_sheets_last_error"
 GOOGLE_SYNC_SHEETS_KEY = "google_sheets_last_names"
+# Площадки, для которых на последней синхронизации не нашлось подходящего
+# листа "Распределение" — план этой площадки НЕ обновился (см. чат: раньше
+# это было видно только в одноразовом flash-сообщении, которое легко
+# пропустить — особенно если синхронизация запущена кнопкой из самой
+# Google Таблицы, а не с этой страницы). Персистентно, чтобы было видно
+# при каждом заходе на дашборд, а не только сразу после нажатия кнопки.
+GOOGLE_SYNC_MISSING_KEY = "google_sheets_last_missing_marketplaces"
 GOOGLE_SYNC_TOKEN_KEY = "google_sheets_trigger_token"
 _google_sync_lock = threading.Lock()
 
@@ -331,7 +340,15 @@ def _apply_priority_distribution():
             for line in other_lines:
                 # Штрихкод новинки нашелся и на другой площадке — код
                 # 0w/0o явно говорит "только сюда", туда не отгружаем.
+                # Обнуляем не только distributed_target_qty (её учитывает
+                # только effective_planned_qty), но и сам planned_qty —
+                # иначе remaining_qty()/"Не хватает по плану" на дашборде
+                # по-прежнему считали бы эту строку живой потребностью
+                # (см. чат: "приоритет 0w отгружается на озон" — строка
+                # получала distributed_target_qty=0, но planned_qty
+                # оставался ненулевым, и туда реально отгружали).
                 line.distributed_target_qty = 0.0
+                line.planned_qty = 0.0
             shares = city_share.get(novelty_marketplace, {})
             total_share = sum(shares.get(l.warehouse_id, 0.0) for l in target_lines)
             for line in target_lines:
@@ -348,8 +365,26 @@ def _apply_priority_distribution():
 
         priority = next((l.priority for l in barcode_lines if l.priority is not None), None)
         if priority not in (0, 1, 2):
-            for line in barcode_lines:
-                line.distributed_target_qty = None
+            total_planned = sum(l.planned_qty for l in barcode_lines)
+            total_remaining = sum(l.remaining_qty() for l in barcode_lines)
+            # Обычный товар без приоритета: план по каждому городу и так
+            # ограничивает подсказку "куда везти короб" через planned_qty
+            # (effective_planned_qty() возвращает его, пока
+            # distributed_target_qty не задан). Но если план по ВСЕМ
+            # городам этого штрихкода уже закрыт (remaining_qty()==0
+            # везде), а на складе-отправителе все еще остается "готово к
+            # отгрузке" — короба с этим остатком иначе никому не
+            # предлагаются (см. чат: "остаток есть, а потребности не
+            # выдает для сборщиков"). Дораспределяем его пропорционально
+            # исходной доле города в плане — тем же принципом, что и для
+            # приоритетных товаров выше, чтобы не отправить лишнее в город,
+            # который изначально почти не заказывал эту позицию.
+            if total_remaining <= 0 and total_planned > 0 and ready_to_ship > 0:
+                for line in barcode_lines:
+                    line.distributed_target_qty = ready_to_ship * (line.planned_qty / total_planned)
+            else:
+                for line in barcode_lines:
+                    line.distributed_target_qty = None
             continue
 
         total_planned = sum(l.planned_qty for l in barcode_lines)
@@ -372,7 +407,10 @@ def _google_sync_status():
     values = {
         row.key: row.value
         for row in AppSetting.query.filter(
-            AppSetting.key.in_((GOOGLE_SYNC_AT_KEY, GOOGLE_SYNC_ERROR_KEY, GOOGLE_SYNC_SHEETS_KEY))
+            AppSetting.key.in_((
+                GOOGLE_SYNC_AT_KEY, GOOGLE_SYNC_ERROR_KEY, GOOGLE_SYNC_SHEETS_KEY,
+                GOOGLE_SYNC_MISSING_KEY,
+            ))
         ).all()
     }
     return {
@@ -380,6 +418,7 @@ def _google_sync_status():
         "last_sync_at": values.get(GOOGLE_SYNC_AT_KEY),
         "last_error": values.get(GOOGLE_SYNC_ERROR_KEY),
         "sheet_names": values.get(GOOGLE_SYNC_SHEETS_KEY),
+        "missing_marketplaces": values.get(GOOGLE_SYNC_MISSING_KEY),
     }
 
 
@@ -394,10 +433,26 @@ def sync_google_plans_and_movements(uploaded_by_id=None):
     workbook, sheet_names = load_distribution_workbook(current_app)
     summary = []
     found_any = False
+    missing_marketplaces = []
     for marketplace in MARKETPLACES:
         parsed = parse_plan_sheet(workbook, marketplace)
         workbook.seek(0)
         if parsed is None:
+            # Раньше молча пропускалось — план этой площадки оставался
+            # нетронутым (старым), а в сообщении о синхронизации по ней не
+            # было вообще ни строки, из-за чего "успешная" синхронизация
+            # выглядела так, будто всё обновилось, хотя эта площадка не
+            # обновилась совсем (см. чат: "ошибка не ушла и новые позиции
+            # не подтягивает"). Теперь явно говорим, что для площадки не
+            # нашлось подходящего листа — план остался как был, и
+            # запоминаем это персистентно (см. GOOGLE_SYNC_MISSING_KEY) —
+            # одноразовое сообщение легко пропустить, особенно если
+            # синхронизация запущена кнопкой из самой Google Таблицы.
+            summary.append(
+                f"{MARKETPLACE_LABELS[marketplace]}: лист «Распределение» не найден — "
+                f"план НЕ обновлен, остался прежний"
+            )
+            missing_marketplaces.append(MARKETPLACE_LABELS[marketplace])
             continue
         found_any = True
         created, unmatched = _apply_plan(marketplace, parsed, uploaded_by_id=uploaded_by_id)
@@ -412,6 +467,7 @@ def sync_google_plans_and_movements(uploaded_by_id=None):
     db.session.commit()
     exported = write_wms_movement_sheet(current_app)
     updated_cells = write_distribution_facts(current_app, workbook)
+    _set_sync_setting(GOOGLE_SYNC_MISSING_KEY, ", ".join(missing_marketplaces))
     _set_sync_setting(GOOGLE_SYNC_AT_KEY, datetime.now().strftime("%d.%m.%Y %H:%M:%S"))
     _set_sync_setting(GOOGLE_SYNC_ERROR_KEY, "")
     _set_sync_setting(GOOGLE_SYNC_SHEETS_KEY, ", ".join(sheet_names))
@@ -667,6 +723,142 @@ def _stock_by_nomenclature(warehouse_ids):
     return stock
 
 
+def _ready_to_ship_by_warehouse_and_nomenclature(warehouse_ids):
+    """{(warehouse_id, nomenclature_id): {"qty": сумма, "box_ids": set(id коробов)}}
+    — то же "готово к отгрузке" (упаковано в короб), что и в
+    _stock_by_nomenclature, но не суммарно по всем складам-отправителям
+    сразу, а отдельно по каждому складу, плюс сами ID коробов (а не готовое
+    число) — чтобы в таблице плана отгрузок показать, где именно лежит
+    остаток и в скольких коробах (см. чат: колонка "Готово к отгрузке"
+    разбивается на Основной склад / Склад №2).
+
+    Именно набор ID, а не COUNT(DISTINCT) агрегатом — короб с несколькими
+    размерами/цветами одной модели должен посчитаться ОДИН раз при
+    сворачивании строк в группу (см. _group_picking_list), а не по разу на
+    каждый размер: короба с разным содержимым — обычное дело (BoxItem
+    допускает несколько позиций на один box_id), простое суммирование
+    готовых чисел по позициям завысило бы итог группы/шапки."""
+    if not warehouse_ids:
+        return {}
+    rows = (
+        db.session.query(
+            Box.warehouse_id,
+            BoxItem.nomenclature_id,
+            BoxItem.box_id,
+            func.sum(BoxItem.qty),
+        )
+        .join(Box, BoxItem.box_id == Box.id)
+        .filter(Box.warehouse_id.in_(warehouse_ids))
+        .group_by(Box.warehouse_id, BoxItem.nomenclature_id, BoxItem.box_id)
+        .all()
+    )
+    result = {}
+    for warehouse_id, nomenclature_id, box_id, qty in rows:
+        entry = result.setdefault((warehouse_id, nomenclature_id), {"qty": 0, "box_ids": set()})
+        entry["qty"] += qty or 0
+        entry["box_ids"].add(box_id)
+    return result
+
+
+def _non_empty_box_counts(warehouse_ids):
+    """{warehouse_id: число непустых коробов} — просто физический факт по
+    складу, без всякой привязки к плану/товарам (см. чат: "выводи общее
+    кол-во непустых коробов в заголовке, без привязки к плану"). Та же
+    выборка, что и в boxes.export_boxes ("Выгрузить непустые короба по
+    складам") — чтобы цифра в сводке плана совпадала с тем, что покажет
+    экспорт."""
+    if not warehouse_ids:
+        return {}
+    rows = (
+        db.session.query(Box.warehouse_id, func.count(func.distinct(Box.id)))
+        .join(BoxItem, BoxItem.box_id == Box.id)
+        .filter(Box.warehouse_id.in_(warehouse_ids))
+        .group_by(Box.warehouse_id)
+        .all()
+    )
+    return {warehouse_id: count for warehouse_id, count in rows}
+
+
+# Известные цвета и их сокращения/варианты написания (см. чат) —
+# нужны, чтобы разобрать цвет, слитно приписанный к названию модели без
+# разделителя ("К-тSmileбелый") или сокращенный/усеченный ("бор" вместо
+# "бордо", "олив" вместо "оливковый"). Список собран по значениям,
+# реально встречающимся в артикулах плана — не исчерпывающий; то, что не
+# удалось опознать, остается частью модели без цвета, как и раньше
+# (безопасное поведение при промахе). Ключ — канонический цвет, под ним
+# группируются все его варианты написания.
+_COLOR_VARIANTS = {
+    "бежевый": ("бежевый", "беж"),
+    "белый": ("белый", "белая", "бел"),
+    "бордовый": ("бордовый", "бордовая", "бордо", "бодро", "бор"),
+    "голубой": ("голубой", "голубая", "гол"),
+    "горчичный": ("горчичный", "горчичная", "горч"),
+    "графит": ("графит", "графитовый"),
+    "зеленый": ("зеленый", "зелёный", "зеленая", "зелёная", "зел"),
+    "коричневый": ("коричневый", "коричневая", "корич", "кор"),
+    "кофейный": ("кофейный", "кофейная", "кофе"),
+    "красный": ("красный", "красная", "красн"),
+    "лимонный": ("лимонный", "лимонная", "лимон"),
+    "малиновый": ("малиновый", "малиновая", "малина"),
+    "молочный": ("молочный", "молочная", "молоко"),
+    "оливковый": ("оливковый", "оливковая", "оливка", "олив"),
+    "оранжевый": ("ярко-оранжевый", "оранжевый", "оранжевая", "оранж"),
+    "розовый": ("розовый", "розовая", "роз"),
+    "серый": ("серый", "серая", "сер"),
+    "терракот": ("терракотовый", "терракот"),
+    "фиолетовый": ("фиолетовый", "фиолетовая", "фиолет"),
+    "хаки": ("хаки",),
+    "черный": ("черный", "чёрный", "черная", "чёрная", "черн"),
+    "шоколад": ("шоколадный", "шоколад"),
+}
+
+# Все варианты вперемешку, длинные — первыми: иначе короткое "бел" могло
+# бы совпасть раньше, чем полное "белый", и отрезать лишнее.
+_COLOR_SUFFIXES = sorted(
+    ((variant, canonical) for canonical, variants in _COLOR_VARIANTS.items() for variant in variants),
+    key=lambda pair: len(pair[0]),
+    reverse=True,
+)
+
+
+def _match_color_suffix(text):
+    """Если строка заканчивается известным цветом или его сокращением без
+    какого-либо разделителя (см. _COLOR_VARIANTS) — возвращает (модель,
+    цвет), иначе None. Само совпадение регистронезависимое, но в модель
+    попадает исходный текст без изменений."""
+    lowered = text.lower()
+    for variant, canonical in _COLOR_SUFFIXES:
+        if len(text) > len(variant) and lowered.endswith(variant):
+            return text[: len(text) - len(variant)], canonical
+    return None
+
+
+def _split_article_model_color(article):
+    """Разбирает артикул на модель и цвет для группировки на дашборде (см.
+    чат). Порядок попыток:
+    1. '/' — однозначный разделитель цвета: "ВзрослаяБазовая/белая" →
+       модель "ВзрослаяБазовая", цвет "белая".
+    2. '_' — цвет всегда последний сегмент: "Альма_2горла_бордо" → модель
+       "Альма_2горла", цвет "бордо". Приоритет у '/' над '_', если
+       встретились оба — '/' используется только как разделитель цвета,
+       тогда как '_' может быть частью самого названия модели.
+    3. Без разделителя — по словарю известных цветов и их сокращений
+       (см. _match_color_suffix): "К-тSmileбелый" → модель "К-тSmile",
+       цвет "белый".
+    Ничего не подошло — считается моделью без цвета, как есть."""
+    text = (article or "").strip()
+    if "/" in text:
+        model, _sep, color = text.rpartition("/")
+        return model, color
+    if "_" in text:
+        model, _sep, color = text.rpartition("_")
+        return model, color
+    matched = _match_color_suffix(text)
+    if matched:
+        return matched
+    return text, ""
+
+
 def _unplaced_by_nomenclature(warehouse_ids):
     """{nomenclature_id: кол-во} товара, который принят, но еще не упакован
     в короб (висит в UnplacedStock) — по сути, "на разбраковке": уже на
@@ -779,11 +971,129 @@ def _pace_analysis(plan, total_planned, total_fulfilled):
     }
 
 
+def _group_picking_list(picking_list, sender_warehouses, ozon_cities, wb_cities):
+    """Группирует плоский picking_list в дерево категория → модель → цвет
+    → размеры (см. чат и файл-образец) для сворачиваемых групп на
+    дашборде: без этого товар с несколькими цветами и размерами теряется
+    вперемешку среди остальных строк, отсортированных просто по
+    артикулу+размеру. Категория — "Вид товара" номенклатуры (см.
+    item["category"], проставляется в _dashboard_context ДО вызова этой
+    функции), цвет разбирается из артикула (см.
+    _split_article_model_color) — отдельного поля "цвет" в номенклатуре
+    нет.
+
+    На каждом уровне (категория, модель и цвет) считает те же суммы, что
+    видны у отдельной позиции — план/остаток/на разбраковке/готово к
+    отгрузке (по складам)/в пути/по городам — чтобы сворачивание группы
+    не прятало итоговые цифры, только детализацию по размерам."""
+
+    def _new_totals():
+        return {
+            "total_planned": 0.0,
+            "total_remaining": 0.0,
+            "unplaced": 0.0,
+            "ready_to_ship": 0.0,
+            # box_ids — набор, не число: короб с несколькими размерами/
+            # цветами одной модели должен войти в группу ОДИН раз, а не по
+            # разу на каждый размер (см. _ready_to_ship_by_warehouse_and_
+            # nomenclature). В "boxes" (готовое число для шаблона)
+            # превращается только в _finalize_totals, после того как все
+            # позиции группы добавлены.
+            "ready_to_ship_by_warehouse": [
+                {"warehouse": wh, "qty": 0.0, "box_ids": set(), "boxes": 0} for wh in sender_warehouses
+            ],
+            "in_transit_total": 0.0,
+            "ozon": {city: {"remaining": 0.0, "in_transit": 0.0} for city in ozon_cities},
+            "wb": {city: {"remaining": 0.0, "in_transit": 0.0} for city in wb_cities},
+            "no_stock_count": 0,
+        }
+
+    def _add(totals, item):
+        totals["total_planned"] += item["total_planned"]
+        totals["total_remaining"] += item["total_remaining"]
+        totals["unplaced"] += item["unplaced"]
+        totals["ready_to_ship"] += item["ready_to_ship"]
+        for i, entry in enumerate(item["ready_to_ship_by_warehouse"]):
+            totals["ready_to_ship_by_warehouse"][i]["qty"] += entry["qty"]
+            totals["ready_to_ship_by_warehouse"][i]["box_ids"] |= entry["box_ids"]
+        totals["in_transit_total"] += item["in_transit_total"]
+        for city, line in item["ozon"].items():
+            totals["ozon"][city]["remaining"] += line.remaining_qty()
+            totals["ozon"][city]["in_transit"] += line.in_transit_qty
+        for city, line in item["wb"].items():
+            totals["wb"][city]["remaining"] += line.remaining_qty()
+            totals["wb"][city]["in_transit"] += line.in_transit_qty
+        if item["no_stock"]:
+            totals["no_stock_count"] += 1
+
+    def _finalize_totals(totals):
+        for entry in totals["ready_to_ship_by_warehouse"]:
+            entry["boxes"] = len(entry["box_ids"])
+
+    categories = {}
+    for item in picking_list:
+        model, color = _split_article_model_color(item["article"])
+        item["model"] = model
+        item["color"] = color
+        category_group = categories.setdefault(
+            item["category"], {"category": item["category"], "models": {}, "totals": _new_totals(), "count": 0}
+        )
+        model_group = category_group["models"].setdefault(
+            model, {"model": model, "colors": {}, "totals": _new_totals(), "count": 0}
+        )
+        color_group = model_group["colors"].setdefault(
+            color, {"color": color, "products": [], "totals": _new_totals()}
+        )
+        color_group["products"].append(item)
+        _add(color_group["totals"], item)
+        _add(model_group["totals"], item)
+        _add(category_group["totals"], item)
+        model_group["count"] += 1
+        category_group["count"] += 1
+
+    ordered = []
+    # "Без категории" — общая корзина для несопоставленных товаров, всегда
+    # последней, чтобы не мешалась среди настоящих видов товара наверху
+    # списка.
+    for category in sorted(categories.keys(), key=lambda c: (c == "Без категории", c.lower())):
+        category_group = categories[category]
+        models = category_group["models"]
+        category_group["models"] = [
+            models[model] for model in sorted(models.keys(), key=lambda m: m.lower())
+        ]
+        for model_group in category_group["models"]:
+            colors = model_group["colors"]
+            model_group["colors"] = [
+                colors[color] for color in sorted(colors.keys(), key=lambda c: c.lower())
+            ]
+            for color_group in model_group["colors"]:
+                color_group["products"].sort(key=lambda p: p["size"] or "")
+                _finalize_totals(color_group["totals"])
+            _finalize_totals(model_group["totals"])
+        _finalize_totals(category_group["totals"])
+        ordered.append(category_group)
+    return ordered
+
+
 def _dashboard_context():
     plans = {p.marketplace: p for p in ShipmentPlan.query.all()}
     sender_ids = _sender_warehouse_ids()
+    # "Готово к отгрузке" разбивается по складам только для этих двух
+    # физических складов (см. чат) — а не для ЛЮБОГО склада-отправителя:
+    # _sender_warehouse_ids() возвращает все склады без маркетплейса,
+    # среди них могут быть и другие (например, производство/цех), которые
+    # в разбивку попадать не должны. Тот же список складов, что и для
+    # прямых перемещений в 1С (см. integration_1c.DIRECT_TRANSFER_WAREHOUSE_NAMES).
+    # Упорядочены по названию — "Основной склад" раньше "Склад №2..." по
+    # алфавиту, тот же порядок, что и везде в системе.
+    sender_warehouses = (
+        Warehouse.query.filter(Warehouse.name.in_(DIRECT_TRANSFER_WAREHOUSE_NAMES))
+        .order_by(Warehouse.name)
+        .all()
+    )
     stock = _stock_by_nomenclature(sender_ids)
     unplaced_stock = _unplaced_by_nomenclature(sender_ids)
+    ready_by_warehouse = _ready_to_ship_by_warehouse_and_nomenclature(sender_ids)
     for nomenclature_id, qty in _pending_sorting_by_nomenclature(sender_ids).items():
         stock[nomenclature_id] = stock.get(nomenclature_id, 0) + qty
         unplaced_stock[nomenclature_id] = unplaced_stock.get(nomenclature_id, 0) + qty
@@ -815,9 +1125,15 @@ def _dashboard_context():
             line.current_fulfilled_qty = 0.0
             line.in_transit_qty = quantities.get("shipped", 0.0)
             line.fulfilled_with_transit_qty = line.in_transit_qty
-            line.effective_remaining_qty = max(
-                line.planned_qty - line.fulfilled_with_transit_qty,
-                0,
+            # Товар-новинка одной площадки (0w/0o) не должен считаться
+            # потребностью ДРУГОЙ площадки, даже если в файле плана
+            # случайно осталось ненулевое число в чужой колонке (см. чат:
+            # "приоритет 0w отгружается на озон" и
+            # ShipmentPlanLine._blocked_by_novelty_marketplace).
+            line.effective_remaining_qty = (
+                0.0
+                if line._blocked_by_novelty_marketplace()
+                else max(line.planned_qty - line.fulfilled_with_transit_qty, 0)
             )
 
         by_warehouse = {}
@@ -857,6 +1173,12 @@ def _dashboard_context():
         cities = sorted(by_warehouse.values(), key=lambda r: r["warehouse"].marketplace_city)
         for row in cities:
             row["remaining"] = max(row["planned"] - row["fulfilled_with_transit"], 0)
+            # % выполнения по городу — тот же принцип, что и общий % в
+            # шапке карточки маркетплейса (fulfilled_with_transit/planned),
+            # только построчно по каждому городу (см. чат).
+            row["percent"] = (
+                100 * row["fulfilled_with_transit"] / row["planned"] if row["planned"] else None
+            )
 
         # Штрихкоды с невыполненным остатком, для которых нечем отгружать —
         # только для значка-счетчика на карточке; сам список товаров теперь
@@ -905,6 +1227,7 @@ def _dashboard_context():
                     "barcode": line.barcode,
                     "article": line.article,
                     "size": line.size,
+                    "nomenclature_id": line.nomenclature_id,
                     "no_stock": line.nomenclature_id is None
                     or stock.get(line.nomenclature_id, 0) <= 0,
                     # Принято, но еще не упаковано в короб ("на разбраковке") —
@@ -923,6 +1246,26 @@ def _dashboard_context():
                     )
                     if line.nomenclature_id is not None
                     else 0,
+                    # То же "готово к отгрузке", но раздельно по каждому
+                    # складу-отправителю, с числом коробов — см. чат: в
+                    # таблице колонка разбивается на Основной склад / Склад
+                    # №2. Порядок совпадает с sender_warehouses. box_ids —
+                    # набор ID (не готовое число), чтобы при сворачивании в
+                    # группу (_group_picking_list) один и тот же короб с
+                    # несколькими размерами/цветами этой модели не
+                    # посчитался несколько раз — boxes здесь просто len()
+                    # для отображения самой строки.
+                    "ready_to_ship_by_warehouse": [
+                        {
+                            "warehouse": wh,
+                            "qty": ready_by_warehouse.get((wh.id, line.nomenclature_id), {}).get("qty", 0),
+                            "box_ids": ready_by_warehouse.get((wh.id, line.nomenclature_id), {}).get("box_ids", set()),
+                            "boxes": len(ready_by_warehouse.get((wh.id, line.nomenclature_id), {}).get("box_ids", ())),
+                        }
+                        for wh in sender_warehouses
+                    ]
+                    if line.nomenclature_id is not None
+                    else [{"warehouse": wh, "qty": 0, "box_ids": set(), "boxes": 0} for wh in sender_warehouses],
                     "ozon": {},
                     "wb": {},
                     "max_remaining": 0,
@@ -991,6 +1334,25 @@ def _dashboard_context():
         key=lambda p: (p["article"] or "", p["size"] or ""),
     )
 
+    # Вид товара (Кардиган/Шапка/...) — для верхнего уровня группировки
+    # (см. чат и файл-образец: Категория → Модель → Цвет → Размер).
+    # Источник — уже существующий "Вид товара" номенклатуры
+    # (Nomenclature.category_id, определяется автоматически по названию
+    # при создании/импорте, см. utils.categorize) — не разбирается заново
+    # из артикула плана. Товар без сопоставленной номенклатуры или без
+    # определенного вида остается в общей группе "Без категории".
+    category_names_by_nomenclature = {}
+    nomenclature_ids = [p["nomenclature_id"] for p in picking_list if p["nomenclature_id"] is not None]
+    if nomenclature_ids:
+        category_names_by_nomenclature = dict(
+            db.session.query(Nomenclature.id, ProductCategory.name)
+            .outerjoin(ProductCategory, Nomenclature.category_id == ProductCategory.id)
+            .filter(Nomenclature.id.in_(nomenclature_ids))
+            .all()
+        )
+    for p in picking_list:
+        p["category"] = category_names_by_nomenclature.get(p["nomenclature_id"]) or "Без категории"
+
     def _city_names(marketplace):
         for m in marketplaces_data:
             if m["marketplace"] == marketplace and m.get("cities"):
@@ -1000,15 +1362,31 @@ def _dashboard_context():
     ozon_cities = _city_names("ozon")
     wb_cities = _city_names("wb")
 
+    picking_groups = _group_picking_list(picking_list, sender_warehouses, ozon_cities, wb_cities)
+
     # Итоговая строка над списком "Что нужно отправить" — просто сумма по
     # каждой колонке (На разбраковке/Готово к отгрузке/В пути и каждый
     # город), чтобы сразу видеть общий объем не пролистывая/не считая
     # вручную по строкам.
+    non_empty_box_counts = _non_empty_box_counts([wh.id for wh in sender_warehouses])
     picking_totals = {
         "total_planned": sum(p["total_planned"] for p in picking_list),
         "total_remaining": sum(p["total_remaining"] for p in picking_list),
         "unplaced": sum(p["unplaced"] for p in picking_list),
         "ready_to_ship": sum(p["ready_to_ship"] for p in picking_list),
+        # boxes — ВСЕ непустые короба склада (см. чат), не только те, где
+        # есть товар с невыполненным планом: иначе итог по коробам был
+        # меньше реального числа коробов на складе и не совпадал с той же
+        # цифрой в сводке ("Непустых коробов на складе") и с выгрузкой
+        # boxes.export_boxes. Та же _non_empty_box_counts, что и там.
+        "ready_to_ship_by_warehouse": [
+            {
+                "warehouse": wh,
+                "qty": sum(p["ready_to_ship_by_warehouse"][i]["qty"] for p in picking_list),
+                "boxes": non_empty_box_counts.get(wh.id, 0),
+            }
+            for i, wh in enumerate(sender_warehouses)
+        ],
         "in_transit": sum(p["in_transit_total"] for p in picking_list),
         "ozon": {
             city: sum(
@@ -1053,12 +1431,21 @@ def _dashboard_context():
         "total_in_transit": overall_in_transit,
         "total_stock": overall_stock,
         "total_production": overall_production,
+        # Общее кол-во непустых коробов по складу, БЕЗ привязки к плану —
+        # просто физический факт (см. чат), та же цифра, что покажет
+        # выгрузка boxes.export_boxes для этого склада.
+        "non_empty_boxes_by_warehouse": [
+            {"warehouse": wh, "count": non_empty_box_counts.get(wh.id, 0)}
+            for wh in sender_warehouses
+        ],
     }
 
     return {
         "marketplaces": marketplaces_data,
         "picking_list": picking_list,
+        "picking_groups": picking_groups,
         "picking_totals": picking_totals,
+        "sender_warehouses": sender_warehouses,
         "ozon_cities": ozon_cities,
         "wb_cities": wb_cities,
         "summary": summary,

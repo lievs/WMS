@@ -281,6 +281,60 @@ def test_google_trigger_runs_sync_with_valid_token(client, db, monkeypatch):
     assert "обновлено ячеек факта: 8" in payload["message"]
 
 
+def test_sync_reports_missing_sheet_per_marketplace_and_leaves_old_plan(db, monkeypatch, app):
+    """Раньше, если для площадки не находился подходящий лист «Распределение»
+    (например, его переименовали/удалили), она молча пропускалась — план
+    оставался старым, а в сообщении о синхронизации по ней не было вообще
+    ни строки, и "успешная" синхронизация выглядела так, будто обновилось
+    всё (см. чат: "ошибка не ушла и новые позиции не подтягивает"). Теперь
+    для площадки без листа явно сообщается "лист не найден", а её план
+    остается нетронутым, не стирается в пустоту."""
+    from wms.blueprints import shipment_plan as sp
+
+    wh = Warehouse(code="WH-SYNC-MISS", name="ОЗОН: Москва", marketplace="ozon", marketplace_city="Москва")
+    db.session.add(wh)
+    db.session.commit()
+    old_plan = ShipmentPlan(marketplace="ozon", sheet_name="Распределение ОЗОН ФБО от 01.09 (копия)")
+    db.session.add(old_plan)
+    db.session.commit()
+    old_line = ShipmentPlanLine(
+        plan_id=old_plan.id, warehouse_id=wh.id, barcode="OLDBARCODE", planned_qty=10,
+    )
+    db.session.add(old_line)
+    db.session.commit()
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("Распределение ВБ ФБС от 05.09")
+    ws.append(["Артикул", "Размер", "Баркод", "Москва"])
+    ws.append(["A1", "46", "1112223334445", 5])
+    stream = io.BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+
+    monkeypatch.setattr(
+        sp, "load_distribution_workbook", lambda app: (stream, ["Распределение ВБ ФБС от 05.09"])
+    )
+    monkeypatch.setattr(sp, "write_wms_movement_sheet", lambda app: 0)
+    monkeypatch.setattr(sp, "write_distribution_facts", lambda app, workbook: 0)
+
+    with app.test_request_context():
+        summary, sheet_names, exported, updated_cells = sp.sync_google_plans_and_movements()
+
+    ozon_summary = next(line for line in summary if line.startswith("ОЗОН"))
+    assert "лист" in ozon_summary and "не найден" in ozon_summary
+    assert "НЕ обновлен" in ozon_summary
+
+    # Старый план площадки без найденного листа остался как был.
+    assert ShipmentPlan.query.get(old_plan.id) is not None
+    assert ShipmentPlanLine.query.filter_by(plan_id=old_plan.id).count() == 1
+    assert ShipmentPlanLine.query.get(old_line.id).barcode == "OLDBARCODE"
+
+    # Персистентная отметка — видна на дашборде при каждом заходе, не
+    # только в одноразовом flash-сообщении этого конкретного запроса.
+    assert sp._google_sync_status()["missing_marketplaces"] == "ОЗОН"
+
+
 def test_google_button_setup_uses_public_https_address(client_logged_in, app):
     app.config["WMS_PUBLIC_URL"] = "https://wms.wmsmeviar.ru"
 

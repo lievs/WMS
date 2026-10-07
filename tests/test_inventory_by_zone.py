@@ -192,6 +192,33 @@ def test_merge_allows_two_documents_for_same_row(db, client_logged_in):
     assert merged.id not in (doc1.id, doc2.id)
 
 
+def test_deleting_merged_document_returns_box_to_previous_row(db, client_logged_in):
+    """previous_zone_id переносится при объединении (см. merge_documents) —
+    удаление ИТОГОВОГО документа откатывает размещение туда, где короб был
+    до самого первого скана, а не в "никуда"."""
+    wh = _make_warehouse("WH-ZONE-17")
+    old_zone = _make_zone(wh, "ROW-P-OLD")
+    _make_zone(wh, "ROW-P-NEW")
+    item = _make_item("8880000411", "Товар для отката после объединения")
+    box = _make_box(wh, "BOX-ZONE-P", zone=old_zone)
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=1))
+    db.session.commit()
+
+    doc1 = _new_zone_inventory(client_logged_in, wh, "ROW-P-NEW")
+    client_logged_in.post(f"/inventory/{doc1.id}/boxes/add", data={"box_number": "BOX-ZONE-P"})
+    doc2 = _new_zone_inventory(client_logged_in, wh, "ROW-P-NEW")
+
+    client_logged_in.post(
+        "/inventory/merge", data={"doc_ids": [doc1.id, doc2.id]}, follow_redirects=True
+    )
+    merged = InventoryDocument.query.filter_by(warehouse_id=wh.id, status="draft").first()
+
+    client_logged_in.post(f"/inventory/{merged.id}/delete")
+
+    db.session.refresh(box)
+    assert box.zone_id == old_zone.id
+
+
 def test_new_form_shows_zone_mode_toggle(db, client_logged_in):
     html = client_logged_in.get("/inventory/new").get_data(as_text=True)
     assert "По ряду" in html
@@ -205,9 +232,122 @@ def test_detail_shows_row_code_in_header(db, client_logged_in):
     assert "ROW-I" in html
 
 
-def test_detail_hides_loose_stock_form_for_row_document(db, client_logged_in):
+def test_detail_shows_loose_stock_form_for_row_document(db, client_logged_in):
+    """Ряд без ячеек — товар там нередко лежит вообще без короба (см. чат),
+    поэтому, в отличие от инвентаризации по ЯЧЕЙКЕ, форма "без короба"
+    здесь показывается: скан штрихкода + количество."""
     wh = _make_warehouse("WH-ZONE-11")
     _make_zone(wh, "ROW-J")
     doc = _new_zone_inventory(client_logged_in, wh, "ROW-J")
     html = client_logged_in.get(f"/inventory/{doc.id}").get_data(as_text=True)
-    assert "Учесть товар без короба" not in html
+    assert "Учесть товар без короба" in html
+
+
+def test_add_line_counts_loose_item_in_row_document(db, client_logged_in):
+    wh = _make_warehouse("WH-ZONE-12")
+    _make_zone(wh, "ROW-K")
+    item = _make_item("8880000406", "Товар россыпью в ряду")
+    doc = _new_zone_inventory(client_logged_in, wh, "ROW-K")
+
+    resp = client_logged_in.post(
+        f"/inventory/{doc.id}/lines/add",
+        data={"nomenclature_id": item.id, "qty": 7},
+        follow_redirects=True,
+    )
+
+    assert "Учтено без короба" in resp.get_data(as_text=True)
+    line = doc.lines.filter_by(nomenclature_id=item.id).first()
+    assert line is not None
+    assert line.qty == 7
+
+
+def test_deleting_document_unplaces_box_it_placed_into_the_row(db, client_logged_in):
+    """Сканирование короба в рядовую инвентаризацию сразу же и есть его
+    фактическое размещение (см. add_box) — без документа-основания короб не
+    должен остаться висеть в этом ряду (см. чат: "товар остается в ряду без
+    коробов — это баг"). Короб был совсем не размещен до сканирования ->
+    после удаления документа снова не размещен."""
+    wh = _make_warehouse("WH-ZONE-13")
+    zone = _make_zone(wh, "ROW-L")
+    item = _make_item("8880000407", "Товар для отката")
+    box = _make_box(wh, "BOX-ZONE-L")
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=1))
+    db.session.commit()
+
+    doc = _new_zone_inventory(client_logged_in, wh, "ROW-L")
+    client_logged_in.post(f"/inventory/{doc.id}/boxes/add", data={"box_number": "BOX-ZONE-L"})
+    db.session.refresh(box)
+    assert box.zone_id == zone.id
+
+    client_logged_in.post(f"/inventory/{doc.id}/delete")
+
+    db.session.refresh(box)
+    assert box.zone_id is None
+    assert box.cell_id is None
+    assert box.status == "open"
+
+
+def test_deleting_document_returns_box_to_previous_row(db, client_logged_in):
+    """Короб, перенесенный этой инвентаризацией из ДРУГОГО ряда, при
+    удалении документа возвращается именно туда, а не просто "в никуда"."""
+    wh = _make_warehouse("WH-ZONE-14")
+    old_zone = _make_zone(wh, "ROW-M-OLD")
+    _make_zone(wh, "ROW-M-NEW")
+    item = _make_item("8880000408", "Товар для переноса и отката")
+    box = _make_box(wh, "BOX-ZONE-M", zone=old_zone)
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=1))
+    db.session.commit()
+
+    doc = _new_zone_inventory(client_logged_in, wh, "ROW-M-NEW")
+    client_logged_in.post(f"/inventory/{doc.id}/boxes/add", data={"box_number": "BOX-ZONE-M"})
+    db.session.refresh(box)
+    assert box.zone_id != old_zone.id
+
+    client_logged_in.post(f"/inventory/{doc.id}/delete")
+
+    db.session.refresh(box)
+    assert box.zone_id == old_zone.id
+
+
+def test_deleting_document_leaves_box_already_in_row_untouched(db, client_logged_in):
+    """Короб, который был в этом ряду еще до инвентаризации (просто
+    пересчитан заново), при удалении документа остается на месте — это не
+    имеет отношения к тому, что сделал именно этот документ."""
+    wh = _make_warehouse("WH-ZONE-15")
+    zone = _make_zone(wh, "ROW-N")
+    item = _make_item("8880000409", "Товар уже в ряду")
+    box = _make_box(wh, "BOX-ZONE-N", zone=zone)
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=1))
+    db.session.commit()
+
+    doc = _new_zone_inventory(client_logged_in, wh, "ROW-N")
+    client_logged_in.post(f"/inventory/{doc.id}/boxes/add", data={"box_number": "BOX-ZONE-N"})
+
+    client_logged_in.post(f"/inventory/{doc.id}/delete")
+
+    db.session.refresh(box)
+    assert box.zone_id == zone.id
+
+
+def test_deleting_scanned_box_unplaces_it_from_the_row(db, client_logged_in):
+    """Тот же откат, но при удалении ОДНОГО скана из еще не удаленного
+    документа (а не всего документа целиком)."""
+    wh = _make_warehouse("WH-ZONE-16")
+    zone = _make_zone(wh, "ROW-O")
+    item = _make_item("8880000410", "Товар для отката одного скана")
+    box = _make_box(wh, "BOX-ZONE-O")
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=1))
+    db.session.commit()
+
+    doc = _new_zone_inventory(client_logged_in, wh, "ROW-O")
+    client_logged_in.post(f"/inventory/{doc.id}/boxes/add", data={"box_number": "BOX-ZONE-O"})
+    db.session.refresh(box)
+    assert box.zone_id == zone.id
+
+    from wms.models import InventoryScannedBox
+    scanned = InventoryScannedBox.query.filter_by(document_id=doc.id, box_id=box.id).first()
+    client_logged_in.post(f"/inventory/{doc.id}/scanned-boxes/{scanned.id}/delete")
+
+    db.session.refresh(box)
+    assert box.zone_id is None
+    assert box.status == "open"

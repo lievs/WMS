@@ -2,11 +2,22 @@
 {% block title %}Расхождения WMS и 1С{% endblock %}
 {% block content %}
 <p><a href="{{ url_for('reports.index') }}">&larr; Отчеты</a></p>
-<h3 class="mb-3">Расхождения количества WMS и 1С</h3>
-<p class="text-muted">Здесь остаются только позиции, в которых количество после записи документа в 1С не совпало с WMS. Повторная успешная сверка удаляет старое расхождение.</p>
+<div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+  <h3 class="mb-0">Расхождения количества WMS и 1С{% if show_archived %} — архив{% endif %}</h3>
+  {% if show_archived %}
+  <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('reports.one_c_quantity_mismatches') }}">&larr; К активным расхождениям</a>
+  {% else %}
+  <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('reports.one_c_quantity_mismatches', archived=1) }}">🗄 Архив</a>
+  {% endif %}
+</div>
+{% if show_archived %}
+<p class="text-muted">Расхождения, перенесенные в архив вручную — например, по тестовым документам, которые уже нельзя исправить сверкой с 1С.</p>
+{% else %}
+<p class="text-muted">Здесь остаются только позиции, в которых количество после записи документа в 1С не совпало с WMS. Повторная успешная сверка удаляет старое расхождение. Расхождение по документу, который нельзя исправить (например, тестовый), можно перенести в архив, чтобы он не висел в списке.</p>
+{% endif %}
 <div class="card p-3">
   <table class="table table-sm table-mobile-compact">
-    <thead><tr><th>Проверено</th><th>Тип</th><th>Документ</th><th>Штрихкод</th><th>Товар</th><th>WMS</th><th>1С</th><th>Разница</th></tr></thead>
+    <thead><tr><th>Проверено</th><th>Тип</th><th>Документ</th><th>Штрихкод</th><th>Товар</th><th>WMS</th><th>1С</th><th>Разница</th>{% if current_user.is_admin %}<th></th>{% endif %}</tr></thead>
     <tbody>
     {% for row in rows %}
       <tr>
@@ -15,8 +26,21 @@
         <td>{{ row.barcode or '—' }}</td><td>{{ row.item_name or '—' }}</td>
         <td>{{ row.wms_qty | round(3) }}</td><td>{{ row.one_c_qty | round(3) }}</td>
         <td class="text-danger fw-bold">{{ '%+g'|format(row.diff()) }}</td>
+        {% if current_user.is_admin %}
+        <td>
+          {% if show_archived %}
+          <form method="post" action="{{ url_for('reports.restore_one_c_quantity_check', row_id=row.id) }}">
+            <button type="submit" class="btn btn-sm btn-outline-secondary">↩ Вернуть</button>
+          </form>
+          {% else %}
+          <form method="post" action="{{ url_for('reports.dismiss_one_c_quantity_check', row_id=row.id) }}">
+            <button type="submit" class="btn btn-sm btn-outline-secondary">🗄 В архив</button>
+          </form>
+          {% endif %}
+        </td>
+        {% endif %}
       </tr>
-    {% else %}<tr><td colspan="8" class="text-muted">Расхождений не найдено</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="{{ 9 if current_user.is_admin else 8 }}" class="text-muted">{% if show_archived %}Архив пуст{% else %}Расхождений не найдено{% endif %}</td></tr>{% endfor %}
     </tbody>
   </table>
 </div>

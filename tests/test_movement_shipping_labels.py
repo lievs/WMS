@@ -297,3 +297,121 @@ def test_settings_page_shows_sender_field(db, client_logged_in):
     resp = client_logged_in.get("/users")
     html = resp.get_data(as_text=True)
     assert "все направления" in html
+
+
+def test_shipping_label_uses_delivery_slot_date_when_set(db, client_logged_in, monkeypatch):
+    """Если у документа заполнена "Дата поставки" (дата слота на
+    маркетплейсе, см. чат), стикер печатает именно ее, а не сегодняшнюю
+    дату."""
+    import datetime
+
+    doc, _dest = _make_document_with_boxes(n_boxes=1, suffix="F")
+    doc.delivery_slot_date = datetime.date(2030, 1, 15)
+    db.session.commit()
+
+    from wms.utils import shipping_label_pdf
+
+    seen = []
+    original = shipping_label_pdf._draw_shipping_label
+
+    def spy(c, **kwargs):
+        seen.append(kwargs.get("delivery_date"))
+        return original(c, **kwargs)
+
+    monkeypatch.setattr(shipping_label_pdf, "_draw_shipping_label", spy)
+
+    shipping_label_pdf.build_movement_shipping_labels_pdf([doc])
+
+    assert seen == [datetime.date(2030, 1, 15)]
+
+
+def test_shipping_label_falls_back_to_today_when_delivery_slot_date_unset(db, client_logged_in, monkeypatch):
+    import datetime
+
+    doc, _dest = _make_document_with_boxes(n_boxes=1, suffix="G")
+    assert doc.delivery_slot_date is None
+
+    from wms.utils import shipping_label_pdf
+
+    seen = []
+    original = shipping_label_pdf._draw_shipping_label
+
+    def spy(c, **kwargs):
+        seen.append(kwargs.get("delivery_date"))
+        return original(c, **kwargs)
+
+    monkeypatch.setattr(shipping_label_pdf, "_draw_shipping_label", spy)
+
+    shipping_label_pdf.build_movement_shipping_labels_pdf([doc])
+
+    assert seen == [datetime.date.today()]
+
+
+def test_update_delivery_slot_date_from_list(db, client_logged_in):
+    doc, _dest = _make_document_with_boxes(n_boxes=1, suffix="H")
+
+    resp = client_logged_in.post(
+        f"/movement/{doc.id}/delivery-slot-date",
+        data={"delivery_slot_date": "2030-02-20"},
+        follow_redirects=True,
+    )
+
+    assert resp.status_code == 200
+    updated = MovementDocument.query.get(doc.id)
+    assert updated.delivery_slot_date.isoformat() == "2030-02-20"
+
+
+def test_update_delivery_slot_date_can_clear(db, client_logged_in):
+    doc, _dest = _make_document_with_boxes(n_boxes=1, suffix="I")
+    doc.delivery_slot_date = __import__("datetime").date(2030, 3, 1)
+    db.session.commit()
+
+    client_logged_in.post(
+        f"/movement/{doc.id}/delivery-slot-date",
+        data={"delivery_slot_date": ""},
+        follow_redirects=True,
+    )
+
+    updated = MovementDocument.query.get(doc.id)
+    assert updated.delivery_slot_date is None
+
+
+def test_update_delivery_slot_date_invalid_value_is_rejected(db, client_logged_in):
+    doc, _dest = _make_document_with_boxes(n_boxes=1, suffix="J")
+
+    resp = client_logged_in.post(
+        f"/movement/{doc.id}/delivery-slot-date",
+        data={"delivery_slot_date": "not-a-date"},
+        follow_redirects=True,
+    )
+
+    assert "Некорректная дата" in resp.get_data(as_text=True)
+    updated = MovementDocument.query.get(doc.id)
+    assert updated.delivery_slot_date is None
+
+
+def test_delivery_slot_date_column_shown_in_movement_list(db, client_logged_in):
+    doc, _dest = _make_document_with_boxes(n_boxes=1, suffix="K")
+
+    html = client_logged_in.get("/movement/").get_data(as_text=True)
+
+    assert "Дата поставки" in html
+    assert f'/movement/{doc.id}/delivery-slot-date' in html
+    assert 'name="delivery_slot_date"' in html
+
+
+def test_delivery_slot_date_editable_from_detail_page(db, client_logged_in):
+    doc, _dest = _make_document_with_boxes(n_boxes=1, suffix="L")
+
+    resp = client_logged_in.post(
+        f"/movement/{doc.id}/delivery-slot-date",
+        data={"delivery_slot_date": "2030-04-10", "return_to": "detail"},
+        follow_redirects=True,
+    )
+
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert f"/movement/{doc.id}" in resp.request.path
+    updated = MovementDocument.query.get(doc.id)
+    assert updated.delivery_slot_date.isoformat() == "2030-04-10"
+    assert 'value="2030-04-10"' in html

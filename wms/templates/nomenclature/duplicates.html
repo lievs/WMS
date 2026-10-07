@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Дубли номенклатуры{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('nomenclature.list_nomenclature') }}">&larr; Номенклатура</a></p>
+
+<h3 class="mb-1">Дубли номенклатуры</h3>
+<p class="text-muted">
+  Товары с одинаковым наименованием (без учета регистра и пробелов). Это не всегда дубль —
+  один и тот же текст в наименовании иногда бывает у разных размеров/цветов с отдельными
+  штрихкодами. Прежде чем объединять, сверьте штрихкод/артикул/размер каждой позиции.
+</p>
+
+{% if not groups %}
+<div class="alert alert-success">Совпадающих наименований не найдено.</div>
+{% endif %}
+
+{% for group in groups %}
+<div class="card p-3 mb-4">
+  <h5>{{ group.name }} <span class="text-muted small">({{ group.rows|length }} поз.)</span></h5>
+  <form method="post" action="{{ url_for('nomenclature.merge_duplicates') }}"
+        onsubmit="return confirm('Объединить отмеченные позиции в одну? Остатки и документы перенесутся на «оставленный» товар, дубли удалятся без возможности восстановления.');">
+    <div class="table-responsive">
+      <table class="table table-sm align-middle">
+        <thead>
+          <tr>
+            <th>Оставить</th>
+            <th>Объединить</th>
+            <th>Штрихкод</th>
+            <th>Доп. штрихкод</th>
+            <th>Артикул</th>
+            <th>Размер</th>
+            <th>Ед.</th>
+            <th>Остаток</th>
+            <th>Создан</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in group.rows %}
+          <tr>
+            <td><input type="radio" name="keep_id" value="{{ row.item.id }}" required></td>
+            <td><input type="checkbox" name="merge_ids" value="{{ row.item.id }}" checked></td>
+            <td>{{ row.item.barcode }}</td>
+            <td>{{ row.item.barcode2 or '—' }}</td>
+            <td>{{ row.item.sku }}</td>
+            <td>{{ row.item.size or '—' }}</td>
+            <td>{{ row.item.unit }}</td>
+            <td>{{ '%g' % row.stock }}</td>
+            <td class="text-muted small">{{ row.item.created_at.strftime('%d.%m.%Y') if row.item.created_at else '' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if current_user.is_admin %}
+    <button type="submit" class="btn btn-warning">🧬 Объединить отмеченные в «Оставить»</button>
+    {% else %}
+    <div class="text-muted small">Объединять дубли может только администратор.</div>
+    {% endif %}
+  </form>
+</div>
+{% endfor %}
+{% endblock %}

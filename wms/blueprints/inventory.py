@@ -151,7 +151,17 @@ def merge_documents():
                 duplicate_box_numbers.append(scanned.box.box_number)
                 continue
             seen_box_ids.add(scanned.box_id)
-            db.session.add(InventoryScannedBox(document_id=merged.id, box_id=scanned.box_id))
+            db.session.add(
+                InventoryScannedBox(
+                    document_id=merged.id, box_id=scanned.box_id,
+                    # Переносим "где короб был до размещения этой инвентаризацией"
+                    # с исходного документа — иначе удаление объединенного
+                    # документа откатило бы размещение короба в "никуда" вместо
+                    # его настоящего прежнего места (см. _revert_scanned_box_placement).
+                    previous_cell_id=scanned.previous_cell_id,
+                    previous_zone_id=scanned.previous_zone_id,
+                )
+            )
             for box_item in scanned.box.items:
                 line = InventoryLine.query.filter_by(
                     document_id=merged.id, nomenclature_id=box_item.nomenclature_id
@@ -316,11 +326,20 @@ def add_box(doc_id):
         return redirect(url_for("inventory.detail", doc_id=doc.id, empty_box=box.id))
 
     moved_from = None
+    previous_cell_id = None
+    previous_zone_id = None
     if doc.cell_id or doc.zone_id:
         # Выборочная инвентаризация ячейки/ряда — сканирование короба сразу
         # же и есть его фактическое размещение туда (см. чат — ряд без
         # ячеек), без отдельного подтверждения, даже если короб был в
         # другом месте. _place_box сам разбирает, ячейка это или ряд.
+        # Запоминаем, где короб был ДО этого — если сканирование его
+        # переставило откуда-то, при удалении скана/документа (см.
+        # delete_scanned_box/delete_document) короб вернется туда же, а не
+        # останется висеть в месте, для которого больше нет документа-
+        # основания.
+        previous_cell_id = box.cell_id
+        previous_zone_id = box.zone_id
         already_here = (doc.cell_id and box.cell_id == doc.cell_id) or (
             doc.zone_id and box.zone_id == doc.zone_id
         )
@@ -345,7 +364,12 @@ def add_box(doc_id):
             )
             db.session.add(line)
 
-    db.session.add(InventoryScannedBox(document_id=doc.id, box_id=box.id))
+    db.session.add(
+        InventoryScannedBox(
+            document_id=doc.id, box_id=box.id,
+            previous_cell_id=previous_cell_id, previous_zone_id=previous_zone_id,
+        )
+    )
     box.mark_scanned(current_user)
     db.session.commit()
 
@@ -382,6 +406,27 @@ def receive_into_empty_box(doc_id, box_id):
     return redirect(url_for("receiving.detail", doc_id=receiving.id, box=box.id))
 
 
+def _revert_scanned_box_placement(doc, scanned):
+    """Отменяет размещение, которое сделало сканирование этого короба в
+    выборочную инвентаризацию ячейки/ряда (см. add_box) — короб возвращается
+    туда, где был до этого (previous_cell_id/previous_zone_id), в т.ч. в
+    "никуда" (не размещен), если до сканирования он там и был. Только если
+    короб до сих пор стоит именно там, куда его поставил этот документ —
+    если кто-то успел переставить его в другое место другим действием,
+    трогать не нужно (это уже не имеет отношения к этому документу)."""
+    if not (doc.cell_id or doc.zone_id):
+        return
+    box = scanned.box
+    still_here = (doc.cell_id and box.cell_id == doc.cell_id) or (
+        doc.zone_id and box.zone_id == doc.zone_id
+    )
+    if not still_here:
+        return
+    box.cell_id = scanned.previous_cell_id
+    box.zone_id = scanned.previous_zone_id
+    box.status = "stored" if (scanned.previous_cell_id or scanned.previous_zone_id) else "open"
+
+
 @bp.route("/<int:doc_id>/scanned-boxes/<int:scanned_id>/delete", methods=["POST"])
 def delete_scanned_box(doc_id, scanned_id):
     doc = InventoryDocument.query.get_or_404(doc_id)
@@ -391,6 +436,7 @@ def delete_scanned_box(doc_id, scanned_id):
 
     scanned = InventoryScannedBox.query.filter_by(id=scanned_id, document_id=doc_id).first_or_404()
     box = scanned.box
+    _revert_scanned_box_placement(doc, scanned)
 
     for box_item in box.items:
         line = InventoryLine.query.filter_by(
@@ -412,7 +458,11 @@ def add_line(doc_id):
     """Учет товара напрямую, без короба — для неразмещенного остатка,
     который лежит россыпью и никогда не попадет в подсчет через
     сканирование коробов (см. detail() и почему такой товар иначе всегда
-    показывался бы недостачей в сличительной ведомости)."""
+    показывался бы недостачей в сличительной ведомости).
+
+    Работает и для выборочной инвентаризации РЯДА (doc.zone_id) — товар,
+    сложенный в ряду напрямую, без короба (см. чат). Для ячейки (doc.cell_id)
+    в шаблоне этот способ не показывается — ячейка предполагает короб."""
     doc = InventoryDocument.query.get_or_404(doc_id)
     if doc.status != "draft":
         flash("Документ уже завершен", "danger")
@@ -502,6 +552,13 @@ def delete_document(doc_id):
     if doc.status != "draft":
         flash("Можно удалить только черновик", "danger")
         return redirect(url_for("inventory.detail", doc_id=doc_id))
+
+    # Выборочная инвентаризация ячейки/ряда сама расставляла короба туда при
+    # сканировании (см. add_box) — без этого при удалении документа они
+    # остались бы висеть в этой ячейке/ряду без какого-либо документа-
+    # основания (см. чат: "товар остается в ряду без коробов — это баг").
+    for scanned in doc.scanned_boxes:
+        _revert_scanned_box_placement(doc, scanned)
 
     number = doc.number
     db.session.delete(doc)

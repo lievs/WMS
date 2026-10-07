@@ -190,6 +190,16 @@ def test_novelty_ignores_other_marketplace_lines_of_same_barcode(db, client_logg
     assert wb_moscow.distributed_target_qty == 30.0
     assert wb_kazan.distributed_target_qty == 30.0
 
+    # Баг из чата: "приоритет 0w отгружается на озон" — в файле ОЗОН для
+    # этого штрихкода реально стояло 50, но раз штрихкод помечен 0w
+    # (новинка только для ВБ), _apply_priority_distribution обнуляет
+    # planned_qty этой строки целиком (а не только distributed_target_qty)
+    # — иначе remaining_qty()/"Не хватает по плану" по-прежнему считали бы
+    # это живой потребностью, и туда реально отгружали.
+    assert ozon_line.planned_qty == 0.0
+    assert ozon_line.remaining_qty() == 0.0
+    assert ozon_line.effective_planned_qty() == 0.0
+
 
 def test_novelty_falls_back_to_equal_split_without_any_other_wb_data(db, client_logged_in):
     """Нет вообще других товаров ВБ, чтобы посчитать средний процент —
@@ -249,3 +259,64 @@ def test_dashboard_shows_novelty_badge_and_survives_zero_plan_filter(db, client_
     row_end = html.find(">", row_start)
     row_tag = html[row_start:row_end + 1]
     assert 'data-priority="wb"' in row_tag
+
+
+def test_remaining_qty_and_effective_planned_qty_zero_for_wrong_marketplace_novelty(db):
+    """Модельный уровень, без файла: строка новинки 0w (только для ВБ),
+    но привязанная к складу-городу ОЗОН — remaining_qty() и
+    effective_planned_qty() обязаны вернуть 0, даже если planned_qty в
+    самой строке ненулевой (см. чат: "приоритет 0w отгружается на озон")."""
+    from wms.models import ShipmentPlan
+
+    ozon_city = Warehouse(code="WH-NOV-MODEL", name="ОЗОН: Тест", marketplace="ozon", marketplace_city="Тест")
+    db.session.add(ozon_city)
+    db.session.commit()
+
+    plan = ShipmentPlan(marketplace="ozon")
+    db.session.add(plan)
+    db.session.commit()
+
+    line = ShipmentPlanLine(
+        plan_id=plan.id,
+        warehouse_id=ozon_city.id,
+        barcode="7770300099",
+        article="Новинка",
+        planned_qty=50,
+        fulfilled_qty=0,
+        novelty_marketplace="wb",
+    )
+    db.session.add(line)
+    db.session.commit()
+
+    assert line.planned_qty == 50
+    assert line.remaining_qty() == 0.0
+    assert line.effective_planned_qty() == 0.0
+
+
+def test_remaining_qty_unaffected_when_novelty_matches_own_marketplace(db):
+    """Контроль: новинка на СВОЕЙ площадке (0w на складе ВБ) считается
+    как обычно, правило не должно случайно занулять законную потребность."""
+    from wms.models import ShipmentPlan
+
+    wb_city = Warehouse(code="WH-NOV-MODEL2", name="ВБ: Тест", marketplace="wb", marketplace_city="Тест")
+    db.session.add(wb_city)
+    db.session.commit()
+
+    plan = ShipmentPlan(marketplace="wb")
+    db.session.add(plan)
+    db.session.commit()
+
+    line = ShipmentPlanLine(
+        plan_id=plan.id,
+        warehouse_id=wb_city.id,
+        barcode="7770300098",
+        article="Новинка",
+        planned_qty=50,
+        fulfilled_qty=10,
+        novelty_marketplace="wb",
+    )
+    db.session.add(line)
+    db.session.commit()
+
+    assert line.remaining_qty() == 40.0
+    assert line.effective_planned_qty() == 50.0

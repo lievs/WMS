@@ -1,6 +1,6 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
-from flask import Blueprint, Response, abort, flash, jsonify, redirect, render_template, request, url_for
+from flask import Blueprint, Response, abort, current_app, flash, jsonify, redirect, render_template, request, url_for
 from flask_login import current_user
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
@@ -190,7 +190,11 @@ def _apply_movement_search(query):
     Запрос из нескольких слов ("191 москва", "озон москва") разбивается по
     пробелам — документ должен совпасть по КАЖДОМУ слову (не обязательно в
     одном и том же поле, см. _movement_search_token_condition), а не
-    содержать всю фразу целиком подряд."""
+    содержать всю фразу целиком подряд.
+
+    Плюс отдельные фильтры по колонкам (см. чат — "фильтр над каждой
+    колонкой") — каждый независим от остальных и от общего поиска q,
+    комбинируются через И."""
     q = request.args.get("q", "").strip()
     if q:
         tokens = q.split()
@@ -202,7 +206,71 @@ def _apply_movement_search(query):
         query = query.filter(MovementDocument.marketplace_request_created_at.isnot(None))
     elif mp_request == "no":
         query = query.filter(MovementDocument.marketplace_request_created_at.is_(None))
+
+    number = request.args.get("number", "").strip()
+    if number:
+        query = query.filter(MovementDocument.number.ilike(f"%{number}%"))
+
+    from_warehouse_id = request.args.get("from_warehouse_id", type=int)
+    if from_warehouse_id:
+        query = query.filter(MovementDocument.from_warehouse_id == from_warehouse_id)
+
+    to_warehouse_id = request.args.get("to_warehouse_id", type=int)
+    if to_warehouse_id:
+        query = query.filter(MovementDocument.to_warehouse_id == to_warehouse_id)
+
+    created_by_id = request.args.get("created_by_id", type=int)
+    if created_by_id:
+        query = query.filter(MovementDocument.created_by_id == created_by_id)
+
+    status = request.args.get("status", "").strip()
+    if status:
+        query = query.filter(MovementDocument.status == status)
+
+    # _parse_report_date возвращает datetime на полночь указанного дня —
+    # дальше сравниваем напрямую, без combine().
+    date_from = _parse_report_date(request.args.get("date_from", ""))
+    if date_from:
+        query = query.filter(MovementDocument.created_at >= date_from)
+    date_to = _parse_report_date(request.args.get("date_to", ""))
+    if date_to:
+        query = query.filter(MovementDocument.created_at < date_to + timedelta(days=1))
     return query
+
+
+def _movement_filter_options():
+    """Списки для выпадающих фильтров над колонками (см. чат) — только
+    реально встречающиеся значения, не весь справочник складов/пользователей,
+    чтобы в списке не было складов/авторов, которых ни разу не было в
+    перемещениях."""
+    from_warehouses = (
+        Warehouse.query.join(
+            MovementDocument, MovementDocument.from_warehouse_id == Warehouse.id
+        )
+        .filter(Warehouse.is_active.is_(True))
+        .distinct()
+        .order_by(Warehouse.name)
+        .all()
+    )
+    to_warehouses = (
+        Warehouse.query.join(
+            MovementDocument, MovementDocument.to_warehouse_id == Warehouse.id
+        )
+        .distinct()
+        .order_by(Warehouse.name)
+        .all()
+    )
+    authors = (
+        User.query.join(MovementDocument, MovementDocument.created_by_id == User.id)
+        .distinct()
+        .order_by(User.full_name)
+        .all()
+    )
+    return {
+        "from_warehouses": from_warehouses,
+        "to_warehouses": to_warehouses,
+        "authors": authors,
+    }
 
 
 def _movement_pagination():
@@ -417,6 +485,7 @@ def list_documents():
         route_box=None,
         route_not_found=False,
         routing=[],
+        **_movement_filter_options(),
     )
 
 
@@ -1234,36 +1303,10 @@ def _expected_qty_by_nomenclature(doc):
     return expected
 
 
-def _apply_receipt_stock_difference(doc, nomenclature_id, expected_qty, received_qty):
-    """Приводит физический остаток склада назначения к факту приемки.
-
-    Недовоз списывается из содержимого коробов этого перемещения, излишек
-    попадает в неразмещенный остаток — его затем можно упаковать обычным
-    размещением. Документ сохраняет исходное отправленное количество в
-    sent_qty_snapshot.
-    """
-    shortage = max(expected_qty - received_qty, 0)
-    for line in doc.lines.order_by(MovementLine.id.desc()).all():
-        if shortage <= 0:
-            break
-        box_item = BoxItem.query.filter_by(
-            box_id=line.box_id, nomenclature_id=nomenclature_id
-        ).first()
-        if not box_item:
-            continue
-        take = min(box_item.qty, shortage)
-        box_item.qty -= take
-        shortage -= take
-        if box_item.qty <= 0:
-            db.session.delete(box_item)
-
-    excess = max(received_qty - expected_qty, 0)
-    if excess:
-        UnplacedStock.add(doc.to_warehouse_id, nomenclature_id, excess)
-
-
 def _revert_document_receipt(doc):
-    """Отменяет учет фактической приемки перед удалением документа."""
+    """Отменяет учет фактической приемки перед удалением документа. Короба
+    и неразмещенный остаток возвращаются только для старых приемок, которые
+    их меняли (receipt_changed_boxes не False)."""
     current = _expected_qty_by_nomenclature(doc)
     discrepancies = {d.nomenclature_id: d for d in doc.discrepancies}
     for nomenclature_id, qty in current.items():
@@ -1274,6 +1317,8 @@ def _revert_document_receipt(doc):
         if plan_line and _shipment_is_in_plan(plan_line, doc.shipped_at or doc.completed_at):
             plan_line.fulfilled_qty = max(plan_line.fulfilled_qty - actual_qty, 0)
 
+    if doc.receipt_changed_boxes is False:
+        return
     for discrepancy in doc.discrepancies:
         if discrepancy.shortage_qty():
             first_line = doc.lines.first()
@@ -1296,6 +1341,34 @@ def _revert_document_receipt(doc):
                 discrepancy.nomenclature_id,
                 discrepancy.excess_qty(),
             )
+
+
+@bp.route("/<int:doc_id>/unreceive", methods=["POST"])
+def unreceive(doc_id):
+    """Администратор возвращает «Принято на складе» в работу, чтобы
+    поправить принятое количество: выполнение плана отгрузок уменьшается,
+    расхождения удаляются (у старых приемок, менявших короба, недовоз
+    возвращается в короба, а излишек снимается с неразмещенного остатка). После
+    этого кнопка «Принято на складе» снова доступна."""
+    if not current_user.is_admin:
+        flash("Вернуть приемку в работу может только администратор", "danger")
+        return redirect(url_for("movement.detail", doc_id=doc_id))
+    doc = MovementDocument.query.get_or_404(doc_id)
+    if doc.received_at is None:
+        flash("Перемещение еще не принято на складе", "danger")
+        return redirect(url_for("movement.detail", doc_id=doc.id))
+    _revert_document_receipt(doc)
+    for discrepancy in list(doc.discrepancies):
+        db.session.delete(discrepancy)
+    doc.received_at = None
+    doc.received_qty_snapshot = None
+    doc.receipt_changed_boxes = None
+    if doc.synced_to_1c_at is not None:
+        doc.composition_changed_at = datetime.utcnow()
+    db.session.commit()
+    current_app.logger.warning("Приемка перемещения %s возвращена в работу (%s)", doc.number, current_user.username)
+    flash(f"Приемка перемещения {doc.number} возвращена в работу — поправьте и снова нажмите «Принято на складе»", "success")
+    return redirect(url_for("movement.detail", doc_id=doc.id))
 
 
 @bp.route("/<int:doc_id>/receive", methods=["GET", "POST"])
@@ -1379,12 +1452,12 @@ def receive(doc_id):
                     received_qty=received_qty,
                 )
             )
-            _apply_receipt_stock_difference(
-                doc, nomenclature_id, expected_qty, received_qty
-            )
+            # Короба не трогаем (см. чат: «короба пусть остаются как есть») —
+            # расхождение только записывается и видно в «фактически принято».
 
     doc.sent_qty_snapshot = doc.sent_qty_snapshot or sum(expected.values())
     doc.received_qty_snapshot = total_received_qty
+    doc.receipt_changed_boxes = False
     doc.received_at = datetime.utcnow()
     db.session.commit()
     if shortage_qty:
@@ -1487,6 +1560,29 @@ def update_marketplace_request_number(doc_id):
     return redirect(url_for("movement.list_documents"))
 
 
+@bp.route("/<int:doc_id>/delivery-slot-date", methods=["POST"])
+def update_delivery_slot_date(doc_id):
+    """Дата слота, забронированного на маркетплейсе для приемки (см. чат) —
+    вносится вручную, используется вместо сегодняшней даты при печати
+    стикеров отправления (см. utils.shipping_label_pdf)."""
+    doc = MovementDocument.query.get_or_404(doc_id)
+    raw = request.form.get("delivery_slot_date", "").strip()
+    if raw:
+        try:
+            doc.delivery_slot_date = date.fromisoformat(raw)
+        except ValueError:
+            flash("Некорректная дата поставки", "danger")
+            if request.form.get("return_to") == "detail":
+                return redirect(url_for("movement.detail", doc_id=doc.id))
+            return redirect(url_for("movement.list_documents"))
+    else:
+        doc.delivery_slot_date = None
+    db.session.commit()
+    if request.form.get("return_to") == "detail":
+        return redirect(url_for("movement.detail", doc_id=doc.id))
+    return redirect(url_for("movement.list_documents"))
+
+
 @bp.route("/<int:doc_id>/export.xlsx")
 def export_document(doc_id):
     doc = MovementDocument.query.get_or_404(doc_id)
@@ -1583,8 +1679,9 @@ def export_shipping_labels():
     перемещения) или по выбранным в списке — один стикер на каждый короб
     документа: отправитель (настраивается в «Настройки» — либо склад
     документа, либо единый текст на все направления), направление,
-    порядковый номер короба из общего количества, дата печати и площадка
-    склада назначения."""
+    порядковый номер короба из общего количества, дата поставки (см.
+    MovementDocument.delivery_slot_date — если не заполнена, дата печати)
+    и площадка склада назначения."""
     doc_ids = request.args.getlist("doc_ids", type=int)
     if not doc_ids:
         flash("Выберите хотя бы одно перемещение для печати стикеров", "danger")
