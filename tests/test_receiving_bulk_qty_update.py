@@ -83,18 +83,30 @@ def test_bulk_update_ignores_invalid_and_missing_values(db, client_logged_in):
     assert ReceivingLine.query.get(line.id).qty == 10
 
 
-def test_bulk_update_blocked_when_completed(db, client_logged_in):
+def test_bulk_update_blocked_when_completed_for_non_admin(db, client):
+    """Не администратору — доступа нет, документ завершен. Администратору
+    это теперь разрешено задним числом — см.
+    tests/test_receiving_edit_completed_qty.py."""
+    from wms.models import User
+
     wh = _make_warehouse("WH-BULK-4")
     item = _make_item("5550000005")
-    doc = ReceivingDocument(number="BULK-0004", warehouse_id=wh.id, status="completed")
+    user = User(username="staffer-bulk4", full_name="Складской", role="warehouse")
+    user.set_password("x")
+    db.session.add(user)
+    db.session.commit()
+    doc = ReceivingDocument(
+        number="BULK-0004", warehouse_id=wh.id, status="completed", created_by_id=user.id
+    )
     db.session.add(doc)
     db.session.commit()
     line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=10)
     db.session.add(line)
     db.session.commit()
+    with client.session_transaction() as sess:
+        sess["_user_id"] = str(user.id)
+        sess["_fresh"] = True
 
-    client_logged_in.post(
-        f"/receiving/{doc.id}/lines/update-bulk", data={f"qty_{line.id}": "999"}
-    )
+    client.post(f"/receiving/{doc.id}/lines/update-bulk", data={f"qty_{line.id}": "999"})
 
     assert ReceivingLine.query.get(line.id).qty == 10
