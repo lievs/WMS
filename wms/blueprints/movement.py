@@ -1304,14 +1304,17 @@ def _expected_qty_by_nomenclature(doc):
 
 
 def _apply_receipt_stock_difference(doc, nomenclature_id, expected_qty, received_qty):
-    """Приводит физический остаток склада назначения к факту приемки (см.
-    чат: расхождение при приемке на СЦ должно менять физический остаток, а
-    не только записываться).
+    """Приводит физический остаток к факту приемки (см. чат: расхождение
+    при приемке на СЦ должно менять физический остаток, а не только
+    записываться).
 
-    Недовоз списывается из содержимого коробов этого перемещения, излишек
-    попадает в неразмещенный остаток — его затем можно упаковать обычным
-    размещением. Документ сохраняет исходное отправленное количество в
-    sent_qty_snapshot.
+    Недовоз списывается из содержимого коробов этого перемещения (на
+    складе назначения они физически не довезли столько, сколько заявлено).
+    Излишек — обратная ситуация: со склада-отправителя физически увезли
+    больше, чем было упаковано в короб, поэтому списываем этот излишек с
+    неразмещенного остатка отправителя (а не добавляем остаток складу
+    назначения — там взялось именно оттуда, не из воздуха). Документ
+    сохраняет исходное отправленное количество в sent_qty_snapshot.
     """
     shortage = max(expected_qty - received_qty, 0)
     for line in doc.lines.order_by(MovementLine.id.desc()).all():
@@ -1330,7 +1333,7 @@ def _apply_receipt_stock_difference(doc, nomenclature_id, expected_qty, received
 
     excess = max(received_qty - expected_qty, 0)
     if excess:
-        UnplacedStock.add(doc.to_warehouse_id, nomenclature_id, excess)
+        UnplacedStock.consume(doc.from_warehouse_id, nomenclature_id, excess)
 
 
 def _revert_document_receipt(doc):
@@ -1368,8 +1371,10 @@ def _revert_document_receipt(doc):
                         qty=discrepancy.shortage_qty(),
                     ))
         if discrepancy.excess_qty():
-            UnplacedStock.consume(
-                doc.to_warehouse_id,
+            # Симметрично _apply_receipt_stock_difference: излишек списывался
+            # с остатка отправителя — возвращаем его туда же.
+            UnplacedStock.add(
+                doc.from_warehouse_id,
                 discrepancy.nomenclature_id,
                 discrepancy.excess_qty(),
             )

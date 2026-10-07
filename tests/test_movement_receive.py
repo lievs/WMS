@@ -234,7 +234,7 @@ def test_admin_returns_received_movement_to_work_and_receives_again(db, client_l
     doc = MovementDocument.query.get(doc.id)
     assert doc.received_at is None and doc.received_qty_snapshot is None
     assert MovementReceiptDiscrepancy.query.filter_by(document_id=doc.id).count() == 0
-    assert BoxItem.query.filter_by(nomenclature_id=item.id).one().qty == 10  # короба приемка не трогала
+    assert BoxItem.query.filter_by(nomenclature_id=item.id).one().qty == 10  # недовоз возвращен в короб
     assert ShipmentPlanLine.query.get(plan_line.id).fulfilled_qty == 0
 
     client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "10"})
@@ -264,18 +264,24 @@ def test_shortage_reduces_box_and_shows_sent_vs_received(db, client_logged_in):
     assert UnplacedStock.query.count() == 0
 
 
-def test_excess_credited_to_unplaced_stock_box_unchanged(db, client_logged_in):
+def test_excess_debited_from_sender_unplaced_stock_box_unchanged(db, client_logged_in):
     """Излишек при приемке не трогает короб (в нем как было упаковано, так
-    и остается) — он зачисляется в неразмещенный остаток склада назначения,
-    откуда его можно разместить обычным «Размещением»."""
+    и остается) — физически со склада-отправителя увезли больше, чем
+    записано в коробе, поэтому списываем излишек с его неразмещенного
+    остатка (см. чат: "он наоборот должен списываться, если отвезли
+    лишнее"), а не добавляем остаток складу назначения."""
     from wms.models import UnplacedStock
     doc, item, _ = _make_completed_document(qty=10)
+    UnplacedStock.add(doc.from_warehouse_id, item.id, 5)
+
     client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "12"})
+
     db.session.expire_all()
     doc = MovementDocument.query.get(doc.id)
     assert (doc.total_sent_qty(), doc.total_received_qty()) == (10, 12)
     assert BoxItem.query.filter_by(nomenclature_id=item.id).one().qty == 10
-    assert UnplacedStock.available(doc.to_warehouse_id, item.id) == 2
+    assert UnplacedStock.available(doc.from_warehouse_id, item.id) == 3  # 5 - 2 излишка
+    assert UnplacedStock.available(doc.to_warehouse_id, item.id) == 0
 
 
 def test_old_receipt_that_reduced_boxes_still_shows_right_numbers(db, client_logged_in):
