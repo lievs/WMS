@@ -884,19 +884,25 @@ def update_line(doc_id, line_id):
             if box_item.qty <= 0:
                 db.session.delete(box_item)
     elif editing_after_completed and line.line_completed_at is not None:
-        # Короба нет — годное количество уже зачислено в неразмещенный
-        # остаток (см. _credit_receiving_line). defect_qty не трогаем,
-        # поэтому разница в good_qty равна той же delta, что и у qty.
-        if delta < 0 and UnplacedStock.available(doc.warehouse_id, line.nomenclature_id) < -delta:
+        # Короба нет — в неразмещенный остаток зачислено не обязательно все
+        # good_qty целиком: если в этой же приемке есть еще строки с тем же
+        # товаром, упакованные в короб, часть вычтена (см.
+        # _unboxed_credit_qty, чтобы не задваивать остаток). Поэтому старое
+        # и новое зачисленное количество считаем той же функцией, а не
+        # напрямую через delta по qty.
+        old_credit = _unboxed_credit_qty(doc, line, line.good_qty())
+        new_credit = _unboxed_credit_qty(doc, line, qty - line.defect_qty)
+        credit_delta = new_credit - old_credit
+        if credit_delta < 0 and UnplacedStock.available(doc.warehouse_id, line.nomenclature_id) < -credit_delta:
             flash(
                 f"Нельзя уменьшить — товар «{line.nomenclature.name}» уже частично размещен в короба",
                 "danger",
             )
             return redirect(url_for("receiving.detail", doc_id=doc_id))
-        if delta > 0:
-            UnplacedStock.add(doc.warehouse_id, line.nomenclature_id, delta, receiving_document=doc)
-        elif delta < 0:
-            UnplacedStock.consume(doc.warehouse_id, line.nomenclature_id, -delta)
+        if credit_delta > 0:
+            UnplacedStock.add(doc.warehouse_id, line.nomenclature_id, credit_delta, receiving_document=doc)
+        elif credit_delta < 0:
+            UnplacedStock.consume(doc.warehouse_id, line.nomenclature_id, -credit_delta)
 
     line.qty = qty
     if doc.status == "recounting" and line.expected_qty is not None:
