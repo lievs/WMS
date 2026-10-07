@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 import hmac
 import json
 import os
@@ -1077,6 +1077,24 @@ def _group_picking_list(picking_list, sender_warehouses, ozon_cities, wb_cities)
     return ordered
 
 
+def _shipped_qty_on_date(warehouse_id, day):
+    """Сколько реально отгружено (total_sent_qty по завершенным
+    перемещениям, забранным транспортом) именно в этот календарный день на
+    указанный склад-город — пересчитывается каждый раз заново по живым
+    данным, а не хранится (см. чат: при выставлении даты плана нужно
+    видеть, сколько на эту дату уже отгружено, чтобы понимать выполнение
+    плана отгрузок)."""
+    start = datetime.combine(day, time.min)
+    end = datetime.combine(day, time.max)
+    docs = MovementDocument.query.filter(
+        MovementDocument.to_warehouse_id == warehouse_id,
+        MovementDocument.status == "completed",
+        MovementDocument.shipped_at >= start,
+        MovementDocument.shipped_at <= end,
+    ).all()
+    return sum(doc.total_sent_qty() for doc in docs)
+
+
 def _dashboard_context():
     plans = {p.marketplace: p for p in ShipmentPlan.query.all()}
     sender_ids = _sender_warehouse_ids()
@@ -1190,8 +1208,14 @@ def _dashboard_context():
                 100 * row["fulfilled_with_transit"] / row["planned"] if row["planned"] else None
             )
             # Дата, к которой нужно отгрузить план по этому городу —
-            # проставляется вручную на дашборде (см. чат).
+            # проставляется вручную на дашборде (см. чат). Если дата
+            # выставлена, сразу пересчитываем, сколько реально отгрузили
+            # именно в этот день — чтобы сверить с планом на эту дату.
             row["deadline"] = city_deadlines.get((plan.id, row["warehouse"].id))
+            row["shipped_on_deadline"] = (
+                _shipped_qty_on_date(row["warehouse"].id, row["deadline"])
+                if row["deadline"] else None
+            )
             # Вклад каждого склада-отправителя в то, что уже уехало на этот
             # город — в штуках и в процентах от суммы по всем отправителям
             # (не от плана города — она может не сойтись с планом, если

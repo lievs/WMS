@@ -164,6 +164,11 @@
                   <input type="date" name="ship_by_date" class="form-control form-control-sm" style="width:9.5em"
                          value="{{ row.deadline.isoformat() if row.deadline else '' }}" onchange="this.form.submit()">
                 </form>
+                {% if row.deadline %}
+                <div class="small text-muted mt-1" title="Пересчитывается каждый раз заново по факту отгрузок за этот день">
+                  отгружено в эту дату: <b>{{ row.shipped_on_deadline | round(0) | int }}</b>
+                </div>
+                {% endif %}
               </td>
               <td>{{ row.planned | round(0) | int }}</td>
               <td>{% if row.in_transit %}<span class="text-warning-emphasis">{{ row.in_transit | round(0) | int }}</span>{% else %}—{% endif %}</td>

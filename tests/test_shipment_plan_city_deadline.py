@@ -124,6 +124,37 @@ def test_sender_warehouse_breakdown_shows_qty_and_percent(db, client_logged_in):
     assert "10" in snippet and "25%" in snippet  # 10 из 40
 
 
+def test_deadline_date_shows_qty_shipped_exactly_on_that_date(db, client_logged_in):
+    """При выставлении «Дата плана» пересчитывается, сколько реально
+    отгружено именно в этот день (см. чат) — не накопительно и не из
+    другого дня."""
+    plan, sender, city, item = _setup(planned_qty=100)
+
+    on_deadline_doc = _ship_box(sender, city, item, qty=12, box_number="BOX-SPD-ONDATE", client=client_logged_in)
+    other_day_doc = _ship_box(sender, city, item, qty=99, box_number="BOX-SPD-OTHERDAY", client=client_logged_in)
+
+    deadline_day = date.today() - timedelta(days=2)
+    from datetime import datetime, time
+
+    db.session.refresh(on_deadline_doc)
+    db.session.refresh(other_day_doc)
+    on_deadline_doc.shipped_at = datetime.combine(deadline_day, time(12, 0))
+    other_day_doc.shipped_at = datetime.combine(deadline_day - timedelta(days=1), time(12, 0))
+    db.session.commit()
+
+    client_logged_in.post(
+        f"/shipment-plan/{plan.id}/cities/{city.id}/deadline", data={"ship_by_date": deadline_day.isoformat()}
+    )
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+    city_idx = html.find("<td>Город</td>")
+    snippet = html[city_idx : city_idx + 900]
+    assert "отгружено в эту дату" in snippet
+    assert "<b>12</b>" in snippet
+    assert "<b>99</b>" not in snippet
+    assert "<b>111</b>" not in snippet  # не накопительно
+
+
 def test_sender_breakdown_empty_when_nothing_shipped(db, client_logged_in):
     plan, sender, city, item = _setup()
 
