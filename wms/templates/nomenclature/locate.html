@@ -25,7 +25,7 @@
     <div class="card p-3">
       <h5>В коробах</h5>
       <table class="table table-sm table-mobile-compact">
-        <thead><tr><th>Склад</th><th>Ячейка/Ряд</th><th>Короб</th><th>Кол-во</th></tr></thead>
+        <thead><tr><th>Склад</th><th>Ячейка/Ряд</th><th>Короб</th><th>Кол-во</th><th>На складе с</th></tr></thead>
         <tbody>
         {% for bi in box_rows %}
           <tr>
@@ -37,9 +37,10 @@
             </td>
             <td><a href="{{ url_for('boxes.detail', box_id=bi.box.id) }}">{{ bi.box.box_number }}</a></td>
             <td>{{ bi.qty | round(0) }} {{ item.unit }}</td>
+            <td class="text-nowrap">{{ (bi.box.warehouse_arrived_at | msk).strftime('%d.%m.%Y') if bi.box.warehouse_arrived_at else '—' }}</td>
           </tr>
         {% else %}
-          <tr><td colspan="4" class="text-muted">Товар ни в одном коробе не упакован</td></tr>
+          <tr><td colspan="5" class="text-muted">Товар ни в одном коробе не упакован</td></tr>
         {% endfor %}
         </tbody>
       </table>

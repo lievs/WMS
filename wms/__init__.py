@@ -95,6 +95,19 @@ def _ensure_columns():
                         "[schema] warehouses.fulfillment_1c_name заполнен известными "
                         "складами 1С по городу"
                     )
+                if table.name == "boxes" and column.name == "warehouse_arrived_at":
+                    # Точный момент переезда короба на текущий склад для уже
+                    # существующих коробов неизвестен — created_at ближайшая
+                    # доступная оценка (для коробов, которые с тех пор не
+                    # переезжали, она и верна).
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE boxes SET warehouse_arrived_at = created_at "
+                                "WHERE warehouse_arrived_at IS NULL"
+                            )
+                        )
+                    print("[schema] boxes.warehouse_arrived_at заполнен из created_at для уже существующих коробов")
                 if table.name == "users" and column.name == "nomenclature_edit_allowed":
                     # ALTER TABLE ADD COLUMN не проставляет DEFAULT задним
                     # числом — у уже существующих пользователей колонка

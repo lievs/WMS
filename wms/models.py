@@ -585,6 +585,12 @@ class Box(db.Model):
     )
     status = db.Column(db.String(20), nullable=False, default="open")  # open | stored
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    # Момент поступления короба на ТЕКУЩИЙ склад (warehouse_id) — в отличие
+    # от created_at (когда короб создан впервые) обновляется при каждом
+    # переезде короба на другой склад перемещением (см. чат: "в коробах
+    # добавим дату добавления на склад"; movement.complete/_revert_line_
+    # effects/add_box).
+    warehouse_arrived_at = db.Column(db.DateTime, nullable=True, default=datetime.utcnow)
     # Когда и кем короб был отсканирован в последний раз — в любой операции
     # (приемка, размещение, перемещение, инвентаризация), см. Box.mark_scanned.
     # Не история всех сканов, только последний — для полной истории у

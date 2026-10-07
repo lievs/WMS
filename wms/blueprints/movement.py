@@ -959,6 +959,7 @@ def _revert_line_effects(doc, line):
     if doc.received_at is not None:
         _revert_shipment_fulfillment(box, doc.to_warehouse_id, doc.shipped_at)
     box.warehouse_id = line.from_warehouse_id
+    box.warehouse_arrived_at = datetime.utcnow()
     box.cell_id = line.from_cell_id
     box.status = "stored" if line.from_cell_id else "open"
 
@@ -1039,6 +1040,7 @@ def add_box(doc_id):
         # это сделал бы complete(), а не оставляем висеть "как будто в
         # черновике", где его никто больше не завершит.
         box.warehouse_id = doc.to_warehouse_id
+        box.warehouse_arrived_at = datetime.utcnow()
         box.cell_id = None
         box.status = "open"
         if doc.received_at is not None:
@@ -1224,6 +1226,7 @@ def complete(doc_id):
     for line in doc.lines:
         box = line.box
         box.warehouse_id = doc.to_warehouse_id
+        box.warehouse_arrived_at = datetime.utcnow()
         box.cell_id = line.to_cell_id
         box.status = "stored" if line.to_cell_id else "open"
         # Выполнение плана отгрузок засчитывается не здесь, а отдельным
