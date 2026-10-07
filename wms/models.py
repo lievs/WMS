@@ -72,6 +72,19 @@ SECTIONS = [
 ]
 SECTION_CODES = {code for code, _ in SECTIONS}
 
+# Физические склады, участвующие в остатках/приемке (в отличие от складов-
+# городов маркетплейсов, см. Warehouse.marketplace) — общий список для
+# nomenclature._stock_warehouses() и receiving._receiving_warehouses(),
+# чтобы новый физический склад заводился в одном месте (см. чат: добавление
+# склада "ЦЕХ Марат" как третьего склада в остатках и в приемке).
+PHYSICAL_STOCK_WAREHOUSE_NAMES = (
+    "основной",
+    "основной склад",
+    "склад №2",
+    "склад №2 (шоссейная 167)",
+    "цех марат",
+)
+
 # Роли раздела «МВБ Логистика» (отдельный вход, см. blueprints/mvb.py).
 MVB_ROLES = {
     "mvb_client": "Клиент",
@@ -172,6 +185,14 @@ class User(UserMixin, db.Model):
         (movement.transport_list) — ничего больше в WMS, см. чат. Проверяется
         в before_request так же, как is_production_only()."""
         return self.role == "logist" and not self.is_admin
+
+    def is_fulfillment_only(self):
+        """Сотрудник фулфилмент-склада (см. чат) — видит и ведет приемки и
+        перемещения только своего склада (warehouse_id), ничего больше по
+        другим складам; доступ к разделам ограничен через allowed_sections
+        ("receiving,movement"), выставляется при назначении роли (см.
+        auth.create_user/update_role)."""
+        return self.role == "fulfillment" and not self.is_admin
 
     def allowed_section_set(self):
         if not self.allowed_sections:

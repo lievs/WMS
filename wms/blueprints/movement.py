@@ -32,6 +32,15 @@ bp = Blueprint("movement", __name__)
 MOVEMENTS_PAGE_SIZE = 200
 
 
+def _fulfillment_owns(doc):
+    """Фулфилмент (см. чат — склад «ЦЕХ Марат» и подобные) ведет любое
+    перемещение со своего склада-отправителя, не только созданное лично
+    им — на складе может работать несколько человек. Входящие к ним
+    перемещения (to_warehouse_id) этим не открываются — их фулфилмент не
+    должен видеть/трогать."""
+    return current_user.is_fulfillment_only() and doc.from_warehouse_id == current_user.warehouse_id
+
+
 def _can_view_movement_document(doc):
     """Только ПРОСМОТР (список/детали/поиск короба) — не изменение. Пока
     документ "черновик" — его собирают сообща (см. route_box_add: черновик
@@ -54,6 +63,7 @@ def _can_view_movement_document(doc):
         or current_user.can_receive_movements()
         or doc.created_by_id == current_user.id
         or doc.status in ("draft", "collected")
+        or _fulfillment_owns(doc)
     )
 
 
@@ -112,6 +122,7 @@ def _restrict_document_access():
             current_user.is_admin
             or current_user.can_complete_movements()
             or doc.created_by_id == current_user.id
+            or _fulfillment_owns(doc)
         ):
             abort(404)
         return None
@@ -120,12 +131,13 @@ def _restrict_document_access():
             abort(404)
         return None
     # Остальные изменяющие маршруты (добавить/убрать короб, удалить и
-    # т.п.) — только автор или админ, как и раньше. "Просмотр всех
-    # перемещений" здесь не действует (он read-only), а совместный доступ к
-    # черновику дальше даем только через route_box_add (у него нет doc_id в
-    # URL, этот хук на него не срабатывает) — не через произвольное
-    # изменение чужого документа по прямой ссылке.
-    if not (current_user.is_admin or doc.created_by_id == current_user.id):
+    # т.п.) — только автор, админ или фулфилмент на своем складе
+    # (_fulfillment_owns), как и раньше. "Просмотр всех перемещений" здесь
+    # не действует (он read-only), а совместный доступ к черновику дальше
+    # даем только через route_box_add (у него нет doc_id в URL, этот хук на
+    # него не срабатывает) — не через произвольное изменение чужого
+    # документа по прямой ссылке.
+    if not (current_user.is_admin or doc.created_by_id == current_user.id or _fulfillment_owns(doc)):
         abort(404)
     return None
 
@@ -133,6 +145,10 @@ def _restrict_document_access():
 def _visible_movement_query():
     if current_user.can_view_movements() or current_user.can_receive_movements():
         return MovementDocument.query
+    if current_user.is_fulfillment_only():
+        # Весь свой склад-отправитель, а не только документы, созданные
+        # лично этим пользователем (см. чат).
+        return MovementDocument.query.filter(MovementDocument.from_warehouse_id == current_user.warehouse_id)
     return MovementDocument.query.filter(
         or_(MovementDocument.created_by_id == current_user.id, MovementDocument.status.in_(("draft", "collected")))
     )

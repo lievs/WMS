@@ -89,11 +89,15 @@ def create_user():
     shift_minutes = request.form.get("shift_minutes", type=int) or 480
     role = request.form.get("role", "warehouse")
     warehouse_id = request.form.get("warehouse_id", type=int)
-    if role not in ("warehouse", "production", "logist"):
+    if role not in ("warehouse", "production", "logist", "fulfillment"):
         role = "warehouse"
 
     if not username:
         flash("Укажите логин", "danger")
+        return redirect(url_for("auth.users"))
+
+    if role == "fulfillment" and not warehouse_id:
+        flash("Для роли «Фулфилмент» нужно выбрать склад", "danger")
         return redirect(url_for("auth.users"))
 
     if User.query.filter_by(username=username).first():
@@ -108,6 +112,10 @@ def create_user():
         shift_minutes=shift_minutes,
         role=role,
         warehouse_id=warehouse_id,
+        # Фулфилмент видит только приемку и перемещения своего склада (см.
+        # User.is_fulfillment_only) — остальные разделы закрыты этим же
+        # точечным механизмом, что и у обычных пользователей с allowed_sections.
+        allowed_sections="receiving,movement" if role == "fulfillment" else None,
     )
     user.set_password(temp_password)
     db.session.add(user)
@@ -173,21 +181,28 @@ def update_shift_minutes(user_id):
 def update_role(user_id):
     """Роль ограничивает доступ: "production" видит только сканирование ЧЗ
     на производстве, "logist" — только перемещения, ожидающие транспорт,
-    ничего больше (проверяется в before_request)."""
+    "fulfillment" — только приемку и перемещения своего склада, ничего
+    больше (проверяется в before_request/allowed_sections)."""
     if not _require_admin():
         return redirect(url_for("main.index"))
 
     user = User.query.get_or_404(user_id)
     role = request.form.get("role", "warehouse")
-    if role not in ("warehouse", "production", "logist"):
+    if role not in ("warehouse", "production", "logist", "fulfillment"):
         flash("Некорректная роль", "danger")
         return redirect(url_for("auth.users"))
 
-    if user.id == current_user.id and role in ("production", "logist") and not user.is_admin:
+    if user.id == current_user.id and role in ("production", "logist", "fulfillment") and not user.is_admin:
         flash("Нельзя ограничить самого себя до этой роли", "danger")
         return redirect(url_for("auth.users"))
 
+    if role == "fulfillment" and not user.warehouse_id:
+        flash("Для роли «Фулфилмент» у пользователя должен быть выбран склад", "danger")
+        return redirect(url_for("auth.users"))
+
     user.role = role
+    if role == "fulfillment":
+        user.allowed_sections = "receiving,movement"
     db.session.commit()
     flash(f"Роль для «{user.username}» обновлена", "success")
     return redirect(url_for("auth.users"))

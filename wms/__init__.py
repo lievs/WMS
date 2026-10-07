@@ -652,6 +652,17 @@ def create_app(config_class=Config):
             and not request.endpoint.startswith("onboarding.")
         ):
             return redirect(url_for("movement.transport_list"))
+        # Роль "фулфилмент" — доступ только к приемке и перемещениям своего
+        # склада (видимость внутри самих разделов дополнительно сужается по
+        # warehouse_id, см. receiving._visible_receiving_query/
+        # movement._visible_movement_query), ничего больше в WMS (см. чат).
+        if (
+            current_user.is_fulfillment_only()
+            and not request.endpoint.startswith("receiving.")
+            and not request.endpoint.startswith("movement.")
+            and not request.endpoint.startswith("onboarding.")
+        ):
+            return redirect(url_for("receiving.list_documents"))
         # Точечное ограничение разделов (см. User.allowed_sections) — тоже
         # проверяем при прямом вводе адреса, не только скрываем пункт меню.
         section = request.endpoint.split(".")[0]

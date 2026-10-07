@@ -5,6 +5,7 @@ from datetime import datetime
 from flask import (
     Blueprint,
     Response,
+    abort,
     current_app,
     flash,
     jsonify,
@@ -23,6 +24,7 @@ from ..models import (
     Box,
     BoxItem,
     Nomenclature,
+    PHYSICAL_STOCK_WAREHOUSE_NAMES,
     PlacementLine,
     ReceivingDocument,
     ReceivingLine,
@@ -50,6 +52,13 @@ def _restrict_document_access():
         return None
 
     doc = ReceivingDocument.query.get_or_404(document_id)
+    if current_user.is_fulfillment_only():
+        # Фулфилмент ведет любую приемку своего склада, не только
+        # созданную лично им (на складе может работать несколько человек) —
+        # но ничего по другим складам (см. чат).
+        if doc.warehouse_id != current_user.warehouse_id:
+            abort(404)
+        return None
     if current_user.can_view_invoice_receivings() and doc.is_from_invoice_import():
         # Раньше это правило действовало только на GET — право "видит все
         # приемки по накладным" выдается приемщику/зав. складом именно
@@ -69,6 +78,10 @@ def _visible_receiving_query():
     query = ReceivingDocument.query
     if current_user.is_admin:
         return query
+    if current_user.is_fulfillment_only():
+        # Весь свой склад, а не только документы, созданные лично этим
+        # пользователем (см. чат).
+        return query.filter(ReceivingDocument.warehouse_id == current_user.warehouse_id)
     if current_user.can_view_invoice_receivings():
         return query.filter(
             or_(
@@ -80,17 +93,15 @@ def _visible_receiving_query():
 
 
 def _receiving_warehouses():
-    """В приемке доступны только согласованные физические склады."""
-    allowed_names = (
-        "основной",
-        "основной склад",
-        "склад №2",
-        "склад №2 (шоссейная 167)",
-    )
+    """В приемке доступны только согласованные физические склады.
+    Фулфилмент (см. чат) видит и может создавать приемки только на своем
+    складе — остальные физические склады ему не предлагаются."""
+    if current_user.is_fulfillment_only():
+        return [current_user.warehouse] if current_user.warehouse and current_user.warehouse.is_active else []
     warehouses = (
         Warehouse.query.filter(
             Warehouse.is_active.is_(True),
-            func.lower(func.trim(Warehouse.name)).in_(allowed_names),
+            func.lower(func.trim(Warehouse.name)).in_(PHYSICAL_STOCK_WAREHOUSE_NAMES),
         )
         .order_by(Warehouse.code)
         .all()
