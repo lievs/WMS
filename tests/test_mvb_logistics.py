@@ -4,7 +4,7 @@
 from flask import g
 
 from wms.extensions import db
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from wms.models import (
     Box, MovementDocument, MovementLine, MvbBox, MvbClient, MvbOrder, MvbPallet, MvbPriceTier, MvbTrip,
@@ -963,13 +963,13 @@ def test_client_report_for_period(db, client):
     db.session.refresh(trip)
     client.post(f"/mvb/trips/{trip.id}/stops/{trip.stops[0].id}/deliver")
 
-    today = datetime.utcnow().date().isoformat()
-    html = client.get(f"/mvb/reports?date_from={today}&date_to={today}").get_data(as_text=True)
+    today = (datetime.utcnow() + timedelta(hours=3)).date()  # дата по Москве, см. MOSCOW_OFFSET
+    html = client.get(f"/mvb/reports?date_from={today.isoformat()}&date_to={today.isoformat()}").get_data(as_text=True)
     assert "Альфа" in html and "Бета" in html
     assert "Дата заявки" in html and order_a.number in html
     from wms.blueprints.mvb import _report_rows
 
-    rows, totals, order_rows = _report_rows(datetime.utcnow().date(), datetime.utcnow().date())
+    rows, totals, order_rows = _report_rows(today, today)
     by_number = {r["order"].number: r for r in order_rows}
     assert by_number[order_a.number]["date"] is not None and by_number[order_a.number]["shipped"] == 2
     by_name = {r["client"].name: r for r in rows}
@@ -1013,15 +1013,15 @@ def test_driver_report_counts_boxes_per_order_per_driver(db, client):
     assert client.get("/mvb/reports").status_code == 302  # водителю недоступно
 
     _login(client, staff)
-    today = datetime.utcnow().date().isoformat()
-    html = client.get(f"/mvb/reports?date_from={today}&date_to={today}").get_data(as_text=True)
+    today = (datetime.utcnow() + timedelta(hours=3)).date()  # дата по Москве, см. MOSCOW_OFFSET
+    html = client.get(f"/mvb/reports?date_from={today.isoformat()}&date_to={today.isoformat()}").get_data(as_text=True)
     assert "По водителям" in html
     assert driver1.display_name() in html and driver2.display_name() in html
     assert order_a.number in html and order_b.number in html
 
     from wms.blueprints.mvb import _driver_report_rows
 
-    rows, totals = _driver_report_rows(datetime.utcnow().date(), datetime.utcnow().date())
+    rows, totals = _driver_report_rows(today, today)
     by_key = {(r["driver"].id if r["driver"] else None, r["order"].number): r["boxes"] for r in rows}
     assert by_key[(driver1.id, order_a.number)] == 2
     assert by_key[(driver2.id, order_b.number)] == 1
@@ -1030,7 +1030,7 @@ def test_driver_report_counts_boxes_per_order_per_driver(db, client):
     # необзабранные короба не в отчете
     assert sum(by_key.values()) == 3
 
-    xlsx = client.get(f"/mvb/reports.xlsx?date_from={today}&date_to={today}")
+    xlsx = client.get(f"/mvb/reports.xlsx?date_from={today.isoformat()}&date_to={today.isoformat()}")
     assert xlsx.status_code == 200 and xlsx.data[:2] == b"PK"
     import io
 
