@@ -1,4 +1,4 @@
-from flask import Blueprint, Response, flash, redirect, render_template, request, url_for
+from flask import Blueprint, Response, current_app, flash, redirect, render_template, request, url_for
 from flask_login import current_user
 
 from ..extensions import db
@@ -263,6 +263,19 @@ def locate():
                 .order_by(Warehouse.code)
                 .all()
             )
+            # Откуда взялся неразмещенный остаток: партии по приемкам; что
+            # не покрыто партиями — излишек приемки перемещения/старые данные.
+            lots_by_warehouse = {}
+            for lot in (
+                UnplacedStockLot.query.filter_by(nomenclature_id=item.id)
+                .filter(UnplacedStockLot.qty_remaining > 0)
+                .order_by(UnplacedStockLot.received_at)
+                .all()
+            ):
+                lots_by_warehouse.setdefault(lot.warehouse_id, []).append(lot)
+            for row in unplaced_rows:
+                row.source_lots = lots_by_warehouse.get(row.warehouse_id, [])
+                row.unexplained_qty = max(row.qty - sum(l.qty_remaining for l in row.source_lots), 0)
 
     return render_template(
         "nomenclature/locate.html",
@@ -272,6 +285,32 @@ def locate():
         unplaced_rows=unplaced_rows,
         not_found=not_found,
     )
+
+
+@bp.route("/locate/unplaced/<int:stock_id>/set", methods=["POST"])
+def unplaced_set(stock_id):
+    """Администратор приводит неразмещенный остаток склада к факту — для
+    исправления задвоений (товар уже лежит в коробах, а остаток числится
+    еще и неразмещенным). Только уменьшение: лишнее списывается по партиям
+    (FIFO), как при размещении."""
+    row = UnplacedStock.query.get_or_404(stock_id)
+    barcode = row.nomenclature.barcode
+    if not current_user.is_admin:
+        flash("Списывать остаток может только администратор", "danger")
+        return redirect(url_for("nomenclature.locate", barcode=barcode))
+    qty = request.form.get("qty", type=float)
+    if qty is None or qty < 0 or qty >= row.qty:
+        flash(f"Укажите фактический остаток от 0 до {row.qty:g}", "danger")
+        return redirect(url_for("nomenclature.locate", barcode=barcode))
+    write_off = row.qty - qty
+    UnplacedStock.consume(row.warehouse_id, row.nomenclature_id, write_off)
+    db.session.commit()
+    current_app.logger.warning(
+        "Неразмещенный остаток списан: %s, склад %s, %g -> %g (пользователь %s)",
+        row.nomenclature.name, row.warehouse.name, qty + write_off, qty, current_user.username,
+    )
+    flash(f"Неразмещенный остаток «{row.nomenclature.name}» на складе «{row.warehouse.name}»: списано {write_off:g}, осталось {qty:g}", "success")
+    return redirect(url_for("nomenclature.locate", barcode=barcode))
 
 
 NOMENCLATURE_PAGE_SIZE = 100
@@ -367,6 +406,20 @@ def list_nomenclature():
         if item_ids
         else {}
     )
+    # Неразмещенная часть остатка отдельно — чтобы было видно, сколько в
+    # коробах, а сколько числится принятым, но не упакованным.
+    unplaced_by_item_warehouse = {}
+    if item_ids:
+        for nid, wid, qty in (
+            db.session.query(UnplacedStock.nomenclature_id, UnplacedStock.warehouse_id, UnplacedStock.qty)
+            .filter(
+                UnplacedStock.qty > 0,
+                UnplacedStock.nomenclature_id.in_(item_ids),
+                UnplacedStock.warehouse_id.in_([wh.id for wh in stock_warehouses]),
+            )
+            .all()
+        ):
+            unplaced_by_item_warehouse[(nid, wid)] = qty
 
     return render_template(
         "nomenclature/list.html",
@@ -376,6 +429,7 @@ def list_nomenclature():
         categories=categories,
         stock_warehouses=stock_warehouses,
         stock_by_item_warehouse=stock_by_item_warehouse,
+        unplaced_by_item_warehouse=unplaced_by_item_warehouse,
     )
 
 

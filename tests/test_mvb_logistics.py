@@ -8,7 +8,7 @@ from datetime import datetime
 
 from wms.models import (
     Box, MovementDocument, MovementLine, MvbBox, MvbClient, MvbOrder, MvbPallet, MvbPriceTier, MvbTrip,
-    MvbVehicle,
+    MvbVehicle, MvbDestination, MvbOrderLine,
     User, Warehouse,
 )
 
@@ -1225,7 +1225,7 @@ def test_menu_by_role(db, client):
     roles = {
         "seller": (seller, ["Мои заявки"], ["Заявки в работе", "Приемка", "Скан забора", "Настройки"]),
         "driver": (_user("driver", "mvb_driver"), ["Заявки на забор", "Скан забора"], ["Заявки в работе", "Приемка", "Паллеты"]),
-        "operator": (_user("operator", "mvb_staff"), ["Заявки в работе", "Клиенты", "Настройки", "Прайс", "Транспорт", "Пользователи", "Рейсы"], ["Приемка", "Скан забора", "Заявки на забор", "Паллеты"]),
+        "operator": (_user("operator", "mvb_staff"), ["Заявки в работе", "Клиенты", "Настройки", "Прайс", "Машины для СЦ", "Пользователи", "Рейсы"], ["Приемка", "Скан забора", "Заявки на забор", "Паллеты"]),
         "keeper": (_user("keeper", "mvb_storekeeper"), ["Приемка", "Паллеты", "Погрузка"], ["Заявки в работе", "Скан забора", "Настройки", "Клиенты", "Рейсы"]),
     }
     for name, (user, visible, hidden) in roles.items():
@@ -1626,33 +1626,64 @@ def test_default_prices_seeded_once_and_pickup_zones(db, client):
     assert "Зона *" in client.get("/mvb/prices").get_data(as_text=True)
 
 
-def test_pallet_cost_shared_by_box_share(db, client):
-    """Палетирование: паллета одного клиента — вся цена ему; сборная —
-    делится по доле коробов каждого клиента на паллете."""
+def test_pallet_cost_from_threshold_and_pallet_limit(db, client):
+    """Палетирование: клиенту — только от порога коробов (по умолчанию 10),
+    цена × число паллет по максимуму коробов (по умолчанию 20); больше
+    максимума на паллету не сканируется. Здесь порог 3, максимум 4."""
     staff = _user("staff1", "mvb_admin")
     a = _received_order(client, _user("c1", "mvb_client", _mvb_client("ИП А")), staff, box_count="3")
     b = _received_order(client, _user("c2", "mvb_client", _mvb_client("ИП Б")), staff, box_count="1")
-    client.post("/mvb/prices", data={"action": "pallet_price", "pallet_price": "500"})
-    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
-    pallet = MvbPallet.query.one()
+    c = _received_order(client, _user("c3", "mvb_client", _mvb_client("ИП В")), staff, box_count="5")
+    page = client.get("/mvb/prices").get_data(as_text=True)
+    assert 'name="pallet_min" type="number" min="1" class="form-control w-auto" value="10"' in page
+    assert 'name="pallet_max" type="number" min="1" class="form-control w-auto" value="20"' in page
+    client.post("/mvb/prices", data={"action": "pallet_price", "pallet_price": "500", "pallet_min": "3", "pallet_max": "4"})
+    for _ in range(3):
+        client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    p1, p2, p3 = MvbPallet.query.order_by(MvbPallet.id).all()
     for box in a.boxes:
-        client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
+        client.post(f"/mvb/pallets/{p1.id}/scan", data={"barcode": box.barcode})
+    client.post(f"/mvb/pallets/{p1.id}/scan", data={"barcode": b.boxes[0].barcode})
+    full = client.post(f"/mvb/pallets/{p1.id}/scan", data={"barcode": c.boxes[0].barcode})
+    assert full.status_code == 409 and "максимум 4" in full.get_json()["message"]
+    for box in c.boxes[:4]:
+        client.post(f"/mvb/pallets/{p2.id}/scan", data={"barcode": box.barcode})
+    client.post(f"/mvb/pallets/{p3.id}/scan", data={"barcode": c.boxes[4].barcode})
     db.session.expire_all()
-    assert db.session.get(MvbOrder, a.id).pallet_cost == 500
-    client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": b.boxes[0].barcode})
-    db.session.expire_all()
-    a, b = db.session.get(MvbOrder, a.id), db.session.get(MvbOrder, b.id)
-    assert a.pallet_cost == 375 and b.pallet_cost == 125
-    assert "палетирование 375.00" in client.get(f"/mvb/orders/{a.id}").get_data(as_text=True)
+    a, b, c = (db.session.get(MvbOrder, o.id) for o in (a, b, c))
+    assert a.pallet_cost == 500  # 3 кор. — порог, одна паллета
+    assert b.pallet_cost == 0  # 1 кор. — меньше порога, бесплатно
+    assert c.pallet_cost == 1000  # 5 кор. — две паллеты по 4
+    assert "палетирование 500.00" in client.get(f"/mvb/orders/{a.id}").get_data(as_text=True)
 
-    # короб снят с паллеты — доли пересчитываются
-    client.post(f"/mvb/pallets/{pallet.id}/remove/{b.boxes[0].id}")
+    # короб снят с паллеты — меньше порога, палетирование не выставляется
+    client.post(f"/mvb/pallets/{p1.id}/remove/{a.boxes[0].id}")
     db.session.expire_all()
-    assert db.session.get(MvbOrder, a.id).pallet_cost == 500
-    assert db.session.get(MvbOrder, b.id).pallet_cost is None
-    # отчет
+    assert db.session.get(MvbOrder, a.id).pallet_cost == 0
     page = client.get("/mvb/reports?date_from=2000-01-01&date_to=2100-01-01").get_data(as_text=True)
     assert "Палетирование" in page
+
+
+def test_lamoda_and_yandex_market_destinations(db, client):
+    _login(client, _user("staff1", "mvb_admin"))
+    client.post("/mvb/prices", data={"action": "city_add", "name": "Подольск"})
+    for mp in ("lamoda", "yandex"):
+        client.post("/mvb/prices", data={"action": "dest_add", "marketplace": mp, "city": "Подольск", "address": "ул. Складская, 1"})
+    assert {d.marketplace for d in MvbDestination.query.filter_by(city="Подольск")} == {"lamoda", "yandex"}
+    page = client.get("/mvb/prices").get_data(as_text=True)
+    assert "Lamoda" in page and "Яндекс Маркет" in page
+    assert MvbOrderLine.make_short_label("yandex", "Подольск") == "ЯМ Подольск"
+
+
+def test_vehicles_page_has_no_drivers_and_users_page_hides_drivers(db, client):
+    _login(client, _user("staff2", "mvb_admin"))
+    driver = _user("drv_x", "mvb_driver")
+    own = _vehicle(10, driver)
+    page = client.get("/mvb/vehicles").get_data(as_text=True)
+    assert own.plate not in page and 'name="driver_id"' not in page
+    assert client.post("/mvb/vehicles", data={"vehicle_id": str(own.id), "plate": "X1", "capacity_boxes": "5"}).status_code == 404
+    assert "drv_x" not in client.get("/mvb/admin/users").get_data(as_text=True)
+    assert "drv_x" in client.get("/mvb/drivers").get_data(as_text=True)
 
 
 def test_client_sees_driver_data_for_pass(db, client):
@@ -1774,3 +1805,36 @@ def test_partial_pickup_when_boxes_do_not_fit(db, client):
         client.post("/mvb/scan/pickup", data={"barcode": box.barcode})
     client.post(f"/mvb/driver/orders/{order.id}/done")
     assert db.session.get(MvbOrder, order.id).pickup_done_at is not None
+
+
+def test_operator_creates_pickup_driver_with_vehicle(db, client):
+    _login(client, _user("oper_drv", "mvb_staff"))
+    assert client.get("/mvb/drivers").status_code == 200
+    # Роль «Водитель» в «Пользователях» больше не выдается — только через «Водители».
+    client.post("/mvb/admin/users", data={"username": "d0", "password": "secret1", "role": "mvb_driver"})
+    assert User.query.filter_by(username="d0").first() is None
+    # Без авто водителя не создать.
+    client.post("/mvb/drivers", data={"full_name": "Иванов И.И.", "username": "ivanov", "password": "secret1"})
+    assert User.query.filter_by(username="ivanov").first() is None
+    client.post("/mvb/drivers", data={
+        "full_name": "Иванов Иван", "model": "ГАЗель", "plate": "а001аа09", "capacity_boxes": "120",
+        "username": "ivanov", "password": "secret1",
+    })
+    driver = User.query.filter_by(username="ivanov").one()
+    assert driver.role == "mvb_driver" and driver.check_password("secret1")
+    vehicle = MvbVehicle.query.filter_by(driver_id=driver.id).one()
+    assert (vehicle.plate, vehicle.model, vehicle.capacity_boxes) == ("А001АА09", "ГАЗель", 120)
+    page = client.get("/mvb/drivers").get_data(as_text=True)
+    assert "Иванов Иван" in page and "А001АА09" in page
+    # Правка авто, новый пароль, отключение.
+    client.post("/mvb/drivers", data={
+        "driver_id": str(driver.id), "full_name": "Иванов Иван", "model": "Ford Transit", "plate": "в002вв09",
+        "capacity_boxes": "150", "password": "newpass1",
+    })
+    db.session.refresh(driver)
+    db.session.refresh(vehicle)
+    assert vehicle.plate == "В002ВВ09" and vehicle.capacity_boxes == 150
+    assert driver.check_password("newpass1") and not driver.is_active_user and not vehicle.is_active
+    # Водитель сам сюда не попадает.
+    _login(client, _user("drv_other", "mvb_driver"))
+    assert client.get("/mvb/drivers").status_code == 302

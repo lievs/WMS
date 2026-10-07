@@ -957,6 +957,10 @@ class MovementDocument(db.Model):
     # опираться на него отдельно — при необходимости используйте его явно.
     sent_qty_snapshot = db.Column(db.Float, nullable=True)
     received_qty_snapshot = db.Column(db.Float, nullable=True)
+    # False — приемка только записала расхождение, короба не трогала (так
+    # теперь всегда). NULL/True — старые приемки: недовоз тогда списывался из
+    # коробов, излишек шел в неразмещенный остаток склада назначения.
+    receipt_changed_boxes = db.Column(db.Boolean, nullable=True)
     # "Дата поставки" — дата слота, забронированного на маркетплейсе для
     # приемки этого перемещения (см. чат), вносится вручную. Используется
     # при печати стикеров отправления (см. utils.shipping_label_pdf) вместо
@@ -989,12 +993,15 @@ class MovementDocument(db.Model):
         """Фактически принято на складе назначения с учетом расхождений."""
         if self.received_at is None:
             return None
-        if self.received_qty_snapshot is not None:
-            return self.received_qty_snapshot
-        return self.total_item_qty() + sum(
-            discrepancy.received_qty - discrepancy.expected_qty
-            for discrepancy in self.discrepancies
-        )
+        # По живым данным, а не по снимку: снимок устаревал после правки
+        # коробов. Сейчас приемка короба не трогает — принято = в коробах +
+        # (принято − ожидалось) по расхождениям. У старых приемок недовоз
+        # уже списан из коробов — к ним прибавляем только излишек.
+        if self.receipt_changed_boxes is False:
+            return self.total_item_qty() + sum(
+                d.received_qty - d.expected_qty for d in self.discrepancies
+            )
+        return self.total_item_qty() + sum(d.excess_qty() for d in self.discrepancies)
 
     def total_sent_qty(self):
         """Текущее количество товара в коробах документа — то же самое, что
@@ -1002,7 +1009,13 @@ class MovementDocument(db.Model):
         эти цифры сравнивают с заявками на самом маркетплейсе, а значит
         нужны актуальные данные, а не снимок на момент отправки (см. чат:
         "экспорт показывает 2220, строка показывает 2147" — после правки
-        короба цифры разъехались)."""
+        короба цифры разъехались).
+
+        У старых приемок с недовозом недостающее списано из коробов, поэтому
+        для них отправленное = в коробах + недовоз. Сейчас приемка короба не
+        трогает — отправленное это просто содержимое коробов."""
+        if self.received_at is not None and self.receipt_changed_boxes is not False:
+            return self.total_item_qty() + self.total_shortage_qty()
         return self.total_item_qty()
 
     def total_shortage_qty(self):
@@ -1585,7 +1598,9 @@ class ProductionOrder(db.Model):
 
 # Направления отправки: склады маркетплейсов и фулфилменты (в поле СЦ —
 # название фулфилмента).
-MVB_MARKETPLACES = {"wb": "Wildberries", "ozon": "Ozon", "ff": "Фулфилмент"}
+MVB_MARKETPLACES = {
+    "wb": "Wildberries", "ozon": "Ozon", "lamoda": "Lamoda", "yandex": "Яндекс Маркет", "ff": "Фулфилмент",
+}
 MVB_DELIVERY_METHODS = {"pickup": "Забор транспортной компанией", "self": "Самопривоз"}
 MVB_ORDER_STATUSES = {"draft": "Черновик", "confirmed": "Оформлена", "cancelled": "Отменена"}
 # Порядок важен: короб движется только вперед по этому списку.
@@ -1783,7 +1798,7 @@ class MvbOrderLine(db.Model):
         return None
     wms_movement = db.relationship("MovementDocument")
 
-    SHORT_MARKETPLACES = {"wb": "WB", "ozon": "OZON", "ff": "ФФ"}
+    SHORT_MARKETPLACES = {"wb": "WB", "ozon": "OZON", "lamoda": "Lamoda", "yandex": "ЯМ", "ff": "ФФ"}
 
     @property
     def marketplace_label(self):

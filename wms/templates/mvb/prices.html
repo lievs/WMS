@@ -158,11 +158,16 @@
   <div class="col-lg-6">
     <div class="card p-3 h-100">
       <h5>Палетирование</h5>
-      <div class="small text-muted mb-2">Цена за паллету. Паллета одного клиента — вся цена ему; сборная — делится между клиентами по доле их коробов на паллете.</div>
-      <form method="post" class="d-flex flex-wrap gap-2">
+      <div class="small text-muted mb-2">Клиенту выставляется, только если у заявки на паллетах не меньше порога коробов: цена × число паллет (по максимуму коробов на паллете, неполная — тоже паллета). Меньше порога — бесплатно. Больше максимума на паллету не сканируется.</div>
+      <form method="post" class="d-flex flex-wrap gap-2 align-items-center">
         <input type="hidden" name="action" value="pallet_price">
-        <input name="pallet_price" class="form-control w-auto" value="{{ '%g'|format(pallet_price) }}" style="max-width:130px" required>
-        <span class="align-self-center">руб. за паллету</span>
+        <input name="pallet_price" class="form-control w-auto" value="{{ '%g'|format(pallet_price) }}" style="max-width:110px" required>
+        <span>руб. за паллету</span>
+        <span>· клиенту от</span>
+        <input name="pallet_min" type="number" min="1" class="form-control w-auto" value="{{ '%g'|format(pallet_min) }}" style="max-width:80px" required>
+        <span>кор. · на паллете максимум</span>
+        <input name="pallet_max" type="number" min="1" class="form-control w-auto" value="{{ '%g'|format(pallet_max) }}" style="max-width:80px" required>
+        <span>кор.</span>
         <button class="btn btn-outline-primary">Сохранить</button>
       </form>
     </div>
