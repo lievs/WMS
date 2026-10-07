@@ -1303,10 +1303,42 @@ def _expected_qty_by_nomenclature(doc):
     return expected
 
 
+def _apply_receipt_stock_difference(doc, nomenclature_id, expected_qty, received_qty):
+    """Приводит физический остаток склада назначения к факту приемки (см.
+    чат: расхождение при приемке на СЦ должно менять физический остаток, а
+    не только записываться).
+
+    Недовоз списывается из содержимого коробов этого перемещения, излишек
+    попадает в неразмещенный остаток — его затем можно упаковать обычным
+    размещением. Документ сохраняет исходное отправленное количество в
+    sent_qty_snapshot.
+    """
+    shortage = max(expected_qty - received_qty, 0)
+    for line in doc.lines.order_by(MovementLine.id.desc()).all():
+        if shortage <= 0:
+            break
+        box_item = BoxItem.query.filter_by(
+            box_id=line.box_id, nomenclature_id=nomenclature_id
+        ).first()
+        if not box_item:
+            continue
+        take = min(box_item.qty, shortage)
+        box_item.qty -= take
+        shortage -= take
+        if box_item.qty <= 0:
+            db.session.delete(box_item)
+
+    excess = max(received_qty - expected_qty, 0)
+    if excess:
+        UnplacedStock.add(doc.to_warehouse_id, nomenclature_id, excess)
+
+
 def _revert_document_receipt(doc):
     """Отменяет учет фактической приемки перед удалением документа. Короба
-    и неразмещенный остаток возвращаются только для старых приемок, которые
-    их меняли (receipt_changed_boxes не False)."""
+    и неразмещенный остаток возвращаются как обычно; receipt_changed_boxes
+    может быть False только у приемок, принятых в короткий период, когда
+    расхождение лишь записывалось без изменения коробов (см. чат) — для
+    них короба и тогда не трогали, поэтому и здесь их не трогаем."""
     current = _expected_qty_by_nomenclature(doc)
     discrepancies = {d.nomenclature_id: d for d in doc.discrepancies}
     for nomenclature_id, qty in current.items():
@@ -1346,9 +1378,9 @@ def _revert_document_receipt(doc):
 @bp.route("/<int:doc_id>/unreceive", methods=["POST"])
 def unreceive(doc_id):
     """Администратор возвращает «Принято на складе» в работу, чтобы
-    поправить принятое количество: выполнение плана отгрузок уменьшается,
-    расхождения удаляются (у старых приемок, менявших короба, недовоз
-    возвращается в короба, а излишек снимается с неразмещенного остатка). После
+    поправить принятое количество: откатывается учет приемки (недовоз
+    возвращается в короба, излишек снимается с неразмещенного остатка,
+    выполнение плана отгрузок уменьшается), расхождения удаляются. После
     этого кнопка «Принято на складе» снова доступна."""
     if not current_user.is_admin:
         flash("Вернуть приемку в работу может только администратор", "danger")
@@ -1452,12 +1484,11 @@ def receive(doc_id):
                     received_qty=received_qty,
                 )
             )
-            # Короба не трогаем (см. чат: «короба пусть остаются как есть») —
-            # расхождение только записывается и видно в «фактически принято».
+            _apply_receipt_stock_difference(doc, nomenclature_id, expected_qty, received_qty)
 
     doc.sent_qty_snapshot = doc.sent_qty_snapshot or sum(expected.values())
     doc.received_qty_snapshot = total_received_qty
-    doc.receipt_changed_boxes = False
+    doc.receipt_changed_boxes = True
     doc.received_at = datetime.utcnow()
     db.session.commit()
     if shortage_qty:

@@ -244,15 +244,17 @@ def test_admin_returns_received_movement_to_work_and_receives_again(db, client_l
     assert MovementReceiptDiscrepancy.query.filter_by(document_id=doc.id).count() == 0
 
 
-def test_receipt_keeps_boxes_and_shows_actually_received(db, client_logged_in):
-    """Приемка короба не трогает: отправлено 10, принято 7 → «10 (7)», в
-    коробе по-прежнему 10; излишек не идет в неразмещенный остаток."""
+def test_shortage_reduces_box_and_shows_sent_vs_received(db, client_logged_in):
+    """Недовоз при приемке списывается из короба этого перемещения (см.
+    чат): отправлено 10, принято 7 → «10 (7)», в коробе остается 7; короб
+    не трогаем только у неразмещенного остатка — туда недовоз не попадает,
+    он просто недостача, которую можно найти и разместить отдельно."""
     from wms.models import UnplacedStock
     doc, item, _ = _make_completed_document(qty=10)
     client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "7"})
     db.session.expire_all()
     doc = MovementDocument.query.get(doc.id)
-    assert BoxItem.query.filter_by(nomenclature_id=item.id).one().qty == 10
+    assert BoxItem.query.filter_by(nomenclature_id=item.id).one().qty == 7
     assert (doc.total_sent_qty(), doc.total_received_qty()) == (10, 7)
     doc.received_qty_snapshot = None
     db.session.commit()
@@ -262,7 +264,10 @@ def test_receipt_keeps_boxes_and_shows_actually_received(db, client_logged_in):
     assert UnplacedStock.query.count() == 0
 
 
-def test_excess_shown_in_brackets_without_unplaced_stock(db, client_logged_in):
+def test_excess_credited_to_unplaced_stock_box_unchanged(db, client_logged_in):
+    """Излишек при приемке не трогает короб (в нем как было упаковано, так
+    и остается) — он зачисляется в неразмещенный остаток склада назначения,
+    откуда его можно разместить обычным «Размещением»."""
     from wms.models import UnplacedStock
     doc, item, _ = _make_completed_document(qty=10)
     client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "12"})
@@ -270,7 +275,7 @@ def test_excess_shown_in_brackets_without_unplaced_stock(db, client_logged_in):
     doc = MovementDocument.query.get(doc.id)
     assert (doc.total_sent_qty(), doc.total_received_qty()) == (10, 12)
     assert BoxItem.query.filter_by(nomenclature_id=item.id).one().qty == 10
-    assert UnplacedStock.query.count() == 0
+    assert UnplacedStock.available(doc.to_warehouse_id, item.id) == 2
 
 
 def test_old_receipt_that_reduced_boxes_still_shows_right_numbers(db, client_logged_in):
