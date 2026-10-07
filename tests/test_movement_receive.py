@@ -264,6 +264,90 @@ def test_shortage_reduces_box_and_shows_sent_vs_received(db, client_logged_in):
     assert UnplacedStock.query.count() == 0
 
 
+def test_editing_box_qty_after_receipt_does_not_shift_sent_or_received(db, client_logged_in):
+    """Регрессия (см. чат): "в перемещениях в скобках указываем фактически
+    принятое кол-во на СЦ... если поменять кол-во в перемещении, то он
+    минусует еще больше — он не должен быть привязан к основному
+    перемещению". После приемки "отправлено"/"принято" — зафиксированный
+    факт на момент приемки, а не живое содержимое короба: правка короба
+    по ЛЮБОЙ другой причине (например, через админскую правку количества
+    в завершенной приемке) не должна задним числом менять эти цифры."""
+    doc, item, _ = _make_completed_document(qty=10)
+    client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "7"})
+    db.session.expire_all()
+    doc = MovementDocument.query.get(doc.id)
+    assert (doc.total_sent_qty(), doc.total_received_qty()) == (10, 7)
+
+    # Короб поправили уже ПОСЛЕ приемки по совершенно другой причине —
+    # например, администратор обнаружил и исправил ошибку задним числом.
+    box_item = doc.lines.first().box.items.first()
+    box_item.qty = 2
+    db.session.commit()
+
+    doc = MovementDocument.query.get(doc.id)
+    assert doc.total_item_qty() == 2  # живое содержимое короба и правда изменилось
+    assert (doc.total_sent_qty(), doc.total_received_qty()) == (10, 7)  # но витрина — нет
+
+    page = client_logged_in.get("/movement/").get_data(as_text=True)
+    assert 'title="Фактически принято на маркетплейсе">(7)</span>' in page
+
+
+def test_receive_accepts_unexpected_nomenclature_as_pure_excess(db, client_logged_in):
+    """Приемка на СЦ позволяет указать товар, которого вообще не было в
+    отправке (новая номенклатура через extra_nomenclature_id) — он
+    учитывается как чистый излишек: expected_qty=0, списывается с
+    неразмещенного остатка склада-отправителя (см. чат)."""
+    from wms.models import MovementReceiptDiscrepancy, Nomenclature, UnplacedStock
+
+    doc, item, plan_line = _make_completed_document(qty=10)
+    extra_item = Nomenclature(sku="SKU-EXTRA-1", barcode="6660000777", name="Незаявленный товар", unit="шт")
+    db.session.add(extra_item)
+    db.session.commit()
+    UnplacedStock.add(doc.from_warehouse_id, extra_item.id, 20)
+
+    resp = client_logged_in.post(
+        f"/movement/{doc.id}/receive",
+        data={
+            f"qty_{item.id}": "10",
+            "extra_nomenclature_id": str(extra_item.id),
+            f"qty_{extra_item.id}": "4",
+        },
+        follow_redirects=True,
+    )
+
+    assert resp.status_code == 200
+    discrepancy = MovementReceiptDiscrepancy.query.filter_by(
+        document_id=doc.id, nomenclature_id=extra_item.id
+    ).first()
+    assert discrepancy is not None
+    assert discrepancy.expected_qty == 0
+    assert discrepancy.received_qty == 4
+    assert discrepancy.excess_qty() == 4
+    assert UnplacedStock.available(doc.from_warehouse_id, extra_item.id) == 16
+
+
+def test_receive_ignores_extra_nomenclature_without_qty_or_unknown_id(db, client_logged_in):
+    from wms.models import MovementReceiptDiscrepancy, Nomenclature
+
+    doc, item, plan_line = _make_completed_document(qty=10)
+    extra_item = Nomenclature(sku="SKU-EXTRA-2", barcode="6660000778", name="Товар без кол-ва", unit="шт")
+    db.session.add(extra_item)
+    db.session.commit()
+
+    resp = client_logged_in.post(
+        f"/movement/{doc.id}/receive",
+        data={
+            f"qty_{item.id}": "10",
+            "extra_nomenclature_id": [str(extra_item.id), "999999"],
+            # qty_<extra_item.id> не передано вовсе — строка должна быть пропущена.
+        },
+        follow_redirects=True,
+    )
+
+    assert resp.status_code == 200
+    assert MovementReceiptDiscrepancy.query.filter_by(document_id=doc.id).count() == 0
+
+
 def test_excess_debited_from_sender_unplaced_stock_box_unchanged(db, client_logged_in):
     """Излишек при приемке не трогает короб (в нем как было упаковано, так
     и остается) — физически со склада-отправителя увезли больше, чем

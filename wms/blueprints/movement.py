@@ -1482,6 +1482,25 @@ def receive(doc_id):
         )
         return render_template("movement/receive.html", doc=doc, rows=rows)
 
+    # Товар, которого вообще не было заявлено в отправке (короба не
+    # ожидали), но по факту его привезли на СЦ — излишек не из заявленного
+    # (см. чат). Строка добавляется на этой же форме через автокомплит,
+    # expected_qty=0 заставляет остальной код (расхождение, зачисление
+    # излишка на отправителя) сработать как для обычного излишка.
+    for raw_id in request.form.getlist("extra_nomenclature_id"):
+        try:
+            extra_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if extra_id in expected:
+            continue
+        qty = request.form.get(f"qty_{extra_id}", type=float)
+        if not qty or qty <= 0:
+            continue
+        if not Nomenclature.query.get(extra_id):
+            continue
+        expected[extra_id] = 0.0
+
     has_discrepancy = False
     shortage_qty = 0
     total_received_qty = 0
