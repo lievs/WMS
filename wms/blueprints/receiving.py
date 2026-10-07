@@ -854,8 +854,12 @@ def update_line(doc_id, line_id):
     doc = ReceivingDocument.query.get_or_404(doc_id)
     # draft — обычная правка при вводе; recounting — исправление количества
     # по факту пересчета (см. send_to_recount), если оно не сошлось с тем,
-    # что внесли при приемке.
-    if doc.status not in ("draft", "recounting"):
+    # что внесли при приемке. completed — только администратору, задним
+    # числом, если ошибку в количестве заметили уже после завершения (см.
+    # чат); тогда переносим разницу на фактический остаток/короб, как и
+    # update_line_nomenclature переносит остаток при смене товара.
+    editing_after_completed = doc.status == "completed" and current_user.is_admin
+    if doc.status not in ("draft", "recounting") and not editing_after_completed:
         flash("Документ уже завершен", "danger")
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
@@ -865,17 +869,32 @@ def update_line(doc_id, line_id):
         flash("Укажите корректное количество", "danger")
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
+    delta = qty - line.qty
     if line.box_id:
         try:
-            _check_box_qty_limit(line.box, qty - line.qty)
+            _check_box_qty_limit(line.box, delta)
         except BoxQtyLimitExceeded as exc:
             flash(str(exc), "danger")
             return redirect(url_for("receiving.detail", doc_id=doc_id))
         box_item = BoxItem.query.filter_by(box_id=line.box_id, nomenclature_id=line.nomenclature_id).first()
         if box_item:
-            box_item.qty += qty - line.qty
+            box_item.qty += delta
             if box_item.qty <= 0:
                 db.session.delete(box_item)
+    elif editing_after_completed and line.line_completed_at is not None:
+        # Короба нет — годное количество уже зачислено в неразмещенный
+        # остаток (см. _credit_receiving_line). defect_qty не трогаем,
+        # поэтому разница в good_qty равна той же delta, что и у qty.
+        if delta < 0 and UnplacedStock.available(doc.warehouse_id, line.nomenclature_id) < -delta:
+            flash(
+                f"Нельзя уменьшить — товар «{line.nomenclature.name}» уже частично размещен в короба",
+                "danger",
+            )
+            return redirect(url_for("receiving.detail", doc_id=doc_id))
+        if delta > 0:
+            UnplacedStock.add(doc.warehouse_id, line.nomenclature_id, delta, receiving_document=doc)
+        elif delta < 0:
+            UnplacedStock.consume(doc.warehouse_id, line.nomenclature_id, -delta)
 
     line.qty = qty
     if doc.status == "recounting" and line.expected_qty is not None:
