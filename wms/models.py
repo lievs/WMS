@@ -370,13 +370,19 @@ class UnplacedStock(db.Model):
     )
 
     @staticmethod
-    def add(warehouse_id, nomenclature_id, qty, receiving_document=None):
+    def add(warehouse_id, nomenclature_id, qty, receiving_document=None, receiving_line=None):
         """receiving_document — если остаток пришел из конкретной приемки по
         накладной, заводим под него партию (см. UnplacedStockLot), чтобы
         потом можно было увидеть поставщика и номер заявки по остатку.
         Без него (возврат из "Размещения" при удалении документа/строки) —
         партия без источника: к этому моменту исходная партия уже
-        перемешалась при упаковке в короб, восстановить её точно нельзя."""
+        перемешалась при упаковке в короб, восстановить её точно нельзя.
+        receiving_line — конкретная строка приемки, из которой пришла эта
+        партия (см. receiving._credit_receiving_line) — чтобы администратор
+        мог позже поправить количество именно этой строки в завершенной
+        приемке (см. receiving._adjust_completed_credited_qty), однозначно
+        найдя её партию, даже если в документе несколько строк одного и
+        того же товара."""
         row = UnplacedStock.query.filter_by(
             warehouse_id=warehouse_id, nomenclature_id=nomenclature_id
         ).first()
@@ -387,7 +393,7 @@ class UnplacedStock(db.Model):
             db.session.add(row)
         row.qty += qty
         if qty > 0:
-            UnplacedStockLot.add(warehouse_id, nomenclature_id, qty, receiving_document)
+            UnplacedStockLot.add(warehouse_id, nomenclature_id, qty, receiving_document, receiving_line)
         return row
 
     @staticmethod
@@ -461,6 +467,13 @@ class UnplacedStockLot(db.Model):
     warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=False, index=True)
     nomenclature_id = db.Column(db.Integer, db.ForeignKey("nomenclature.id"), nullable=False, index=True)
     receiving_document_id = db.Column(db.Integer, db.ForeignKey("receiving_documents.id"), nullable=True)
+    # Строка приемки, из которой пришла эта партия — чтобы однозначно найти
+    # её при правке количества в уже завершенной приемке (см.
+    # receiving._adjust_completed_credited_qty), даже если в документе
+    # несколько строк одного товара. NULL — партия пришла без привязки к
+    # строке (ручной UnplacedStock.add без receiving_line, либо партия
+    # заведена до появления этого поля на уже работающем сервере).
+    receiving_line_id = db.Column(db.Integer, db.ForeignKey("receiving_lines.id"), nullable=True)
     # Снимок на момент поступления — не ссылка на текущие supplier/
     # order_number документа, чтобы история не менялась задним числом,
     # если реквизиты приемки потом поправят.
@@ -473,13 +486,15 @@ class UnplacedStockLot(db.Model):
     warehouse = db.relationship("Warehouse")
     nomenclature = db.relationship("Nomenclature")
     receiving_document = db.relationship("ReceivingDocument")
+    receiving_line = db.relationship("ReceivingLine")
 
     @staticmethod
-    def add(warehouse_id, nomenclature_id, qty, receiving_document=None):
+    def add(warehouse_id, nomenclature_id, qty, receiving_document=None, receiving_line=None):
         lot = UnplacedStockLot(
             warehouse_id=warehouse_id,
             nomenclature_id=nomenclature_id,
             receiving_document_id=receiving_document.id if receiving_document else None,
+            receiving_line_id=receiving_line.id if receiving_line else None,
             supplier_name=receiving_document.supplier if receiving_document else None,
             order_number=receiving_document.order_number if receiving_document else None,
             qty_received=qty,

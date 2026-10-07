@@ -849,13 +849,91 @@ def add_line(doc_id):
     return redirect(redirect_url)
 
 
+def _adjust_completed_credited_qty(doc, line, new_qty):
+    """Админ меняет количество строки, уже зачисленной в неразмещенный
+    остаток при завершении приемки (см. _credit_receiving_line) — проводим
+    ту же правку по партии (UnplacedStockLot) и агрегату (UnplacedStock),
+    иначе остаток «потеряет» связь с фактическим количеством по приемке.
+    defect_qty правкой не трогаем — delta считаем по годному количеству
+    (qty - defect_qty), как и при обычном зачислении.
+
+    Безопасно, только пока из партии еще не разместили больше того, что
+    останется после правки (как и в revert_to_sorting/delete_document) —
+    иначе непонятно, какие физические единицы забирать/добавлять.
+    Возвращает текст ошибки, если правка невозможна, иначе None."""
+    new_good = max(new_qty - (line.defect_qty or 0), 0)
+    delta_good = new_good - line.good_qty()
+    if delta_good == 0:
+        return None
+
+    lot = UnplacedStockLot.query.filter_by(receiving_line_id=line.id).first()
+    if lot is None:
+        return (
+            f"«{line.nomenclature.name}»: эта позиция завершена до появления возможности "
+            f"править количество задним числом — партия остатка не отслежена, изменить нельзя"
+        )
+
+    consumed = lot.qty_received - lot.qty_remaining
+    new_remaining = new_good - consumed
+    if new_remaining < 0:
+        return (
+            f"«{line.nomenclature.name}»: нельзя уменьшить — {consumed:g} {line.nomenclature.unit} "
+            f"из зачисленного остатка уже размещено"
+        )
+
+    lot.qty_received = new_good
+    lot.qty_remaining = new_remaining
+    row = UnplacedStock.query.filter_by(
+        warehouse_id=doc.warehouse_id, nomenclature_id=line.nomenclature_id
+    ).first()
+    if row is None:
+        row = UnplacedStock(warehouse_id=doc.warehouse_id, nomenclature_id=line.nomenclature_id, qty=0)
+        db.session.add(row)
+    row.qty = max(row.qty + delta_good, 0)
+    return None
+
+
+def _apply_line_qty_change(doc, line, qty):
+    """Общая логика сохранения нового количества по строке — используется
+    и update_line (одна строка), и update_lines_bulk (все сразу).
+
+    Упакованная в короб строка синхронизирует BoxItem.qty так же для
+    любого статуса документа — может бросить BoxQtyLimitExceeded, ловит
+    вызывающий код. Строка, уже зачисленная в неразмещенный остаток
+    (документ completed) — см. _adjust_completed_credited_qty, возвращает
+    текст ошибки вместо исключения. Строка completed-документа, которая
+    зачисления еще не получила (неподтвержденная позиция накладной — см.
+    complete()), меняется как обычно, без эффекта на остатки — ровно как и
+    было до правки.
+
+    Возвращает текст ошибки (правка не применена) или None при успехе."""
+    if line.box_id:
+        _check_box_qty_limit(line.box, qty - line.qty)  # может бросить BoxQtyLimitExceeded
+        box_item = BoxItem.query.filter_by(box_id=line.box_id, nomenclature_id=line.nomenclature_id).first()
+        if box_item:
+            box_item.qty += qty - line.qty
+            if box_item.qty <= 0:
+                db.session.delete(box_item)
+    elif doc.status == "completed" and line.line_completed_at is not None:
+        error = _adjust_completed_credited_qty(doc, line, qty)
+        if error:
+            return error
+
+    line.qty = qty
+    if doc.status == "recounting" and line.expected_qty is not None:
+        line.confirmed = True
+    return None
+
+
 @bp.route("/<int:doc_id>/lines/<int:line_id>/update", methods=["POST"])
 def update_line(doc_id, line_id):
     doc = ReceivingDocument.query.get_or_404(doc_id)
     # draft — обычная правка при вводе; recounting — исправление количества
     # по факту пересчета (см. send_to_recount), если оно не сошлось с тем,
-    # что внесли при приемке.
-    if doc.status not in ("draft", "recounting"):
+    # что внесли при приемке; completed — только администратор, задним
+    # числом (см. _apply_line_qty_change).
+    completed_admin_edit = doc.status == "completed" and current_user.is_admin
+    if doc.status not in ("draft", "recounting") and not completed_admin_edit:
         flash("Документ уже завершен", "danger")
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
@@ -865,21 +943,15 @@ def update_line(doc_id, line_id):
         flash("Укажите корректное количество", "danger")
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
-    if line.box_id:
-        try:
-            _check_box_qty_limit(line.box, qty - line.qty)
-        except BoxQtyLimitExceeded as exc:
-            flash(str(exc), "danger")
-            return redirect(url_for("receiving.detail", doc_id=doc_id))
-        box_item = BoxItem.query.filter_by(box_id=line.box_id, nomenclature_id=line.nomenclature_id).first()
-        if box_item:
-            box_item.qty += qty - line.qty
-            if box_item.qty <= 0:
-                db.session.delete(box_item)
+    try:
+        error = _apply_line_qty_change(doc, line, qty)
+    except BoxQtyLimitExceeded as exc:
+        flash(str(exc), "danger")
+        return redirect(url_for("receiving.detail", doc_id=doc_id))
+    if error:
+        flash(error, "danger")
+        return redirect(url_for("receiving.detail", doc_id=doc_id))
 
-    line.qty = qty
-    if doc.status == "recounting" and line.expected_qty is not None:
-        line.confirmed = True
     db.session.commit()
     flash(f"Количество обновлено: {line.nomenclature.name} — {qty} {line.nomenclature.unit}", "success")
     return redirect(url_for("receiving.detail", doc_id=doc_id))
@@ -890,14 +962,18 @@ def update_lines_bulk(doc_id):
     """Сохранить количество сразу по всем строкам одной кнопкой — чтобы не
     перезагружать страницу после правки каждой отдельной строки (см.
     update_line). Поля формы — qty_<line_id>; строки без изменений и с
-    некорректным значением просто пропускаются, без прерывания остальных."""
+    некорректным значением просто пропускаются, без прерывания остальных.
+    completed — только администратор, задним числом (см.
+    _apply_line_qty_change)."""
     doc = ReceivingDocument.query.get_or_404(doc_id)
-    if doc.status not in ("draft", "recounting"):
+    completed_admin_edit = doc.status == "completed" and current_user.is_admin
+    if doc.status not in ("draft", "recounting") and not completed_admin_edit:
         flash("Документ уже завершен", "danger")
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
     updated = 0
     skipped_limit = 0
+    blocked = []
     for line in doc.lines:
         raw = request.form.get(f"qty_{line.id}")
         if raw is None:
@@ -914,21 +990,14 @@ def update_lines_bulk(doc_id):
         if qty == line.qty:
             continue
 
-        if line.box_id:
-            try:
-                _check_box_qty_limit(line.box, qty - line.qty)
-            except BoxQtyLimitExceeded:
-                skipped_limit += 1
-                continue
-            box_item = BoxItem.query.filter_by(
-                box_id=line.box_id, nomenclature_id=line.nomenclature_id
-            ).first()
-            if box_item:
-                box_item.qty += qty - line.qty
-                if box_item.qty <= 0:
-                    db.session.delete(box_item)
-
-        line.qty = qty
+        try:
+            error = _apply_line_qty_change(doc, line, qty)
+        except BoxQtyLimitExceeded:
+            skipped_limit += 1
+            continue
+        if error:
+            blocked.append(error)
+            continue
         updated += 1
 
     db.session.commit()
@@ -941,6 +1010,8 @@ def update_lines_bulk(doc_id):
             f"{skipped_limit} поз. не обновлено — короб не может содержать больше {BOX_QTY_LIMIT:g} шт",
             "warning",
         )
+    for msg in blocked:
+        flash(msg, "danger")
     return redirect(url_for("receiving.detail", doc_id=doc_id))
 
 
@@ -1187,7 +1258,9 @@ def _credit_receiving_line(doc, line):
     создается только из явно указанного defect_qty."""
     good_qty = line.good_qty()
     if good_qty > 0:
-        UnplacedStock.add(doc.warehouse_id, line.nomenclature_id, good_qty, receiving_document=doc)
+        UnplacedStock.add(
+            doc.warehouse_id, line.nomenclature_id, good_qty, receiving_document=doc, receiving_line=line
+        )
     if line.defect_qty:
         db.session.add(
             SupplierReturn(
