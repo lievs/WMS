@@ -264,6 +264,45 @@ def test_shortage_reduces_box_and_shows_sent_vs_received(db, client_logged_in):
     assert UnplacedStock.query.count() == 0
 
 
+def test_sent_snapshot_refreshes_if_box_edited_between_complete_and_receive(db, client_logged_in):
+    """Регрессия: complete() ставит sent_qty_snapshot по короба на тот
+    момент; если короб поправили ДО приемки (а не после), снимок должен
+    обновиться на актуальное содержимое при приемке — иначе он навсегда
+    остается старым (с complete()) и расходится с расхождением, которое
+    считается по уже новому содержимому короба (см. чат: бейдж "Излишек"
+    в списке при видимом в скобках недовозе — total_sent_qty() показывал
+    устаревшие 380, а не то, что было в коробе на момент приемки)."""
+    doc, item, _ = _make_completed_document(qty=10)
+    # _make_completed_document создает документ уже в статусе "completed"
+    # напрямую, без снимка — сбросим в draft и завершим настоящим роутом,
+    # чтобы complete() реально поставил sent_qty_snapshot, как в жизни.
+    doc.status = "draft"
+    doc.sent_qty_snapshot = None
+    db.session.commit()
+    client_logged_in.post(f"/movement/{doc.id}/complete")
+    db.session.expire_all()
+    doc = MovementDocument.query.get(doc.id)
+    assert doc.sent_qty_snapshot == 10
+
+    # Короб поправили ДО приемки (например, заметили ошибку упаковки) —
+    # отправили по факту меньше, чем было изначально собрано.
+    box_item = doc.lines.first().box.items.first()
+    box_item.qty = 6
+    db.session.commit()
+
+    # Приняли ровно столько, сколько реально было в коробе на этот момент —
+    # расхождения относительно НОВОГО содержимого нет вообще.
+    client_logged_in.post(f"/movement/{doc.id}/receive", data={f"qty_{item.id}": "6"})
+
+    db.session.expire_all()
+    doc = MovementDocument.query.get(doc.id)
+    assert doc.sent_qty_snapshot == 6  # не устаревшие 10
+    assert (doc.total_sent_qty(), doc.total_received_qty()) == (6, 6)
+    from wms.models import MovementReceiptDiscrepancy
+
+    assert MovementReceiptDiscrepancy.query.filter_by(document_id=doc.id).count() == 0
+
+
 def test_editing_box_qty_after_receipt_does_not_shift_sent_or_received(db, client_logged_in):
     """Регрессия (см. чат): "в перемещениях в скобках указываем фактически
     принятое кол-во на СЦ... если поменять кол-во в перемещении, то он

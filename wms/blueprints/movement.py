@@ -1529,7 +1529,14 @@ def receive(doc_id):
             )
             _apply_receipt_stock_difference(doc, nomenclature_id, expected_qty, received_qty)
 
-    doc.sent_qty_snapshot = doc.sent_qty_snapshot or sum(expected.values())
+    # Перезаписываем всегда, а не только если было пусто: expected посчитан
+    # заново в начале этой функции, по текущему содержимому короба на
+    # момент приемки. Если короб поправили МЕЖДУ завершением сборки
+    # (complete(), где снимок берется первый раз) и приемкой, старый снимок
+    # с completion иначе навсегда остался бы устаревшим и расходился бы с
+    # расхождением, посчитанным по уже новому содержимому (см. чат: бейдж
+    # "Излишек" при видимом недовозе в скобках).
+    doc.sent_qty_snapshot = sum(expected.values())
     doc.received_qty_snapshot = total_received_qty
     doc.receipt_changed_boxes = True
     doc.received_at = datetime.utcnow()
