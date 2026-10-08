@@ -176,10 +176,23 @@ def _apply_plan(marketplace, parsed, uploaded_by_id=None):
     }
 
     barcodes = {row["barcode"] for row in parsed.rows}
-    nomenclature_by_barcode = {
-        n.barcode: n
-        for n in Nomenclature.query.filter(Nomenclature.barcode.in_(barcodes)).all()
-    }
+    # Ищем и по основному, и по ДОП. штрихкоду (см. чат: штрихкод из файла
+    # плана может совпадать с Nomenclature.barcode2, а не с основным —
+    # например, товар переклеили другим кодом, а в плане остался старый).
+    # Nomenclature.find_by_barcode() ищет так же, но по одному штрихкоду —
+    # здесь нужен массовый запрос сразу по всем штрихкодам листа.
+    matched_nomenclature = Nomenclature.query.filter(
+        db.or_(Nomenclature.barcode.in_(barcodes), Nomenclature.barcode2.in_(barcodes))
+    ).all()
+    nomenclature_by_barcode = {}
+    for n in matched_nomenclature:
+        if n.barcode2 in barcodes:
+            nomenclature_by_barcode.setdefault(n.barcode2, n)
+    for n in matched_nomenclature:
+        # Основной штрихкод проставляем вторым проходом, чтобы он всегда
+        # побеждал доп. штрихкод при случайном совпадении значений.
+        if n.barcode in barcodes:
+            nomenclature_by_barcode[n.barcode] = n
     # Уже подтвержденное приемкой перемещением в WMS — подстраховка от
     # потери fulfilled_qty при замене строк плана (plan.lines.delete() ниже).
     # Факт пересчитывается отдельно для каждой даты листа. Верхней границы
