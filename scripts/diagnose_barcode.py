@@ -5,14 +5,16 @@
     python3 scripts/diagnose_barcode.py 2012962030009
 
 Печатает:
-  - все записи номенклатуры с таким штрихкодом (если их больше одной —
-    это сам по себе источник проблемы: остаток и план могут указывать на
-    разные id);
+  - точное совпадение по номенклатуре с таким штрихкодом; если точного
+    совпадения нет — похожие (подстрока, то же число без учета ведущих
+    нулей/пробелов) с repr(), чтобы увидеть побайтово даже невидимые
+    символы;
   - остаток (в коробах + неразмещенный) по каждой найденной номенклатуре,
     по складам;
   - строки плана отгрузок с этим штрихкодом: площадка/город/план/факт/
-    приоритет/новинка — и на какую именно номенклатуру они ссылаются.
-"""
+    приоритет/новинка — и на какую именно номенклатуру они ссылаются
+    (nomenclature_id=None значит точного совпадения не нашлось при
+    загрузке плана)."""
 
 import sys
 
@@ -23,44 +25,83 @@ from wms.extensions import db
 from wms.models import Box, BoxItem, Nomenclature, ShipmentPlanLine, UnplacedStock, Warehouse
 
 
+def _find_similar(barcode):
+    candidates = Nomenclature.query.filter(Nomenclature.barcode.like(f"%{barcode}%")).all()
+    # Запасной вариант, если барк0д в номенклатуре короче/длиннее искомого
+    # (например, потерялся ведущий ноль при чтении Excel как числа) —
+    # сравниваем числовое значение, а не подстроку.
+    try:
+        target_int = int(barcode)
+    except ValueError:
+        target_int = None
+    if target_int is not None:
+        existing_ids = {n.id for n in candidates}
+        for n in Nomenclature.query.filter(Nomenclature.barcode.isnot(None)).all():
+            if n.id in existing_ids:
+                continue
+            try:
+                same_number = int(n.barcode.strip()) == target_int
+            except (ValueError, AttributeError):
+                same_number = False
+            if same_number:
+                candidates.append(n)
+    return candidates
+
+
+def _print_stock(n):
+    print(f"\n=== Остаток по номенклатуре id={n.id}  barcode={n.barcode!r}  name={n.name!r} ===")
+    rows = (
+        db.session.query(UnplacedStock.warehouse_id, db.func.sum(UnplacedStock.qty))
+        .filter(UnplacedStock.nomenclature_id == n.id)
+        .group_by(UnplacedStock.warehouse_id)
+        .all()
+    )
+    for warehouse_id, qty in rows:
+        wh = Warehouse.query.get(warehouse_id)
+        print(f"  неразмещенный (на разбраковке): склад {wh.name if wh else warehouse_id!r} — {qty}")
+
+    rows = (
+        db.session.query(Box.warehouse_id, db.func.sum(BoxItem.qty))
+        .join(BoxItem, BoxItem.box_id == Box.id)
+        .filter(BoxItem.nomenclature_id == n.id)
+        .group_by(Box.warehouse_id)
+        .all()
+    )
+    for warehouse_id, qty in rows:
+        wh = Warehouse.query.get(warehouse_id)
+        print(f"  в коробах (готово к отгрузке): склад {wh.name if wh else warehouse_id!r} — {qty}")
+
+
 def main(barcode):
     app = create_app()
     with app.app_context():
         print(f"=== Номенклатура со штрихкодом {barcode!r} ===")
         noms = Nomenclature.query.filter_by(barcode=barcode).all()
-        if not noms:
-            print("НЕ НАЙДЕНО ни одной номенклатуры с таким штрихкодом.")
+
+        if noms:
+            for n in noms:
+                print(f"  id={n.id}  sku={n.sku!r}  name={n.name!r}  category_id={n.category_id}")
+            if len(noms) > 1:
+                print(
+                    f"\n!!! Найдено {len(noms)} записей номенклатуры с одинаковым штрихкодом — "
+                    "вероятная причина: план и остаток ссылаются на РАЗНЫЕ id."
+                )
+        else:
+            print("НЕ НАЙДЕНО ни одной номенклатуры с ТОЧНО таким штрихкодом.")
+            similar = _find_similar(barcode)
+            if similar:
+                print(
+                    "Но нашлись похожие — сверьте repr() ниже посимвольно с искомым "
+                    f"{barcode!r} (пробел/0 в начале/скрытый символ и т.п.):"
+                )
+                for n in similar:
+                    print(f"  id={n.id}  barcode={n.barcode!r}  sku={n.sku!r}  name={n.name!r}")
+                noms = similar
+            else:
+                print("  Похожих тоже не нашлось — номенклатуры с этим товаром в WMS нет вообще.")
+
         for n in noms:
-            print(f"  id={n.id}  sku={n.sku!r}  name={n.name!r}  category_id={n.category_id}")
-
-        if len(noms) > 1:
-            print(
-                f"\n!!! Найдено {len(noms)} записей номенклатуры с одинаковым штрихкодом — "
-                "вероятная причина: план и остаток ссылаются на РАЗНЫЕ id."
-            )
-
-        for n in noms:
-            print(f"\n=== Остаток по номенклатуре id={n.id} ===")
-            rows = (
-                db.session.query(UnplacedStock.warehouse_id, db.func.sum(UnplacedStock.qty))
-                .filter(UnplacedStock.nomenclature_id == n.id)
-                .group_by(UnplacedStock.warehouse_id)
-                .all()
-            )
-            for warehouse_id, qty in rows:
-                wh = Warehouse.query.get(warehouse_id)
-                print(f"  неразмещенный (на разбраковке): склад {wh.name if wh else warehouse_id!r} — {qty}")
-
-            rows = (
-                db.session.query(Box.warehouse_id, db.func.sum(BoxItem.qty))
-                .join(BoxItem, BoxItem.box_id == Box.id)
-                .filter(BoxItem.nomenclature_id == n.id)
-                .group_by(Box.warehouse_id)
-                .all()
-            )
-            for warehouse_id, qty in rows:
-                wh = Warehouse.query.get(warehouse_id)
-                print(f"  в коробах (готово к отгрузке): склад {wh.name if wh else warehouse_id!r} — {qty}")
+            _print_stock(n)
 
         print(f"\n=== Строки плана отгрузок со штрихкодом {barcode!r} ===")
         lines = ShipmentPlanLine.query.filter_by(barcode=barcode).all()
