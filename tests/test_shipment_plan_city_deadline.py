@@ -1,13 +1,13 @@
-"""«Выполнение плана» на дашборде плана отгрузок (см. чат): по каждому
-городу — две волны отгрузки («Дата плана, волна 1/2»), проставляются
-вручную через календарь и хранятся в ShipmentPlanCityDeadline. Под каждой
-волной — факт нарастающим итогом с начала периода плана по эту дату
-ВКЛЮЧИТЕЛЬНО (см. чат: "отгружено к этой дате включительно"), в штуках и в
-% от плана города. Смена даты сохраняется через AJAX и возвращает
-HTML-фрагмент пересчитанных и пересортированных (по волне 1, по
-возрастанию) строк, без редиректа — см. чат: "без перезагрузки страницы".
-Плюс разбивка вклада каждого склада-отправителя (в штуках и процентах) в
-то, что уже уехало на этот город."""
+"""«Выполнение плана» на дашборде плана отгрузок (см. чат): колонка «Дата
+плана» — дата, к которой нужно отгрузить план по конкретному городу,
+проставляется вручную через календарь и хранится в
+ShipmentPlanCityDeadline. Факт под датой — нарастающим итогом с начала
+периода плана по эту дату ВКЛЮЧИТЕЛЬНО (см. чат: "отгружено к этой дате
+включительно"), в штуках и в % от плана города. Смена даты сохраняется
+через AJAX и возвращает HTML-фрагмент пересчитанных и пересортированных
+(по дате, по возрастанию) строк, без редиректа — см. чат: "без
+перезагрузки страницы". Плюс разбивка вклада каждого склада-отправителя
+(в штуках и процентах) в то, что уже уехало на этот город."""
 
 from datetime import date, datetime, time, timedelta
 
@@ -70,17 +70,15 @@ def _ship_box(sender, city, item, qty, box_number, client):
     return doc
 
 
-def _set_wave(client, plan, warehouse, wave, value):
-    return client.post(
-        f"/shipment-plan/{plan.id}/cities/{warehouse.id}/deadline/{wave}", data={"ship_by_date": value}
-    )
+def _set_deadline(client, plan, warehouse, value):
+    return client.post(f"/shipment-plan/{plan.id}/cities/{warehouse.id}/deadline", data={"ship_by_date": value})
 
 
 def test_set_deadline_date_shows_on_dashboard(db, client_logged_in):
     plan, sender, city, item = _setup()
 
     target = (date.today() + timedelta(days=5)).isoformat()
-    resp = _set_wave(client_logged_in, plan, city, 1, target)
+    resp = _set_deadline(client_logged_in, plan, city, target)
     assert resp.status_code == 302
 
     html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
@@ -89,24 +87,6 @@ def test_set_deadline_date_shows_on_dashboard(db, client_logged_in):
     deadline = ShipmentPlanCityDeadline.query.filter_by(plan_id=plan.id, warehouse_id=city.id).first()
     assert deadline is not None
     assert deadline.ship_by_date.isoformat() == target
-    assert deadline.ship_by_date_2 is None
-
-
-def test_set_second_wave_independently_from_first(db, client_logged_in):
-    plan, sender, city, item = _setup()
-    first = (date.today() + timedelta(days=2)).isoformat()
-    second = (date.today() + timedelta(days=9)).isoformat()
-
-    _set_wave(client_logged_in, plan, city, 1, first)
-    _set_wave(client_logged_in, plan, city, 2, second)
-
-    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
-    assert f'value="{first}"' in html
-    assert f'value="{second}"' in html
-
-    deadline = ShipmentPlanCityDeadline.query.filter_by(plan_id=plan.id, warehouse_id=city.id).first()
-    assert deadline.ship_by_date.isoformat() == first
-    assert deadline.ship_by_date_2.isoformat() == second
 
 
 def test_update_deadline_date_overwrites_previous(db, client_logged_in):
@@ -114,8 +94,8 @@ def test_update_deadline_date_overwrites_previous(db, client_logged_in):
     first = (date.today() + timedelta(days=3)).isoformat()
     second = (date.today() + timedelta(days=10)).isoformat()
 
-    _set_wave(client_logged_in, plan, city, 1, first)
-    _set_wave(client_logged_in, plan, city, 1, second)
+    _set_deadline(client_logged_in, plan, city, first)
+    _set_deadline(client_logged_in, plan, city, second)
 
     assert ShipmentPlanCityDeadline.query.filter_by(plan_id=plan.id, warehouse_id=city.id).count() == 1
     deadline = ShipmentPlanCityDeadline.query.filter_by(plan_id=plan.id, warehouse_id=city.id).first()
@@ -124,26 +104,11 @@ def test_update_deadline_date_overwrites_previous(db, client_logged_in):
 
 def test_clearing_deadline_date_removes_it(db, client_logged_in):
     plan, sender, city, item = _setup()
-    _set_wave(client_logged_in, plan, city, 1, (date.today() + timedelta(days=1)).isoformat())
+    _set_deadline(client_logged_in, plan, city, (date.today() + timedelta(days=1)).isoformat())
 
-    _set_wave(client_logged_in, plan, city, 1, "")
+    _set_deadline(client_logged_in, plan, city, "")
 
     assert ShipmentPlanCityDeadline.query.filter_by(plan_id=plan.id, warehouse_id=city.id).first() is None
-
-
-def test_clearing_one_wave_keeps_the_other(db, client_logged_in):
-    plan, sender, city, item = _setup()
-    first = (date.today() + timedelta(days=1)).isoformat()
-    second = (date.today() + timedelta(days=4)).isoformat()
-    _set_wave(client_logged_in, plan, city, 1, first)
-    _set_wave(client_logged_in, plan, city, 2, second)
-
-    _set_wave(client_logged_in, plan, city, 1, "")
-
-    deadline = ShipmentPlanCityDeadline.query.filter_by(plan_id=plan.id, warehouse_id=city.id).first()
-    assert deadline is not None
-    assert deadline.ship_by_date is None
-    assert deadline.ship_by_date_2.isoformat() == second
 
 
 def test_sender_warehouse_breakdown_shows_qty_and_percent(db, client_logged_in):
@@ -164,42 +129,42 @@ def test_sender_warehouse_breakdown_shows_qty_and_percent(db, client_logged_in):
 
 
 def test_deadline_shows_cumulative_qty_through_that_date_inclusive(db, client_logged_in):
-    """Факт под датой волны — нарастающим итогом с начала периода по эту
+    """Факт под датой плана — нарастающим итогом с начала периода по эту
     дату ВКЛЮЧИТЕЛЬНО (см. чат), а не только за один день: более раннюю
-    отгрузку внутри периода учитывает, более позднюю (после даты волны) —
+    отгрузку внутри периода учитывает, более позднюю (после даты плана) —
     нет."""
     plan, sender, city, item = _setup(planned_qty=100)
 
     earlier_doc = _ship_box(sender, city, item, qty=12, box_number="BOX-SPD-EARLY", client=client_logged_in)
-    on_wave_doc = _ship_box(sender, city, item, qty=20, box_number="BOX-SPD-ONWAVE", client=client_logged_in)
+    on_date_doc = _ship_box(sender, city, item, qty=20, box_number="BOX-SPD-ONDATE", client=client_logged_in)
     later_doc = _ship_box(sender, city, item, qty=99, box_number="BOX-SPD-LATER", client=client_logged_in)
 
     period_start = date.today() - timedelta(days=5)
-    wave_day = date.today() - timedelta(days=2)
+    deadline_day = date.today() - timedelta(days=2)
 
     plan.period_start = period_start
     db.session.commit()
 
     db.session.refresh(earlier_doc)
-    db.session.refresh(on_wave_doc)
+    db.session.refresh(on_date_doc)
     db.session.refresh(later_doc)
-    earlier_doc.shipped_at = datetime.combine(wave_day - timedelta(days=1), time(9, 0))
-    on_wave_doc.shipped_at = datetime.combine(wave_day, time(12, 0))
-    later_doc.shipped_at = datetime.combine(wave_day + timedelta(days=1), time(9, 0))
+    earlier_doc.shipped_at = datetime.combine(deadline_day - timedelta(days=1), time(9, 0))
+    on_date_doc.shipped_at = datetime.combine(deadline_day, time(12, 0))
+    later_doc.shipped_at = datetime.combine(deadline_day + timedelta(days=1), time(9, 0))
     db.session.commit()
 
-    _set_wave(client_logged_in, plan, city, 1, wave_day.isoformat())
+    _set_deadline(client_logged_in, plan, city, deadline_day.isoformat())
 
     html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
     city_idx = html.find("<td>Город</td>")
     snippet = html[city_idx : city_idx + 900]
     assert "факт к дате" in snippet
     assert "<b>32</b>" in snippet  # 12 (раньше) + 20 (в эту дату) = 32, включительно
-    assert "<b>131</b>" not in snippet  # не включает отгрузку ПОСЛЕ даты волны
+    assert "<b>131</b>" not in snippet  # не включает отгрузку ПОСЛЕ даты плана
     assert "(32%)" in snippet  # 32 из плана 100
 
 
-def test_cities_sorted_by_first_wave_date_ascending(db, client_logged_in):
+def test_cities_sorted_by_deadline_date_ascending(db, client_logged_in):
     plan, sender, city_a, item = _setup(planned_qty=10)
     city_b = Warehouse(code="WH-SPD4", name="ОЗОН: Другой", marketplace="ozon", marketplace_city="Другой")
     city_c = Warehouse(code="WH-SPD5", name="ОЗОН: Третий", marketplace="ozon", marketplace_city="Третий")
@@ -219,8 +184,8 @@ def test_cities_sorted_by_first_wave_date_ascending(db, client_logged_in):
 
     # Город (city_a) — дата позже, Другой (city_b) — дата раньше,
     # Третий (city_c) — вообще без даты (должен уйти в конец).
-    _set_wave(client_logged_in, plan, city_a, 1, (date.today() + timedelta(days=10)).isoformat())
-    _set_wave(client_logged_in, plan, city_b, 1, (date.today() + timedelta(days=1)).isoformat())
+    _set_deadline(client_logged_in, plan, city_a, (date.today() + timedelta(days=10)).isoformat())
+    _set_deadline(client_logged_in, plan, city_b, (date.today() + timedelta(days=1)).isoformat())
 
     html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
     pos_b = html.find("<td>Другой</td>")
@@ -235,7 +200,7 @@ def test_ajax_deadline_update_returns_fragment_without_redirect(db, client_logge
     target = (date.today() + timedelta(days=3)).isoformat()
 
     resp = client_logged_in.post(
-        f"/shipment-plan/{plan.id}/cities/{city.id}/deadline/1",
+        f"/shipment-plan/{plan.id}/cities/{city.id}/deadline",
         data={"ship_by_date": target},
         headers={"X-Requested-With": "XMLHttpRequest"},
     )

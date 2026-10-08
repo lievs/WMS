@@ -5,24 +5,19 @@
 {% for row in cities %}
 <tr>
   <td>{{ row.warehouse.marketplace_city }}</td>
-  {% for wave, deadline_field, shipped_field, percent_field in (
-       (1, 'deadline', 'shipped_through', 'shipped_through_percent'),
-       (2, 'deadline_2', 'shipped_through_2', 'shipped_through_2_percent'),
-     ) %}
-  <td class="{% if wave == 1 %}border-start{% endif %}">
+  <td>
     <form class="city-deadline-form" method="post"
-          action="{{ url_for('shipment_plan.update_city_deadline', plan_id=plan.id, warehouse_id=row.warehouse.id, wave=wave) }}">
+          action="{{ url_for('shipment_plan.update_city_deadline', plan_id=plan.id, warehouse_id=row.warehouse.id) }}">
       <input type="date" name="ship_by_date" class="form-control form-control-sm city-deadline-input" style="width:9.5em"
-             value="{{ row[deadline_field].isoformat() if row[deadline_field] else '' }}">
+             value="{{ row.deadline.isoformat() if row.deadline else '' }}">
     </form>
-    {% if row[deadline_field] %}
+    {% if row.deadline %}
     <div class="small text-muted mt-1" title="Нарастающим итогом с начала периода по эту дату включительно, пересчитывается каждый раз заново">
-      факт к дате: <b>{{ row[shipped_field] | round(0) | int }}</b>
-      {% if row[percent_field] is not none %}({{ row[percent_field] | round(0) | int }}%){% endif %}
+      факт к дате: <b>{{ row.shipped_through | round(0) | int }}</b>
+      {% if row.shipped_through_percent is not none %}({{ row.shipped_through_percent | round(0) | int }}%){% endif %}
     </div>
     {% endif %}
   </td>
-  {% endfor %}
   <td>{{ row.planned | round(0) | int }}</td>
   <td>{% if row.in_transit %}<span class="text-warning-emphasis">{{ row.in_transit | round(0) | int }}</span>{% else %}—{% endif %}</td>
   <td>{% if row.percent is not none %}{{ row.percent | round(1) }}%{% else %}—{% endif %}</td>

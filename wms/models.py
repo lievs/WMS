@@ -1440,17 +1440,15 @@ class ShipmentPlanLine(db.Model):
 
 
 class ShipmentPlanCityDeadline(db.Model):
-    """Даты, к которым нужно отгрузить план по конкретному городу-складу
-    площадки — по одной паре (план, склад), проставляются вручную в
+    """Дата, к которой нужно отгрузить план по конкретному городу-складу
+    площадки — одна дата на пару (план, склад), проставляется вручную в
     «Выполнении плана» на дашборде (см. чат: колонка «Дата плана»).
     Хранится отдельно от ShipmentPlanLine, потому что это параметр на
     весь город, а не на отдельную строку/товар.
 
-    Две даты — это две волны отгрузки по городу (см. чат: "две волны
-    отгрузки"), каждая со своим фактом (сколько отгружено нарастающим
-    итогом с начала периода по эту дату включительно, см.
-    _shipped_qty_through_date) и своим % от плана. Волны независимы друг
-    от друга — смена одной не трогает другую."""
+    Факт под этой датой — сколько отгружено нарастающим итогом с начала
+    периода плана по эту дату включительно (см.
+    _shipped_qty_through_date) и % от плана города."""
 
     __tablename__ = "shipment_plan_city_deadlines"
 
@@ -1458,7 +1456,6 @@ class ShipmentPlanCityDeadline(db.Model):
     plan_id = db.Column(db.Integer, db.ForeignKey("shipment_plans.id"), nullable=False)
     warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=False)
     ship_by_date = db.Column(db.Date, nullable=True)
-    ship_by_date_2 = db.Column(db.Date, nullable=True)
 
     plan = db.relationship("ShipmentPlan")
     warehouse = db.relationship("Warehouse")

@@ -1097,9 +1097,9 @@ def _shipped_qty_through_date(warehouse_id, day, period_start=None):
 
 def _city_rows_for_plan(plan, sender_warehouses):
     """Строки городов для карточки плана-маркетплейса на дашборде: план/в
-    пути/%, по две волны «Дата плана» (см. чат: "две волны отгрузки") с
-    фактом (шт и % нарастающим итогом по эту дату включительно, см.
-    _shipped_qty_through_date) и разбивка вклада каждого склада-отправителя.
+    пути/%, «Дата плана» с фактом (шт и % нарастающим итогом по эту дату
+    включительно, см. _shipped_qty_through_date) и разбивка вклада
+    каждого склада-отправителя.
 
     Общая функция для полного дашборда и для AJAX-ответа при смене даты
     (см. чат: "без перезагрузки страницы") — чтобы расчет факта и
@@ -1172,18 +1172,13 @@ def _city_rows_for_plan(plan, sender_warehouses):
 
         deadline = deadlines.get(row["warehouse"].id)
         row["deadline"] = deadline.ship_by_date if deadline else None
-        row["deadline_2"] = deadline.ship_by_date_2 if deadline else None
-        for suffix, field in (("", "deadline"), ("_2", "deadline_2")):
-            day = row[field]
-            if day:
-                qty = _shipped_qty_through_date(row["warehouse"].id, day, plan.period_start)
-                row[f"shipped_through{suffix}"] = qty
-                row[f"shipped_through{suffix}_percent"] = (
-                    100 * qty / row["planned"] if row["planned"] else None
-                )
-            else:
-                row[f"shipped_through{suffix}"] = None
-                row[f"shipped_through{suffix}_percent"] = None
+        if row["deadline"]:
+            qty = _shipped_qty_through_date(row["warehouse"].id, row["deadline"], plan.period_start)
+            row["shipped_through"] = qty
+            row["shipped_through_percent"] = 100 * qty / row["planned"] if row["planned"] else None
+        else:
+            row["shipped_through"] = None
+            row["shipped_through_percent"] = None
 
         # Вклад каждого склада-отправителя в то, что уже уехало на этот
         # город — в штуках и в процентах от суммы по всем отправителям (не
@@ -1533,26 +1528,16 @@ def dashboard():
     )
 
 
-# Волна 1 и волна 2 отгрузки по городу (см. чат: "две волны отгрузки") —
-# у каждой своя дата, хранятся в одной записи ShipmentPlanCityDeadline.
-_DEADLINE_WAVE_FIELDS = {1: "ship_by_date", 2: "ship_by_date_2"}
-
-
-@bp.route("/<int:plan_id>/cities/<int:warehouse_id>/deadline/<int:wave>", methods=["POST"])
-def update_city_deadline(plan_id, warehouse_id, wave):
-    """Дата одной из двух волн отгрузки по городу (см. чат) — по одной
-    записи на (план, склад), каждая волна правится независимо. Пустое
-    значение из календаря удаляет только эту волну; если после этого у
-    записи не осталось ни одной даты, запись удаляется целиком.
+@bp.route("/<int:plan_id>/cities/<int:warehouse_id>/deadline", methods=["POST"])
+def update_city_deadline(plan_id, warehouse_id):
+    """Дата, к которой нужно отгрузить план по конкретному городу (см.
+    чат) — одна запись на (план, склад), перезаписывается при повторном
+    сохранении. Пустое значение из календаря удаляет дату.
 
     При AJAX-запросе (fetch с заголовком X-Requested-With — см.
     dashboard.html) отдает HTML-фрагмент пересчитанных и пересортированных
     строк городов вместо редиректа, чтобы смена даты обновляла дашборд без
     перезагрузки страницы (см. чат: "без перезагрузки страницы")."""
-    field = _DEADLINE_WAVE_FIELDS.get(wave)
-    if field is None:
-        return "Неизвестная волна отгрузки", 404
-
     plan = ShipmentPlan.query.get_or_404(plan_id)
     warehouse = Warehouse.query.get_or_404(warehouse_id)
     raw = request.form.get("ship_by_date", "").strip()
@@ -1566,15 +1551,15 @@ def update_city_deadline(plan_id, warehouse_id, wave):
         return redirect(url_for("shipment_plan.dashboard"))
 
     deadline = ShipmentPlanCityDeadline.query.filter_by(plan_id=plan.id, warehouse_id=warehouse.id).first()
-    if deadline is None:
-        if ship_by_date is not None:
-            deadline = ShipmentPlanCityDeadline(plan_id=plan.id, warehouse_id=warehouse.id)
-            setattr(deadline, field, ship_by_date)
-            db.session.add(deadline)
-    else:
-        setattr(deadline, field, ship_by_date)
-        if deadline.ship_by_date is None and deadline.ship_by_date_2 is None:
+    if ship_by_date is None:
+        if deadline:
             db.session.delete(deadline)
+    elif deadline:
+        deadline.ship_by_date = ship_by_date
+    else:
+        db.session.add(
+            ShipmentPlanCityDeadline(plan_id=plan.id, warehouse_id=warehouse.id, ship_by_date=ship_by_date)
+        )
     db.session.commit()
 
     if is_ajax:
