@@ -1,7 +1,7 @@
 import os
 import secrets
 
-from flask import Flask, flash, redirect, request, session, url_for
+from flask import Flask, current_app, flash, redirect, request, session, url_for
 from flask_login import current_user, logout_user
 from sqlalchemy import event, inspect, select, text
 from sqlalchemy.engine import Engine
@@ -463,6 +463,15 @@ def _bootstrap_admin():
     if User.query.count() > 0:
         return
 
+    # Демо-режим (WMS_DEMO=1): пароль известен заранее ("demo", см.
+    # demo_data.py) и печатать случайный не нужно — он бы только запутал.
+    if current_app.config.get("DEMO_MODE"):
+        admin = User(username="admin", full_name="Администратор", is_admin=True)
+        admin.set_password("demo")
+        db.session.add(admin)
+        db.session.commit()
+        return
+
     password = secrets.token_urlsafe(8)
     admin = User(username="admin", full_name="Администратор", is_admin=True)
     admin.set_password(password)
@@ -677,6 +686,10 @@ def create_app(config_class=Config):
 
         from .models import CELL_CAPACITY
 
-        return {"current_year": datetime.now().year, "CELL_CAPACITY": CELL_CAPACITY}
+        return {
+            "current_year": datetime.now().year,
+            "CELL_CAPACITY": CELL_CAPACITY,
+            "demo_mode": app.config.get("DEMO_MODE", False),
+        }
 
     return app
