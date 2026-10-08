@@ -1077,22 +1077,142 @@ def _group_picking_list(picking_list, sender_warehouses, ozon_cities, wb_cities)
     return ordered
 
 
-def _shipped_qty_on_date(warehouse_id, day):
+def _shipped_qty_through_date(warehouse_id, day, period_start=None):
     """Сколько реально отгружено (total_sent_qty по завершенным
-    перемещениям, забранным транспортом) именно в этот календарный день на
-    указанный склад-город — пересчитывается каждый раз заново по живым
-    данным, а не хранится (см. чат: при выставлении даты плана нужно
-    видеть, сколько на эту дату уже отгружено, чтобы понимать выполнение
-    плана отгрузок)."""
-    start = datetime.combine(day, time.min)
+    перемещениям, забранным транспортом) НАРАСТАЮЩИМ ИТОГОМ — с начала
+    периода плана по указанную дату ВКЛЮЧИТЕЛЬНО — на указанный
+    склад-город (см. чат: "отгружено к этой дате включительно", не только
+    за один день). Пересчитывается каждый раз заново по живым данным, а
+    не хранится."""
     end = datetime.combine(day, time.max)
-    docs = MovementDocument.query.filter(
+    query = MovementDocument.query.filter(
         MovementDocument.to_warehouse_id == warehouse_id,
         MovementDocument.status == "completed",
-        MovementDocument.shipped_at >= start,
         MovementDocument.shipped_at <= end,
-    ).all()
-    return sum(doc.total_sent_qty() for doc in docs)
+    )
+    if period_start:
+        query = query.filter(MovementDocument.shipped_at >= datetime.combine(period_start, time.min))
+    return sum(doc.total_sent_qty() for doc in query.all())
+
+
+def _city_rows_for_plan(plan, sender_warehouses):
+    """Строки городов для карточки плана-маркетплейса на дашборде: план/в
+    пути/%, по две волны «Дата плана» (см. чат: "две волны отгрузки") с
+    фактом (шт и % нарастающим итогом по эту дату включительно, см.
+    _shipped_qty_through_date) и разбивка вклада каждого склада-отправителя.
+
+    Общая функция для полного дашборда и для AJAX-ответа при смене даты
+    (см. чат: "без перезагрузки страницы") — чтобы расчет факта и
+    сортировка считались одинаково в обоих местах."""
+    lines = plan.lines.all()
+    movement_totals_by_period = {}
+
+    def _totals_for(period_start):
+        if period_start not in movement_totals_by_period:
+            movement_totals_by_period[period_start] = movement_wms_totals(period_start)
+        return movement_totals_by_period[period_start]
+
+    # «В пути» — весь товар, который транспорт забрал с 00:01 даты
+    # конкретного листа. Завершение сборки и заявка МП сами по себе
+    # отгрузкой не считаются.
+    for line in lines:
+        period_start = line.period_start or plan.period_start
+        quantities = _totals_for(period_start).get((line.warehouse_id, line.nomenclature_id), {})
+        line.current_fulfilled_qty = 0.0
+        line.in_transit_qty = quantities.get("shipped", 0.0)
+        line.fulfilled_with_transit_qty = line.in_transit_qty
+        # Товар-новинка одной площадки (0w/0o) не должен считаться
+        # потребностью ДРУГОЙ площадки (см. чат: "приоритет 0w
+        # отгружается на озон").
+        line.effective_remaining_qty = (
+            0.0
+            if line._blocked_by_novelty_marketplace()
+            else max(line.planned_qty - line.fulfilled_with_transit_qty, 0)
+        )
+
+    by_warehouse = {}
+    for line in lines:
+        row = by_warehouse.setdefault(
+            line.warehouse_id,
+            {"warehouse": line.warehouse, "planned": 0, "fulfilled_with_transit": 0, "in_transit": 0},
+        )
+        row["planned"] += line.planned_qty
+        row["fulfilled_with_transit"] += line.fulfilled_with_transit_qty
+        row["in_transit"] += line.in_transit_qty
+
+    # Карточка города показывает ВСЕ завершенные перемещения на этот склад
+    # с даты плана, в том числе товары, которых уже нет (или еще нет) среди
+    # строк актуального плана — иначе городская сумма меньше сводного
+    # экспорта перемещений.
+    city_totals = _totals_for(plan.period_start)
+    shipped_by_warehouse = {}
+    for (warehouse_id, _nomenclature_id), quantities in city_totals.items():
+        shipped_by_warehouse[warehouse_id] = (
+            shipped_by_warehouse.get(warehouse_id, 0.0) + quantities.get("shipped", 0.0)
+        )
+    for warehouse_id, row in by_warehouse.items():
+        row["in_transit"] = shipped_by_warehouse.get(warehouse_id, 0.0)
+        row["fulfilled_with_transit"] = row["in_transit"]
+
+    sender_totals = movement_sender_totals(plan.period_start)
+    deadlines = {
+        d.warehouse_id: d
+        for d in ShipmentPlanCityDeadline.query.filter_by(plan_id=plan.id).all()
+    }
+
+    cities = list(by_warehouse.values())
+    for row in cities:
+        row["remaining"] = max(row["planned"] - row["fulfilled_with_transit"], 0)
+        # % выполнения по городу — тот же принцип, что и общий % в шапке
+        # карточки маркетплейса (fulfilled_with_transit/planned), только
+        # построчно по каждому городу.
+        row["percent"] = (
+            100 * row["fulfilled_with_transit"] / row["planned"] if row["planned"] else None
+        )
+
+        deadline = deadlines.get(row["warehouse"].id)
+        row["deadline"] = deadline.ship_by_date if deadline else None
+        row["deadline_2"] = deadline.ship_by_date_2 if deadline else None
+        for suffix, field in (("", "deadline"), ("_2", "deadline_2")):
+            day = row[field]
+            if day:
+                qty = _shipped_qty_through_date(row["warehouse"].id, day, plan.period_start)
+                row[f"shipped_through{suffix}"] = qty
+                row[f"shipped_through{suffix}_percent"] = (
+                    100 * qty / row["planned"] if row["planned"] else None
+                )
+            else:
+                row[f"shipped_through{suffix}"] = None
+                row[f"shipped_through{suffix}_percent"] = None
+
+        # Вклад каждого склада-отправителя в то, что уже уехало на этот
+        # город — в штуках и в процентах от суммы по всем отправителям (не
+        # от плана города — она может не сойтись с планом, если отгрузили
+        # больше/меньше заявленного).
+        sender_qty_by_warehouse = {
+            wh.id: sender_totals.get((row["warehouse"].id, wh.id), 0.0) for wh in sender_warehouses
+        }
+        sender_total_qty = sum(sender_qty_by_warehouse.values())
+        row["sender_breakdown"] = [
+            {
+                "warehouse": wh,
+                "qty": sender_qty_by_warehouse[wh.id],
+                "percent": (
+                    100 * sender_qty_by_warehouse[wh.id] / sender_total_qty
+                    if sender_total_qty else None
+                ),
+            }
+            for wh in sender_warehouses
+        ]
+
+    # По возрастанию первой волны (см. чат: "сортировку оставь по первой
+    # дате") — у кого ближе срок первой отгрузки, тот выше. Города без
+    # даты вообще — в конце, сортировать их не по чему; имя города —
+    # просто детерминированный довесок при равенстве/отсутствии дат.
+    cities.sort(
+        key=lambda r: (r["deadline"] is None, r["deadline"] or date.max, r["warehouse"].marketplace_city)
+    )
+    return cities
 
 
 def _dashboard_context():
@@ -1117,13 +1237,6 @@ def _dashboard_context():
     for nomenclature_id, qty in _pending_sorting_by_nomenclature(sender_ids).items():
         stock[nomenclature_id] = stock.get(nomenclature_id, 0) + qty
         unplaced_stock[nomenclature_id] = unplaced_stock.get(nomenclature_id, 0) + qty
-    movement_totals_by_period = {}
-    sender_totals_by_period = {}
-    city_deadlines = {
-        (d.plan_id, d.warehouse_id): d.ship_by_date
-        for d in ShipmentPlanCityDeadline.query.all()
-    }
-
     marketplaces_data = []
     lines_by_marketplace = {}
     for marketplace in MARKETPLACES:
@@ -1137,104 +1250,7 @@ def _dashboard_context():
         lines = plan.lines.all()
         lines_by_marketplace[marketplace] = lines
 
-        # «В пути» — весь товар, который транспорт забрал с 00:01 даты
-        # конкретного листа. Завершение сборки и заявка МП сами по себе
-        # отгрузкой не считаются.
-        for line in lines:
-            period_start = line.period_start or plan.period_start
-            if period_start not in movement_totals_by_period:
-                movement_totals_by_period[period_start] = movement_wms_totals(period_start)
-            quantities = movement_totals_by_period[period_start].get(
-                (line.warehouse_id, line.nomenclature_id), {}
-            )
-            line.current_fulfilled_qty = 0.0
-            line.in_transit_qty = quantities.get("shipped", 0.0)
-            line.fulfilled_with_transit_qty = line.in_transit_qty
-            # Товар-новинка одной площадки (0w/0o) не должен считаться
-            # потребностью ДРУГОЙ площадки, даже если в файле плана
-            # случайно осталось ненулевое число в чужой колонке (см. чат:
-            # "приоритет 0w отгружается на озон" и
-            # ShipmentPlanLine._blocked_by_novelty_marketplace).
-            line.effective_remaining_qty = (
-                0.0
-                if line._blocked_by_novelty_marketplace()
-                else max(line.planned_qty - line.fulfilled_with_transit_qty, 0)
-            )
-
-        by_warehouse = {}
-        for line in lines:
-            row = by_warehouse.setdefault(
-                line.warehouse_id,
-                {
-                    "warehouse": line.warehouse,
-                    "planned": 0,
-                    "fulfilled_with_transit": 0,
-                    "in_transit": 0,
-                },
-            )
-            row["planned"] += line.planned_qty
-            row["fulfilled_with_transit"] += line.fulfilled_with_transit_qty
-            row["in_transit"] += line.in_transit_qty
-
-        # Карточка города показывает ВСЕ завершенные перемещения на этот
-        # склад с даты плана, в том числе товары, которых уже нет (или еще
-        # нет) среди строк актуального плана. Иначе городская сумма меньше
-        # сводного экспорта перемещений: такие SKU просто не находят
-        # ShipmentPlanLine и выпадают. Позиционная таблица и маршрутизация
-        # выше по-прежнему считают только совпавшие SKU.
-        city_totals = movement_totals_by_period.setdefault(
-            plan.period_start,
-            movement_wms_totals(plan.period_start),
-        )
-        shipped_by_warehouse = {}
-        for (warehouse_id, _nomenclature_id), quantities in city_totals.items():
-            shipped_by_warehouse[warehouse_id] = (
-                shipped_by_warehouse.get(warehouse_id, 0.0)
-                + quantities.get("shipped", 0.0)
-            )
-        for warehouse_id, row in by_warehouse.items():
-            row["in_transit"] = shipped_by_warehouse.get(warehouse_id, 0.0)
-            row["fulfilled_with_transit"] = row["in_transit"]
-        sender_totals = sender_totals_by_period.setdefault(
-            plan.period_start, movement_sender_totals(plan.period_start)
-        )
-        cities = sorted(by_warehouse.values(), key=lambda r: r["warehouse"].marketplace_city)
-        for row in cities:
-            row["remaining"] = max(row["planned"] - row["fulfilled_with_transit"], 0)
-            # % выполнения по городу — тот же принцип, что и общий % в
-            # шапке карточки маркетплейса (fulfilled_with_transit/planned),
-            # только построчно по каждому городу (см. чат).
-            row["percent"] = (
-                100 * row["fulfilled_with_transit"] / row["planned"] if row["planned"] else None
-            )
-            # Дата, к которой нужно отгрузить план по этому городу —
-            # проставляется вручную на дашборде (см. чат). Если дата
-            # выставлена, сразу пересчитываем, сколько реально отгрузили
-            # именно в этот день — чтобы сверить с планом на эту дату.
-            row["deadline"] = city_deadlines.get((plan.id, row["warehouse"].id))
-            row["shipped_on_deadline"] = (
-                _shipped_qty_on_date(row["warehouse"].id, row["deadline"])
-                if row["deadline"] else None
-            )
-            # Вклад каждого склада-отправителя в то, что уже уехало на этот
-            # город — в штуках и в процентах от суммы по всем отправителям
-            # (не от плана города — она может не сойтись с планом, если
-            # отгрузили больше/меньше заявленного, см. чат).
-            sender_qty_by_warehouse = {
-                wh.id: sender_totals.get((row["warehouse"].id, wh.id), 0.0) for wh in sender_warehouses
-            }
-            sender_total_qty = sum(sender_qty_by_warehouse.values())
-            row["sender_breakdown"] = [
-                {
-                    "warehouse": wh,
-                    "qty": sender_qty_by_warehouse[wh.id],
-                    "percent": (
-                        100 * sender_qty_by_warehouse[wh.id] / sender_total_qty
-                        if sender_total_qty else None
-                    ),
-                }
-                for wh in sender_warehouses
-            ]
+        cities = _city_rows_for_plan(plan, sender_warehouses)
 
         # Штрихкоды с невыполненным остатком, для которых нечем отгружать —
         # только для значка-счетчика на карточке; сам список товаров теперь
@@ -1517,31 +1533,64 @@ def dashboard():
     )
 
 
-@bp.route("/<int:plan_id>/cities/<int:warehouse_id>/deadline", methods=["POST"])
-def update_city_deadline(plan_id, warehouse_id):
-    """Дата, к которой нужно отгрузить план по конкретному городу (см.
-    чат) — одна запись на (план, склад), перезаписывается при повторном
-    сохранении. Пустое значение из календаря удаляет дату."""
+# Волна 1 и волна 2 отгрузки по городу (см. чат: "две волны отгрузки") —
+# у каждой своя дата, хранятся в одной записи ShipmentPlanCityDeadline.
+_DEADLINE_WAVE_FIELDS = {1: "ship_by_date", 2: "ship_by_date_2"}
+
+
+@bp.route("/<int:plan_id>/cities/<int:warehouse_id>/deadline/<int:wave>", methods=["POST"])
+def update_city_deadline(plan_id, warehouse_id, wave):
+    """Дата одной из двух волн отгрузки по городу (см. чат) — по одной
+    записи на (план, склад), каждая волна правится независимо. Пустое
+    значение из календаря удаляет только эту волну; если после этого у
+    записи не осталось ни одной даты, запись удаляется целиком.
+
+    При AJAX-запросе (fetch с заголовком X-Requested-With — см.
+    dashboard.html) отдает HTML-фрагмент пересчитанных и пересортированных
+    строк городов вместо редиректа, чтобы смена даты обновляла дашборд без
+    перезагрузки страницы (см. чат: "без перезагрузки страницы")."""
+    field = _DEADLINE_WAVE_FIELDS.get(wave)
+    if field is None:
+        return "Неизвестная волна отгрузки", 404
+
     plan = ShipmentPlan.query.get_or_404(plan_id)
     warehouse = Warehouse.query.get_or_404(warehouse_id)
     raw = request.form.get("ship_by_date", "").strip()
+    is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     try:
         ship_by_date = date.fromisoformat(raw) if raw else None
     except ValueError:
+        if is_ajax:
+            return "Некорректная дата", 400
         flash("Некорректная дата", "danger")
         return redirect(url_for("shipment_plan.dashboard"))
 
     deadline = ShipmentPlanCityDeadline.query.filter_by(plan_id=plan.id, warehouse_id=warehouse.id).first()
-    if ship_by_date is None:
-        if deadline:
-            db.session.delete(deadline)
-    elif deadline:
-        deadline.ship_by_date = ship_by_date
+    if deadline is None:
+        if ship_by_date is not None:
+            deadline = ShipmentPlanCityDeadline(plan_id=plan.id, warehouse_id=warehouse.id)
+            setattr(deadline, field, ship_by_date)
+            db.session.add(deadline)
     else:
-        db.session.add(
-            ShipmentPlanCityDeadline(plan_id=plan.id, warehouse_id=warehouse.id, ship_by_date=ship_by_date)
-        )
+        setattr(deadline, field, ship_by_date)
+        if deadline.ship_by_date is None and deadline.ship_by_date_2 is None:
+            db.session.delete(deadline)
     db.session.commit()
+
+    if is_ajax:
+        sender_warehouses = (
+            Warehouse.query.filter(Warehouse.name.in_(DIRECT_TRANSFER_WAREHOUSE_NAMES))
+            .order_by(Warehouse.name)
+            .all()
+        )
+        cities = _city_rows_for_plan(plan, sender_warehouses)
+        return render_template(
+            "shipment_plan/_city_rows.html",
+            plan=plan,
+            cities=cities,
+            sender_warehouses=sender_warehouses,
+        )
+
     return redirect(url_for("shipment_plan.dashboard"))
 
 

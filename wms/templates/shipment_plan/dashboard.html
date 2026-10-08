@@ -147,7 +147,8 @@
         <table class="table table-sm table-mobile-compact mb-0">
           <thead><tr>
             <th>Город</th>
-            <th title="Дата, к которой нужно отгрузить план по этому городу — проставляется вручную">Дата плана</th>
+            <th class="border-start" title="Первая волна отгрузки — проставляется вручную; факт под датой — нарастающим итогом с начала периода по эту дату включительно">Дата плана, волна 1</th>
+            <th title="Вторая волна отгрузки — то же самое, независимо от первой">Дата плана, волна 2</th>
             <th>План</th>
             <th title="Все завершенные перемещения с 00:01 даты листа">В пути</th>
             <th title="В пути / план">% вып.</th>
@@ -155,29 +156,10 @@
             <th title="Вклад склада «{{ wh.name }}» в то, что уже уехало на этот город">{{ wh.name }}</th>
             {% endfor %}
           </tr></thead>
-          <tbody>
-          {% for row in mp.cities %}
-            <tr>
-              <td>{{ row.warehouse.marketplace_city }}</td>
-              <td>
-                <form method="post" action="{{ url_for('shipment_plan.update_city_deadline', plan_id=mp.plan.id, warehouse_id=row.warehouse.id) }}">
-                  <input type="date" name="ship_by_date" class="form-control form-control-sm" style="width:9.5em"
-                         value="{{ row.deadline.isoformat() if row.deadline else '' }}" onchange="this.form.submit()">
-                </form>
-                {% if row.deadline %}
-                <div class="small text-muted mt-1" title="Пересчитывается каждый раз заново по факту отгрузок за этот день">
-                  отгружено в эту дату: <b>{{ row.shipped_on_deadline | round(0) | int }}</b>
-                </div>
-                {% endif %}
-              </td>
-              <td>{{ row.planned | round(0) | int }}</td>
-              <td>{% if row.in_transit %}<span class="text-warning-emphasis">{{ row.in_transit | round(0) | int }}</span>{% else %}—{% endif %}</td>
-              <td>{% if row.percent is not none %}{{ row.percent | round(1) }}%{% else %}—{% endif %}</td>
-              {% for entry in row.sender_breakdown %}
-              <td>{% if entry.qty %}{{ entry.qty | round(0) | int }} <span class="text-muted small">({{ entry.percent | round(0) | int }}%)</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
-              {% endfor %}
-            </tr>
-          {% endfor %}
+          <tbody class="city-rows-body">
+          {% set plan = mp.plan %}
+          {% set cities = mp.cities %}
+          {% include "shipment_plan/_city_rows.html" %}
           </tbody>
         </table>
         </div>
@@ -558,6 +540,35 @@
       }
       applyFilters();
     }
+  });
+
+  // «Дата плана» (волна 1/2) — смена даты сохраняет её на сервере и сразу
+  // получает обновленные (пересчитанные и пересортированные по волне 1)
+  // строки городов этой карточки, без перезагрузки страницы (см. чат:
+  // "без перезагрузки страницы"). Делегирование на document — строки
+  // города каждый раз перерисовываются целиком, обычный addEventListener
+  // на конкретном input пропал бы вместе со старой версией строки.
+  document.addEventListener("change", function (e) {
+    var input = e.target.closest(".city-deadline-input");
+    if (!input) return;
+    var form = input.closest("form");
+    var tbody = input.closest(".city-rows-body");
+    if (!form || !tbody) return;
+
+    var formData = new FormData();
+    formData.append("ship_by_date", input.value);
+    fetch(form.action, {
+      method: "POST",
+      headers: {"X-Requested-With": "XMLHttpRequest"},
+      body: formData,
+    })
+      .then(function (resp) { return resp.ok ? resp.text() : Promise.reject(resp); })
+      .then(function (html) { tbody.innerHTML = html; })
+      .catch(function () {
+        // Сеть недоступна/ошибка сервера — проще перезагрузить страницу
+        // обычным способом, чем оставить дату несохраненной молча.
+        form.submit();
+      });
   });
 </script>
 {% endblock %}
