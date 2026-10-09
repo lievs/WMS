@@ -42,7 +42,7 @@ DEMO_PASSWORD = "demo"
 
 MAIN_WAREHOUSE = "Основной склад"
 SECOND_WAREHOUSE = "Склад №2 (Шоссейная 167)"
-WORKSHOP_WAREHOUSE = "ЦЕХ Марат"
+WORKSHOP_WAREHOUSE = "Склад №3"
 
 # (вид, модель, цвета, размеры, множественное число вида для названия)
 CATALOG = [
@@ -108,7 +108,7 @@ def _create_users(main_wh, second_wh, workshop_wh):
         invoice_receiving_view_allowed=True,
     )
     logist = _user("logist", "Сергей Логист", role="logist")
-    fulfillment = _user("fulfilment", "Фулфилмент ЦЕХ Марат", role="fulfillment", warehouse_id=workshop_wh.id)
+    fulfillment = _user("fulfilment", "Фулфилмент (Склад №3)", role="fulfillment", warehouse_id=workshop_wh.id)
     fulfillment.allowed_sections = "receiving,movement"
     workers = [
         _user("shveya1", "Анна Швея", role="production"),
