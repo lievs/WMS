@@ -22,7 +22,7 @@
   <td>{% if row.in_transit %}<span class="text-warning-emphasis">{{ row.in_transit | round(0) | int }}</span>{% else %}—{% endif %}</td>
   <td>{% if row.percent is not none %}{{ row.percent | round(1) }}%{% else %}—{% endif %}</td>
   {% for entry in row.sender_breakdown %}
-  <td>{% if entry.qty %}{{ entry.qty | round(0) | int }} <span class="text-muted small">({{ entry.percent | round(0) | int }}%)</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+  <td class="sender-col">{% if entry.qty %}{{ entry.qty | round(0) | int }} <span class="text-muted small">({{ entry.percent | round(0) | int }}%)</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
   {% endfor %}
 </tr>
 {% endfor %}

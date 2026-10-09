@@ -219,3 +219,28 @@ def test_sender_breakdown_empty_when_nothing_shipped(db, client_logged_in):
     city_idx = html.find("<td>Город</td>")
     snippet = html[city_idx : city_idx + 1500]
     assert snippet.count(">—<") >= 2  # оба склада-отправителя без вклада
+
+
+def test_percent_column_is_collapsible_group_with_sender_columns(db, client_logged_in):
+    """«% вып.» — группа: колонки по складам-отправителям помечены
+    sender-col и по умолчанию скрыты классом senders-collapsed на таблице;
+    кнопка в шапке разворачивает их (см. чат)."""
+    plan, sender, city, item = _setup()
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+
+    assert "city-table senders-collapsed" in html
+    assert "senders-toggle" in html
+    assert 'class="sender-col"' in html
+
+
+def test_ajax_fragment_keeps_sender_columns_marked_for_collapse(db, client_logged_in):
+    plan, sender, city, item = _setup()
+
+    resp = client_logged_in.post(
+        f"/shipment-plan/{plan.id}/cities/{city.id}/deadline",
+        data={"ship_by_date": (date.today() + timedelta(days=2)).isoformat()},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+
+    assert '<td class="sender-col">' in resp.get_data(as_text=True)
