@@ -8,6 +8,7 @@ from ..models import (
     InventoryLine,
     MovementReceiptDiscrepancy,
     Nomenclature,
+    PHYSICAL_STOCK_WAREHOUSE_NAMES,
     PlacementLine,
     ProductCategory,
     ProductionRecord,
@@ -316,18 +317,15 @@ def unplaced_set(stock_id):
 NOMENCLATURE_PAGE_SIZE = 100
 
 
-# Только эти два физических склада — Основной и Склад №2 (Шоссейная 167).
-# Остальные склады в системе — города маркетплейсов (Ozon/WB), это уже
-# конкретная отгрузка, а не остаток "сколько у нас есть на складе"
+# Только согласованные физические склады (см. PHYSICAL_STOCK_WAREHOUSE_NAMES
+# в models.py). Остальные склады в системе — города маркетплейсов (Ozon/WB),
+# это уже конкретная отгрузка, а не остаток "сколько у нас есть на складе"
 # (см. shipment_plan.py, где остаток по ним считается отдельно и иначе).
-_STOCK_WAREHOUSE_NAMES = ("основной", "основной склад", "склад №2 (шоссейная 167)")
-
-
 def _stock_warehouses():
     return (
         Warehouse.query.filter(
             Warehouse.is_active.is_(True),
-            db.func.lower(db.func.trim(Warehouse.name)).in_(_STOCK_WAREHOUSE_NAMES),
+            db.func.lower(db.func.trim(Warehouse.name)).in_(PHYSICAL_STOCK_WAREHOUSE_NAMES),
         )
         .order_by(Warehouse.code)
         .all()

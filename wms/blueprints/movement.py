@@ -32,6 +32,15 @@ bp = Blueprint("movement", __name__)
 MOVEMENTS_PAGE_SIZE = 200
 
 
+def _fulfillment_owns(doc):
+    """Фулфилмент (см. чат — склад «ЦЕХ Марат» и подобные) ведет любое
+    перемещение со своего склада-отправителя, не только созданное лично
+    им — на складе может работать несколько человек. Входящие к ним
+    перемещения (to_warehouse_id) этим не открываются — их фулфилмент не
+    должен видеть/трогать."""
+    return current_user.is_fulfillment_only() and doc.from_warehouse_id == current_user.warehouse_id
+
+
 def _can_view_movement_document(doc):
     """Только ПРОСМОТР (список/детали/поиск короба) — не изменение. Пока
     документ "черновик" — его собирают сообща (см. route_box_add: черновик
@@ -54,6 +63,7 @@ def _can_view_movement_document(doc):
         or current_user.can_receive_movements()
         or doc.created_by_id == current_user.id
         or doc.status in ("draft", "collected")
+        or _fulfillment_owns(doc)
     )
 
 
@@ -112,6 +122,7 @@ def _restrict_document_access():
             current_user.is_admin
             or current_user.can_complete_movements()
             or doc.created_by_id == current_user.id
+            or _fulfillment_owns(doc)
         ):
             abort(404)
         return None
@@ -120,12 +131,13 @@ def _restrict_document_access():
             abort(404)
         return None
     # Остальные изменяющие маршруты (добавить/убрать короб, удалить и
-    # т.п.) — только автор или админ, как и раньше. "Просмотр всех
-    # перемещений" здесь не действует (он read-only), а совместный доступ к
-    # черновику дальше даем только через route_box_add (у него нет doc_id в
-    # URL, этот хук на него не срабатывает) — не через произвольное
-    # изменение чужого документа по прямой ссылке.
-    if not (current_user.is_admin or doc.created_by_id == current_user.id):
+    # т.п.) — только автор, админ или фулфилмент на своем складе
+    # (_fulfillment_owns), как и раньше. "Просмотр всех перемещений" здесь
+    # не действует (он read-only), а совместный доступ к черновику дальше
+    # даем только через route_box_add (у него нет doc_id в URL, этот хук на
+    # него не срабатывает) — не через произвольное изменение чужого
+    # документа по прямой ссылке.
+    if not (current_user.is_admin or doc.created_by_id == current_user.id or _fulfillment_owns(doc)):
         abort(404)
     return None
 
@@ -133,6 +145,10 @@ def _restrict_document_access():
 def _visible_movement_query():
     if current_user.can_view_movements() or current_user.can_receive_movements():
         return MovementDocument.query
+    if current_user.is_fulfillment_only():
+        # Весь свой склад-отправитель, а не только документы, созданные
+        # лично этим пользователем (см. чат).
+        return MovementDocument.query.filter(MovementDocument.from_warehouse_id == current_user.warehouse_id)
     return MovementDocument.query.filter(
         or_(MovementDocument.created_by_id == current_user.id, MovementDocument.status.in_(("draft", "collected")))
     )
@@ -959,6 +975,7 @@ def _revert_line_effects(doc, line):
     if doc.received_at is not None:
         _revert_shipment_fulfillment(box, doc.to_warehouse_id, doc.shipped_at)
     box.warehouse_id = line.from_warehouse_id
+    box.warehouse_arrived_at = datetime.utcnow()
     box.cell_id = line.from_cell_id
     box.status = "stored" if line.from_cell_id else "open"
 
@@ -1039,6 +1056,7 @@ def add_box(doc_id):
         # это сделал бы complete(), а не оставляем висеть "как будто в
         # черновике", где его никто больше не завершит.
         box.warehouse_id = doc.to_warehouse_id
+        box.warehouse_arrived_at = datetime.utcnow()
         box.cell_id = None
         box.status = "open"
         if doc.received_at is not None:
@@ -1224,6 +1242,7 @@ def complete(doc_id):
     for line in doc.lines:
         box = line.box
         box.warehouse_id = doc.to_warehouse_id
+        box.warehouse_arrived_at = datetime.utcnow()
         box.cell_id = line.to_cell_id
         box.status = "stored" if line.to_cell_id else "open"
         # Выполнение плана отгрузок засчитывается не здесь, а отдельным
@@ -1303,10 +1322,45 @@ def _expected_qty_by_nomenclature(doc):
     return expected
 
 
+def _apply_receipt_stock_difference(doc, nomenclature_id, expected_qty, received_qty):
+    """Приводит физический остаток к факту приемки (см. чат: расхождение
+    при приемке на СЦ должно менять физический остаток, а не только
+    записываться).
+
+    Недовоз списывается из содержимого коробов этого перемещения (на
+    складе назначения они физически не довезли столько, сколько заявлено).
+    Излишек — обратная ситуация: со склада-отправителя физически увезли
+    больше, чем было упаковано в короб, поэтому списываем этот излишек с
+    неразмещенного остатка отправителя (а не добавляем остаток складу
+    назначения — там взялось именно оттуда, не из воздуха). Документ
+    сохраняет исходное отправленное количество в sent_qty_snapshot.
+    """
+    shortage = max(expected_qty - received_qty, 0)
+    for line in doc.lines.order_by(MovementLine.id.desc()).all():
+        if shortage <= 0:
+            break
+        box_item = BoxItem.query.filter_by(
+            box_id=line.box_id, nomenclature_id=nomenclature_id
+        ).first()
+        if not box_item:
+            continue
+        take = min(box_item.qty, shortage)
+        box_item.qty -= take
+        shortage -= take
+        if box_item.qty <= 0:
+            db.session.delete(box_item)
+
+    excess = max(received_qty - expected_qty, 0)
+    if excess:
+        UnplacedStock.consume(doc.from_warehouse_id, nomenclature_id, excess)
+
+
 def _revert_document_receipt(doc):
     """Отменяет учет фактической приемки перед удалением документа. Короба
-    и неразмещенный остаток возвращаются только для старых приемок, которые
-    их меняли (receipt_changed_boxes не False)."""
+    и неразмещенный остаток возвращаются как обычно; receipt_changed_boxes
+    может быть False только у приемок, принятых в короткий период, когда
+    расхождение лишь записывалось без изменения коробов (см. чат) — для
+    них короба и тогда не трогали, поэтому и здесь их не трогаем."""
     current = _expected_qty_by_nomenclature(doc)
     discrepancies = {d.nomenclature_id: d for d in doc.discrepancies}
     for nomenclature_id, qty in current.items():
@@ -1336,8 +1390,10 @@ def _revert_document_receipt(doc):
                         qty=discrepancy.shortage_qty(),
                     ))
         if discrepancy.excess_qty():
-            UnplacedStock.consume(
-                doc.to_warehouse_id,
+            # Симметрично _apply_receipt_stock_difference: излишек списывался
+            # с остатка отправителя — возвращаем его туда же.
+            UnplacedStock.add(
+                doc.from_warehouse_id,
                 discrepancy.nomenclature_id,
                 discrepancy.excess_qty(),
             )
@@ -1346,9 +1402,9 @@ def _revert_document_receipt(doc):
 @bp.route("/<int:doc_id>/unreceive", methods=["POST"])
 def unreceive(doc_id):
     """Администратор возвращает «Принято на складе» в работу, чтобы
-    поправить принятое количество: выполнение плана отгрузок уменьшается,
-    расхождения удаляются (у старых приемок, менявших короба, недовоз
-    возвращается в короба, а излишек снимается с неразмещенного остатка). После
+    поправить принятое количество: откатывается учет приемки (недовоз
+    возвращается в короба, излишек снимается с неразмещенного остатка,
+    выполнение плана отгрузок уменьшается), расхождения удаляются. После
     этого кнопка «Принято на складе» снова доступна."""
     if not current_user.is_admin:
         flash("Вернуть приемку в работу может только администратор", "danger")
@@ -1426,6 +1482,25 @@ def receive(doc_id):
         )
         return render_template("movement/receive.html", doc=doc, rows=rows)
 
+    # Товар, которого вообще не было заявлено в отправке (короба не
+    # ожидали), но по факту его привезли на СЦ — излишек не из заявленного
+    # (см. чат). Строка добавляется на этой же форме через автокомплит,
+    # expected_qty=0 заставляет остальной код (расхождение, зачисление
+    # излишка на отправителя) сработать как для обычного излишка.
+    for raw_id in request.form.getlist("extra_nomenclature_id"):
+        try:
+            extra_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if extra_id in expected:
+            continue
+        qty = request.form.get(f"qty_{extra_id}", type=float)
+        if not qty or qty <= 0:
+            continue
+        if not Nomenclature.query.get(extra_id):
+            continue
+        expected[extra_id] = 0.0
+
     has_discrepancy = False
     shortage_qty = 0
     total_received_qty = 0
@@ -1452,12 +1527,18 @@ def receive(doc_id):
                     received_qty=received_qty,
                 )
             )
-            # Короба не трогаем (см. чат: «короба пусть остаются как есть») —
-            # расхождение только записывается и видно в «фактически принято».
+            _apply_receipt_stock_difference(doc, nomenclature_id, expected_qty, received_qty)
 
-    doc.sent_qty_snapshot = doc.sent_qty_snapshot or sum(expected.values())
+    # Перезаписываем всегда, а не только если было пусто: expected посчитан
+    # заново в начале этой функции, по текущему содержимому короба на
+    # момент приемки. Если короб поправили МЕЖДУ завершением сборки
+    # (complete(), где снимок берется первый раз) и приемкой, старый снимок
+    # с completion иначе навсегда остался бы устаревшим и расходился бы с
+    # расхождением, посчитанным по уже новому содержимому (см. чат: бейдж
+    # "Излишек" при видимом недовозе в скобках).
+    doc.sent_qty_snapshot = sum(expected.values())
     doc.received_qty_snapshot = total_received_qty
-    doc.receipt_changed_boxes = False
+    doc.receipt_changed_boxes = True
     doc.received_at = datetime.utcnow()
     db.session.commit()
     if shortage_qty:

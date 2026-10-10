@@ -1,7 +1,7 @@
 import os
 import secrets
 
-from flask import Flask, flash, redirect, request, session, url_for
+from flask import Flask, current_app, flash, redirect, request, session, url_for
 from flask_login import current_user, logout_user
 from sqlalchemy import event, inspect, select, text
 from sqlalchemy.engine import Engine
@@ -95,6 +95,19 @@ def _ensure_columns():
                         "[schema] warehouses.fulfillment_1c_name заполнен известными "
                         "складами 1С по городу"
                     )
+                if table.name == "boxes" and column.name == "warehouse_arrived_at":
+                    # Точный момент переезда короба на текущий склад для уже
+                    # существующих коробов неизвестен — created_at ближайшая
+                    # доступная оценка (для коробов, которые с тех пор не
+                    # переезжали, она и верна).
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE boxes SET warehouse_arrived_at = created_at "
+                                "WHERE warehouse_arrived_at IS NULL"
+                            )
+                        )
+                    print("[schema] boxes.warehouse_arrived_at заполнен из created_at для уже существующих коробов")
                 if table.name == "users" and column.name == "nomenclature_edit_allowed":
                     # ALTER TABLE ADD COLUMN не проставляет DEFAULT задним
                     # числом — у уже существующих пользователей колонка
@@ -450,6 +463,15 @@ def _bootstrap_admin():
     if User.query.count() > 0:
         return
 
+    # Демо-режим (WMS_DEMO=1): пароль известен заранее ("demo", см.
+    # demo_data.py) и печатать случайный не нужно — он бы только запутал.
+    if current_app.config.get("DEMO_MODE"):
+        admin = User(username="admin", full_name="Администратор", is_admin=True)
+        admin.set_password("demo")
+        db.session.add(admin)
+        db.session.commit()
+        return
+
     password = secrets.token_urlsafe(8)
     admin = User(username="admin", full_name="Администратор", is_admin=True)
     admin.set_password(password)
@@ -639,6 +661,17 @@ def create_app(config_class=Config):
             and not request.endpoint.startswith("onboarding.")
         ):
             return redirect(url_for("movement.transport_list"))
+        # Роль "фулфилмент" — доступ только к приемке и перемещениям своего
+        # склада (видимость внутри самих разделов дополнительно сужается по
+        # warehouse_id, см. receiving._visible_receiving_query/
+        # movement._visible_movement_query), ничего больше в WMS (см. чат).
+        if (
+            current_user.is_fulfillment_only()
+            and not request.endpoint.startswith("receiving.")
+            and not request.endpoint.startswith("movement.")
+            and not request.endpoint.startswith("onboarding.")
+        ):
+            return redirect(url_for("receiving.list_documents"))
         # Точечное ограничение разделов (см. User.allowed_sections) — тоже
         # проверяем при прямом вводе адреса, не только скрываем пункт меню.
         section = request.endpoint.split(".")[0]
@@ -653,6 +686,10 @@ def create_app(config_class=Config):
 
         from .models import CELL_CAPACITY
 
-        return {"current_year": datetime.now().year, "CELL_CAPACITY": CELL_CAPACITY}
+        return {
+            "current_year": datetime.now().year,
+            "CELL_CAPACITY": CELL_CAPACITY,
+            "demo_mode": app.config.get("DEMO_MODE", False),
+        }
 
     return app
