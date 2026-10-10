@@ -80,7 +80,7 @@ def test_decrease_blocked_once_already_placed(db, client_logged_in):
     )
 
     assert resp.status_code == 200
-    assert "уже частично размещен" in resp.get_data(as_text=True)
+    assert "нельзя уменьшить" in resp.get_data(as_text=True)
     db.session.refresh(line)
     assert line.qty == 10  # не изменилось
     assert UnplacedStock.available(wh.id, item.id) == 6
@@ -146,10 +146,15 @@ def test_admin_can_edit_box_line_qty_after_completion(db, client_logged_in):
 
 
 def test_detail_page_shows_edit_form_for_admin_only_on_completed(db, client_logged_in):
+    """Поле количества редактируется через общую форму "Сохранить
+    количества" (update_lines_bulk, см. can_bulk_edit_qty в
+    receiving/detail.html) — тот же принцип, что и на черновике/пересчете,
+    а не отдельная форма на каждую строку."""
     doc, line, wh, item = _completed_doc_with_credited_line(client_logged_in, "6", qty=10)
 
     admin_html = client_logged_in.get(f"/receiving/{doc.id}").get_data(as_text=True)
-    assert f"/receiving/{doc.id}/lines/{line.id}/update" in admin_html
+    assert f'name="qty_{line.id}"' in admin_html
+    assert f"/receiving/{doc.id}/lines/update-bulk" in admin_html
 
     user = User(username="staffer-rqe6", full_name="Складской", role="warehouse")
     user.set_password("x")
@@ -167,4 +172,4 @@ def test_detail_page_shows_edit_form_for_admin_only_on_completed(db, client_logg
     g.pop("_login_user", None)
 
     staff_html = client_logged_in.get(f"/receiving/{doc.id}").get_data(as_text=True)
-    assert f"/receiving/{doc.id}/lines/{line.id}/update" not in staff_html
+    assert f'name="qty_{line.id}"' not in staff_html
