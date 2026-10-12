@@ -60,7 +60,7 @@ def test_create_user_fulfillment_sets_allowed_sections(client_logged_in, db):
     assert created is not None
     assert created.role == "fulfillment"
     assert created.warehouse_id == wh.id
-    assert created.allowed_sections == "receiving,movement"
+    assert created.allowed_sections == "receiving,movement,nomenclature"
 
 
 def test_update_role_to_fulfillment_requires_warehouse(client_logged_in, db):
@@ -81,7 +81,7 @@ def test_update_role_to_fulfillment_requires_warehouse(client_logged_in, db):
     assert resp.status_code == 302
     updated = User.query.get(target.id)
     assert updated.role == "fulfillment"
-    assert updated.allowed_sections == "receiving,movement"
+    assert updated.allowed_sections == "receiving,movement,nomenclature"
 
 
 def test_fulfillment_sees_only_own_warehouse_sections_in_menu(db, client):
@@ -93,7 +93,8 @@ def test_fulfillment_sees_only_own_warehouse_sections_in_menu(db, client):
     nav = html.split("</nav>")[0]
     assert "Приемка" in nav
     assert "Перемещение" in nav
-    assert "Номенклатура" not in nav
+    assert "Номенклатура" in nav  # общая номенклатура — только просмотр
+    assert "Мой склад (короба)" in nav
     assert "Размещение" not in nav
     assert "Инвентаризация" not in nav
     assert "Отчеты" not in nav
@@ -104,7 +105,7 @@ def test_fulfillment_blocked_from_other_sections_by_direct_url(db, client):
     user = _fulfillment("ff-direct", wh)
     _login(client, user)
 
-    for path in ("/nomenclature/", "/placement/", "/inventory/", "/warehouses/", "/reports/"):
+    for path in ("/placement/", "/inventory/", "/warehouses/", "/reports/", "/nomenclature/locate", "/boxes/export.xlsx", "/boxes/bulk-create"):
         resp = client.get(path)
         assert resp.status_code == 302
         assert resp.headers["Location"].endswith("/")

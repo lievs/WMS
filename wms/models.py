@@ -72,6 +72,13 @@ SECTIONS = [
 ]
 SECTION_CODES = {code for code, _ in SECTIONS}
 
+# Разделы роли "фулфилмент" (см. User.is_fulfillment_only): приемка и
+# перемещения своего склада плюс просмотр общей номенклатуры (см. чат: они
+# должны видеть общую номенклатуру, а остаток — только своего склада).
+# Короба и печать стикеров — не раздел верхнего меню, поэтому в этот
+# список не входят (доступ к ним — wms.FULFILLMENT_EXTRA_ENDPOINTS).
+FULFILLMENT_SECTIONS = ("receiving", "movement", "nomenclature")
+
 # Физические склады, участвующие в остатках/приемке (в отличие от складов-
 # городов маркетплейсов, см. Warehouse.marketplace) — общий список для
 # nomenclature._stock_warehouses() и receiving._receiving_warehouses(),
@@ -207,6 +214,10 @@ class User(UserMixin, db.Model):
         # случай, если колонка у какой-то строки все же осталась NULL
         # (ALTER TABLE ADD COLUMN не проставляет DEFAULT задним числом),
         # трактуем это как "не запрещено", а не как "запрещено".
+        if self.is_fulfillment_only():
+            # Фулфилмент только смотрит общую номенклатуру, править ее не
+            # может (даже если флаг nomenclature_edit_allowed по умолчанию True).
+            return False
         return self.is_admin or self.nomenclature_edit_allowed is not False
 
     def can_manage_warehouse_mapping(self):
@@ -237,6 +248,11 @@ class User(UserMixin, db.Model):
         разделы верхнего меню."""
         if self.is_admin or section not in SECTION_CODES:
             return True
+        if self.is_fulfillment_only():
+            # Набор разделов фулфилмента фиксирован ролью, а не
+            # allowed_sections: так он обновляется и у уже заведенных
+            # пользователей без миграции данных.
+            return section in FULFILLMENT_SECTIONS
         if not self.allowed_sections:
             return True
         return section in self.allowed_sections.split(",")

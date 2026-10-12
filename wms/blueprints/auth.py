@@ -4,7 +4,7 @@ from flask import Blueprint, flash, redirect, render_template, request, session,
 from flask_login import current_user, login_required, login_user, logout_user
 
 from ..extensions import db
-from ..models import MVB_ROLES, SECTIONS, User, Warehouse
+from ..models import FULFILLMENT_SECTIONS, MVB_ROLES, SECTIONS, User, Warehouse
 
 bp = Blueprint("auth", __name__)
 
@@ -112,10 +112,11 @@ def create_user():
         shift_minutes=shift_minutes,
         role=role,
         warehouse_id=warehouse_id,
-        # Фулфилмент видит только приемку и перемещения своего склада (см.
-        # User.is_fulfillment_only) — остальные разделы закрыты этим же
-        # точечным механизмом, что и у обычных пользователей с allowed_sections.
-        allowed_sections="receiving,movement" if role == "fulfillment" else None,
+        # Фулфилмент: приемка и перемещения своего склада плюс просмотр общей
+        # номенклатуры (см. User.is_fulfillment_only и FULFILLMENT_SECTIONS) —
+        # остальные разделы закрыты этим же точечным механизмом, что и у
+        # обычных пользователей с allowed_sections.
+        allowed_sections=",".join(FULFILLMENT_SECTIONS) if role == "fulfillment" else None,
     )
     user.set_password(temp_password)
     db.session.add(user)
@@ -202,7 +203,7 @@ def update_role(user_id):
 
     user.role = role
     if role == "fulfillment":
-        user.allowed_sections = "receiving,movement"
+        user.allowed_sections = ",".join(FULFILLMENT_SECTIONS)
     db.session.commit()
     flash(f"Роль для «{user.username}» обновлена", "success")
     return redirect(url_for("auth.users"))

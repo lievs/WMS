@@ -487,6 +487,30 @@ def _bootstrap_admin():
     print("=" * 60)
 
 
+# Эндпоинты вне приемки/перемещений, доступные роли "фулфилмент" (см. чат:
+# видят свой склад, печатают стикеры своих коробов, видят общую номенклатуру,
+# при приемке подтягивается вся номенклатура). Только чтение и печать; кто
+# какие именно короба может открыть — проверяется в самих view по складу
+# пользователя.
+FULFILLMENT_EXTRA_ENDPOINTS = frozenset(
+    {
+        # подсказки/сканирование при приемке и перемещении
+        "api.search_nomenclature",
+        "api.nomenclature_by_barcode",
+        "api.box_by_number",
+        # общая номенклатура (остаток — только своего склада)
+        "nomenclature.list_nomenclature",
+        # короба своего склада и печать их стикеров
+        "boxes.list_boxes",
+        "boxes.detail",
+        "labels.box_label",
+        "labels.box_label_pdf",
+        "labels.boxes_label_batch_pdf",
+        "labels.box_items_labels",
+    }
+)
+
+
 def create_app(config_class=Config):
     os.makedirs(INSTANCE_DIR, exist_ok=True)
 
@@ -661,15 +685,19 @@ def create_app(config_class=Config):
             and not request.endpoint.startswith("onboarding.")
         ):
             return redirect(url_for("movement.transport_list"))
-        # Роль "фулфилмент" — доступ только к приемке и перемещениям своего
-        # склада (видимость внутри самих разделов дополнительно сужается по
-        # warehouse_id, см. receiving._visible_receiving_query/
-        # movement._visible_movement_query), ничего больше в WMS (см. чат).
+        # Роль "фулфилмент" — приемка и перемещения своего склада (видимость
+        # внутри самих разделов дополнительно сужается по warehouse_id, см.
+        # receiving._visible_receiving_query/movement._visible_movement_query),
+        # плюс точечный список FULFILLMENT_EXTRA_ENDPOINTS: подсказки
+        # номенклатуры при приемке, общая номенклатура (только просмотр),
+        # короба своего склада и печать их стикеров (см. чат). Остальное
+        # закрыто.
         if (
             current_user.is_fulfillment_only()
             and not request.endpoint.startswith("receiving.")
             and not request.endpoint.startswith("movement.")
             and not request.endpoint.startswith("onboarding.")
+            and request.endpoint not in FULFILLMENT_EXTRA_ENDPOINTS
         ):
             return redirect(url_for("receiving.list_documents"))
         # Точечное ограничение разделов (см. User.allowed_sections) — тоже
