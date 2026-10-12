@@ -1005,6 +1005,12 @@ class MovementDocument(db.Model):
     # теперь всегда). NULL/True — старые приемки: недовоз тогда списывался из
     # коробов, излишек шел в неразмещенный остаток склада назначения.
     receipt_changed_boxes = db.Column(db.Boolean, nullable=True)
+    # Приёмка подтверждена по загруженному акту приёмки маркетплейса (см.
+    # movement.receive_act): короба приведены к принятому количеству, а не
+    # принятые вовсе — сняты с перемещения и возвращены на склад-отправитель
+    # (их номера, через запятую, — receipt_returned_boxes).
+    receipt_from_act = db.Column(db.Boolean, nullable=True)
+    receipt_returned_boxes = db.Column(db.Text, nullable=True)
     # "Дата поставки" — дата слота, забронированного на маркетплейсе для
     # приемки этого перемещения (см. чат), вносится вручную. Используется
     # при печати стикеров отправления (см. utils.shipping_label_pdf) вместо
@@ -1185,6 +1191,37 @@ class MovementLine(db.Model):
     from_warehouse = db.relationship("Warehouse", foreign_keys=[from_warehouse_id])
     from_cell = db.relationship("Cell", foreign_keys=[from_cell_id])
     to_cell = db.relationship("Cell", foreign_keys=[to_cell_id])
+
+
+class MovementCargoPlace(db.Model):
+    """Запомненное сопоставление «грузоместо Ozon (ГМ) → наш короб → состав»
+    для перемещения. Заполняется при выгрузке «Состав грузовых мест» и
+    нужно при загрузке акта приёмки Ozon: в акте фигурируют ГМ-штрихкоды, а
+    не наши номера коробов. items_json — снимок состава короба на момент
+    выгрузки: [{"barcode": ..., "qty": ...}]."""
+
+    __tablename__ = "movement_cargo_places"
+    __table_args__ = (
+        db.UniqueConstraint("document_id", "cargo_barcode", name="uq_cargo_place_doc_barcode"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    document_id = db.Column(db.Integer, db.ForeignKey("movement_documents.id"), nullable=False, index=True)
+    box_id = db.Column(db.Integer, db.ForeignKey("boxes.id"), nullable=False)
+    box_number = db.Column(db.String(64), nullable=False)
+    cargo_barcode = db.Column(db.String(128), nullable=False)
+    items_json = db.Column(db.Text, nullable=False, default="[]")
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    box = db.relationship("Box")
+
+    def items(self):
+        import json
+
+        try:
+            return json.loads(self.items_json or "[]")
+        except ValueError:
+            return []
 
 
 class ProductionRecord(db.Model):

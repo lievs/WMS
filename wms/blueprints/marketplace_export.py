@@ -32,6 +32,7 @@
 заполняется вручную при необходимости, как и предусмотрено самими
 шаблонами."""
 
+import json
 import re
 
 from flask import Blueprint, Response, abort, flash, redirect, render_template, request, url_for
@@ -39,7 +40,7 @@ from flask_login import current_user
 from openpyxl import load_workbook
 
 from ..extensions import db
-from ..models import MovementDocument, MovementLine, OzonArticleMapping
+from ..models import MovementCargoPlace, MovementDocument, MovementLine, OzonArticleMapping
 from ..utils.excel_io import (
     export_ozon_package_composition,
     export_ozon_supply_request,
@@ -167,6 +168,33 @@ def ozon_package_composition(doc_id):
             return render_template(
                 "marketplace_export/ozon_export.html", doc=doc, lines=lines, cargo_barcodes_raw=raw
             )
+
+        if len(set(cargo_barcodes)) != len(cargo_barcodes):
+            flash("Штрихкоды ГМ повторяются — у каждого короба должен быть свой", "danger")
+            return render_template(
+                "marketplace_export/ozon_export.html", doc=doc, lines=lines, cargo_barcodes_raw=raw
+            )
+
+        # Запоминаем сопоставление ГМ ↔ короб ↔ состав (для акта приёмки Ozon);
+        # повторная выгрузка заменяет прежнее.
+        MovementCargoPlace.query.filter_by(document_id=doc.id).delete()
+        for line, cargo_barcode in zip(lines, cargo_barcodes):
+            db.session.add(
+                MovementCargoPlace(
+                    document_id=doc.id,
+                    box_id=line.box_id,
+                    box_number=line.box.box_number,
+                    cargo_barcode=cargo_barcode,
+                    items_json=json.dumps(
+                        [
+                            {"barcode": it.nomenclature.barcode, "qty": it.qty}
+                            for it in line.box.items
+                        ],
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+        db.session.commit()
 
         rows = []
         unmapped = set()

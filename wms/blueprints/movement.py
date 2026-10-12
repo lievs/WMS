@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime, timedelta
 
 from flask import Blueprint, Response, abort, current_app, flash, jsonify, redirect, render_template, request, url_for
@@ -12,6 +13,7 @@ from ..models import (
     BoxItem,
     Cell,
     CELL_CAPACITY,
+    MovementCargoPlace,
     MovementDocument,
     MovementLine,
     MovementReceiptDiscrepancy,
@@ -21,6 +23,7 @@ from ..models import (
     Warehouse,
     UnplacedStock,
 )
+from ..utils.acceptance_act import ActParseError, MAX_ACT_BYTES, parse_act
 from ..utils.excel_io import export_movement_summary_to_excel, export_movement_to_excel, timestamp_for_filename
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
@@ -88,7 +91,7 @@ BOOKKEEPING_ENDPOINTS = {
 # разделам) — например, заведующему складом назначения, который принимает
 # чужие перемещения.
 COMPLETION_ENDPOINTS = {"movement.complete", "movement.mark_shipped"}
-RECEIVING_ENDPOINTS = {"movement.receive"}
+RECEIVING_ENDPOINTS = {"movement.receive", "movement.receive_act"}
 # Отметка "Транспорт забрал" прямо со страницы "Ждут транспорта" — в
 # отличие от обычного mark_shipped (редиректит на детальную страницу
 # документа, к которой у роли "логист" нет доступа), возвращает на тот же
@@ -1389,6 +1392,21 @@ def _revert_document_receipt(doc):
                         nomenclature_id=discrepancy.nomenclature_id,
                         qty=discrepancy.shortage_qty(),
                     ))
+        if discrepancy.excess_qty() and doc.receipt_from_act:
+            # При приёмке по акту излишек был добавлен в короб — снимаем.
+            left = discrepancy.excess_qty()
+            for line in doc.lines.order_by(MovementLine.id.desc()).all():
+                if left <= 0:
+                    break
+                item = BoxItem.query.filter_by(
+                    box_id=line.box_id, nomenclature_id=discrepancy.nomenclature_id
+                ).first()
+                if item:
+                    take = min(item.qty, left)
+                    item.qty -= take
+                    left -= take
+                    if item.qty <= 0:
+                        db.session.delete(item)
         if discrepancy.excess_qty():
             # Симметрично _apply_receipt_stock_difference: излишек списывался
             # с остатка отправителя — возвращаем его туда же.
@@ -1419,6 +1437,8 @@ def unreceive(doc_id):
     doc.received_at = None
     doc.received_qty_snapshot = None
     doc.receipt_changed_boxes = None
+    doc.receipt_from_act = None
+    doc.receipt_returned_boxes = None
     if doc.synced_to_1c_at is not None:
         doc.composition_changed_at = datetime.utcnow()
     db.session.commit()
@@ -1427,20 +1447,9 @@ def unreceive(doc_id):
     return redirect(url_for("movement.detail", doc_id=doc.id))
 
 
-@bp.route("/<int:doc_id>/receive", methods=["GET", "POST"])
-def receive(doc_id):
-    """Единственная кнопка "Принято на складе" (см. чат: раньше рядом была
-    отдельная "Принято с расхождением" — убрали, эта форма покрывает оба
-    случая сразу). По каждому товару показываем, сколько отправлено, по
-    умолчанию проставлено столько же — обычная приемка без расхождений это
-    просто подтверждает как есть; если по факту меньше/больше, исправляют
-    нужные строки. Именно введенное здесь количество, а не то, что было
-    упаковано в коробах, зачисляется в выполнение плана отгрузок; настоящее
-    расхождение сохраняется отдельной строкой (см. MovementReceiptDiscrepancy)
-    для учета, а не молча теряется. Статус "Отгружено" фиксируется раньше
-    отдельной кнопкой "Транспорт забрал"; здесь подтверждается именно
-    фактическая приемка маркетплейсом."""
-    doc = MovementDocument.query.get_or_404(doc_id)
+def _receive_precheck(doc):
+    """Условия, без которых «Принято на складе» недоступно (общие для
+    ручной приемки и приемки по акту). Возвращает redirect или None."""
     if doc.status != "completed":
         flash("Сначала завершите перемещение", "danger")
         return redirect(url_for("movement.detail", doc_id=doc.id))
@@ -1462,6 +1471,210 @@ def receive(doc_id):
     if doc.shipped_at is None:
         flash("Сначала отметьте, что товар забрал транспорт", "danger")
         return redirect(url_for("movement.detail", doc_id=doc.id))
+    return None
+
+
+def _nomenclature_for_act_barcode(code):
+    """Товар по баркоду из акта: основной или доп. штрихкод; в отчётах WB
+    встречается ведущий ноль ('04640580741533') — сравниваем без него."""
+    item = Nomenclature.find_by_barcode(code)
+    if item is None and code.lstrip("0") != code:
+        item = Nomenclature.find_by_barcode(code.lstrip("0"))
+    if item is None and code.isdigit():
+        item = Nomenclature.find_by_barcode("0" + code)
+    return item
+
+
+def _reconcile_with_act(doc, act_boxes):
+    """Сверка акта приёмки с составом коробов перемещения. Ничего не
+    записывает. Ключ короба в акте: у WB — наш номер короба, у Ozon —
+    штрихкод грузоместа (сопоставление запомнено при выгрузке состава ГМ,
+    см. MovementCargoPlace). Возвращает словарь для шаблона и payload
+    {номер_короба: {id_товара: принятое_кол-во}} для подтверждения."""
+    is_ozon = doc.to_warehouse.marketplace == "ozon"
+    result = {
+        "boxes": [], "missing": [], "unknown_keys": [], "unknown_barcodes": [],
+        "payload": {}, "error": None, "is_ozon": is_ozon,
+    }
+    key_to_box = {}
+    if is_ozon:
+        places = MovementCargoPlace.query.filter_by(document_id=doc.id).all()
+        if not places:
+            result["error"] = (
+                "Для Ozon акт сверяется по грузоместам, но для этого перемещения не "
+                "запомнено сопоставление ГМ ↔ короб. Сначала выгрузите «Состав ГМ для Ozon»."
+            )
+            return result
+        key_to_box = {p.cargo_barcode: p.box_number for p in places}
+
+    act_by_box = {}
+    barcode_cache = {}
+    for key, items in act_boxes.items():
+        box_number = key_to_box.get(key) if is_ozon else key
+        if box_number is None:
+            result["unknown_keys"].append(key)
+            continue
+        target = act_by_box.setdefault(box_number, {})
+        for code, qty in items.items():
+            if code not in barcode_cache:
+                barcode_cache[code] = _nomenclature_for_act_barcode(code)
+            nom = barcode_cache[code]
+            if nom is None:
+                if code not in result["unknown_barcodes"]:
+                    result["unknown_barcodes"].append(code)
+                continue
+            target[nom.id] = target.get(nom.id, 0) + qty
+
+    doc_box_numbers = set()
+    for line in doc.lines.order_by(MovementLine.id.asc()).all():
+        number = line.box.box_number
+        doc_box_numbers.add(number)
+        expected = {}
+        for it in line.box.items:
+            expected[it.nomenclature_id] = expected.get(it.nomenclature_id, 0) + it.qty
+        if number not in act_by_box:
+            result["missing"].append({"line": line, "box_number": number, "total": sum(expected.values())})
+            continue
+        accepted = act_by_box[number]
+        names = {
+            n.id: n for n in Nomenclature.query.filter(
+                Nomenclature.id.in_(set(expected) | set(accepted))
+            ).all()
+        }
+        rows = []
+        for nid in sorted(set(expected) | set(accepted), key=lambda i: names[i].name):
+            rows.append({
+                "nomenclature": names[nid],
+                "expected": expected.get(nid, 0),
+                "accepted": accepted.get(nid, 0),
+            })
+        result["boxes"].append({
+            "box_number": number,
+            "rows": rows,
+            "has_diff": any(r["expected"] != r["accepted"] for r in rows),
+        })
+        result["payload"][number] = {str(nid): qty for nid, qty in accepted.items()}
+
+    for number in act_by_box:
+        if number not in doc_box_numbers:
+            result["unknown_keys"].append(number)
+    if not result["boxes"]:
+        result["error"] = "Ни один короб из акта не найден в этом перемещении — нечего принимать."
+    elif result["unknown_barcodes"]:
+        result["error"] = (
+            "В акте есть баркоды, которых нет в номенклатуре: "
+            + ", ".join(result["unknown_barcodes"][:10])
+            + ". Добавьте их товару (основной или доп. штрихкод) и загрузите акт снова."
+        )
+    return result
+
+
+def _receive_from_act(doc, payload):
+    """Приёмка по акту: короба приводятся к принятому количеству, короба,
+    которых нет в акте, снимаются с перемещения и возвращаются на
+    склад-отправитель (в план отгрузок не засчитываются). Расхождение
+    считается по оставшимся коробам; отправлено (sent_qty_snapshot) — по
+    всем исходным, поэтому в списке видно «отправлено (принято)»."""
+    lines = doc.lines.order_by(MovementLine.id.asc()).all()
+    sent_total = sum(_expected_qty_by_nomenclature(doc).values())
+
+    returned = [l for l in lines if l.box.box_number not in payload]
+    kept = [l for l in lines if l.box.box_number in payload]
+    if not kept:
+        return None
+    returned_numbers = [l.box.box_number for l in returned]
+    for line in returned:
+        _revert_line_effects(doc, line)
+        MovementCargoPlace.query.filter_by(document_id=doc.id, box_id=line.box_id).delete()
+        db.session.delete(line)
+    db.session.flush()
+
+    expected = _expected_qty_by_nomenclature(doc)
+    received = {}
+    for line in kept:
+        accepted = {int(k): float(v) for k, v in payload[line.box.box_number].items()}
+        items = {it.nomenclature_id: it for it in line.box.items}
+        for nid in set(items) | set(accepted):
+            old = items[nid].qty if nid in items else 0
+            new = accepted.get(nid, 0)
+            if new > old:
+                UnplacedStock.consume(doc.from_warehouse_id, nid, new - old)
+            if nid in items:
+                if new <= 0:
+                    db.session.delete(items[nid])
+                else:
+                    items[nid].qty = new
+            elif new > 0:
+                db.session.add(BoxItem(box_id=line.box_id, nomenclature_id=nid, qty=new))
+            received[nid] = received.get(nid, 0) + new
+
+    for nid in set(expected) | set(received):
+        exp_qty = expected.get(nid, 0)
+        got_qty = received.get(nid, 0)
+        plan_line = ShipmentPlanLine.query.filter_by(
+            warehouse_id=doc.to_warehouse_id, nomenclature_id=nid
+        ).first()
+        if plan_line and _shipment_is_in_plan(plan_line, doc.shipped_at):
+            plan_line.fulfilled_qty += got_qty
+        if got_qty != exp_qty:
+            db.session.add(MovementReceiptDiscrepancy(
+                document_id=doc.id, nomenclature_id=nid, expected_qty=exp_qty, received_qty=got_qty,
+            ))
+
+    doc.sent_qty_snapshot = sent_total
+    doc.received_qty_snapshot = sum(received.values())
+    doc.receipt_changed_boxes = True
+    doc.receipt_from_act = True
+    doc.receipt_returned_boxes = ", ".join(returned_numbers) or None
+    doc.received_at = datetime.utcnow()
+    if doc.synced_to_1c_at is not None:
+        doc.composition_changed_at = datetime.utcnow()
+    db.session.commit()
+    return {"returned": returned_numbers, "sent": sent_total, "received": sum(received.values())}
+
+
+@bp.route("/<int:doc_id>/receive/act", methods=["POST"])
+def receive_act(doc_id):
+    """Шаг 1 приёмки по акту: загрузка файла акта и экран сверки (ничего не
+    записывается до подтверждения на этом экране)."""
+    doc = MovementDocument.query.get_or_404(doc_id)
+    blocked = _receive_precheck(doc)
+    if blocked is not None:
+        return blocked
+    upload = request.files.get("act_file")
+    if upload is None or not upload.filename:
+        flash("Выберите файл акта приёмки (.xlsx)", "danger")
+        return redirect(url_for("movement.receive", doc_id=doc.id))
+    data = upload.read(MAX_ACT_BYTES + 1)
+    try:
+        act_boxes, act_total = parse_act(data)
+    except ActParseError as exc:
+        flash(str(exc), "danger")
+        return redirect(url_for("movement.receive", doc_id=doc.id))
+    rec = _reconcile_with_act(doc, act_boxes)
+    return render_template(
+        "movement/receive_act.html", doc=doc, rec=rec, act_total=act_total,
+        filename=upload.filename, payload_json=json.dumps(rec["payload"], ensure_ascii=False),
+    )
+
+
+@bp.route("/<int:doc_id>/receive", methods=["GET", "POST"])
+def receive(doc_id):
+    """Единственная кнопка "Принято на складе" (см. чат: раньше рядом была
+    отдельная "Принято с расхождением" — убрали, эта форма покрывает оба
+    случая сразу). По каждому товару показываем, сколько отправлено, по
+    умолчанию проставлено столько же — обычная приемка без расхождений это
+    просто подтверждает как есть; если по факту меньше/больше, исправляют
+    нужные строки. Именно введенное здесь количество, а не то, что было
+    упаковано в коробах, зачисляется в выполнение плана отгрузок; настоящее
+    расхождение сохраняется отдельной строкой (см. MovementReceiptDiscrepancy)
+    для учета, а не молча теряется. Статус "Отгружено" фиксируется раньше
+    отдельной кнопкой "Транспорт забрал"; здесь подтверждается именно
+    фактическая приемка маркетплейсом."""
+    doc = MovementDocument.query.get_or_404(doc_id)
+    blocked = _receive_precheck(doc)
+    if blocked is not None:
+        return blocked
 
     expected = _expected_qty_by_nomenclature(doc)
     if not expected:
@@ -1481,6 +1694,26 @@ def receive(doc_id):
             key=lambda r: r["nomenclature"].name,
         )
         return render_template("movement/receive.html", doc=doc, rows=rows)
+
+    if request.form.get("act_payload"):
+        try:
+            payload = json.loads(request.form["act_payload"])
+            assert isinstance(payload, dict)
+        except (ValueError, AssertionError):
+            flash("Данные акта повреждены — загрузите акт заново", "danger")
+            return redirect(url_for("movement.receive", doc_id=doc.id))
+        outcome = _receive_from_act(doc, payload)
+        if outcome is None:
+            flash("Ни один короб из акта не найден в этом перемещении", "danger")
+            return redirect(url_for("movement.receive", doc_id=doc.id))
+        msg = (
+            f"Перемещение {doc.number} принято по акту: принято {outcome['received']:g} из "
+            f"{outcome['sent']:g} шт."
+        )
+        if outcome["returned"]:
+            msg += f" Возвращено на склад «{doc.from_warehouse.name}» коробов: {len(outcome['returned'])}."
+        flash(msg, "warning" if outcome["received"] != outcome["sent"] else "success")
+        return redirect(url_for("movement.detail", doc_id=doc.id))
 
     # Товар, которого вообще не было заявлено в отправке (короба не
     # ожидали), но по факту его привезли на СЦ — излишек не из заявленного

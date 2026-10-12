@@ -14,6 +14,22 @@
   оно есть) сохранится для учета. После подтверждения перемещение получает статус «Отгружено».
 </div>
 
+<div class="card p-3 mb-3 border-primary">
+  <h5>Приёмка по акту маркетплейса</h5>
+  <p class="text-muted small mb-2">
+    Загрузите акт приёмки (.xlsx — для WB это файл «act-income-….xlsx» из архива с актом, для
+    Ozon — акт по грузоместам). Номера коробов и количества сверятся с отправленным: короба
+    приведутся к принятому количеству, а короба, которых нет в акте, вернутся на склад-отправитель.
+    Перед записью будет экран сверки — ничего не изменится, пока вы не подтвердите.
+  </p>
+  <form method="post" enctype="multipart/form-data" action="{{ url_for('movement.receive_act', doc_id=doc.id) }}"
+        class="d-flex gap-2 flex-wrap">
+    <input type="file" name="act_file" accept=".xlsx" class="form-control" style="max-width:420px" required>
+    <button type="submit" class="btn btn-primary">📄 Загрузить и сверить</button>
+  </form>
+</div>
+
+<div class="text-muted small mb-2">Или введите принятое количество вручную по товарам:</div>
 <form method="post" action="{{ url_for('movement.receive', doc_id=doc.id) }}">
   <div class="card p-3">
     <table class="table table-sm align-middle" id="receiveTable">
