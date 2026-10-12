@@ -1,4 +1,4 @@
-from flask import Blueprint, Response, flash, redirect, render_template, request, url_for
+from flask import Blueprint, Response, abort, flash, redirect, render_template, request, url_for
 from flask_login import current_user
 
 from ..extensions import db
@@ -10,6 +10,29 @@ from .movement import flag_movement_dirty_for_box
 
 bp = Blueprint("boxes", __name__)
 
+# Фулфилмент (см. User.is_fulfillment_only) — доступ только на просмотр
+# своих коробов (найти/распечатать этикетку), без правки содержимого
+# короба в обход приемки/перемещения: эти два маршрута разрешены глобально
+# в before_request (см. wms/__init__.py), остальные (add_item/update_item/
+# move_item/delete_item/bulk_create/export_boxes) остаются недоступны.
+FULFILLMENT_ALLOWED_ENDPOINTS = {"boxes.list_boxes", "boxes.detail"}
+
+
+@bp.before_request
+def _restrict_fulfillment_box_access():
+    """Фулфилмент видит и находит только короба своего склада — список
+    принудительно фильтруется по своему складу (игнорируя чужой
+    warehouse_id из query, если его подставить вручную в адрес), а прямой
+    переход на чужой короб по id (detail/этикетка) — 404."""
+    if not current_user.is_authenticated or not current_user.is_fulfillment_only():
+        return None
+    box_id = (request.view_args or {}).get("box_id")
+    if box_id is not None:
+        box = Box.query.get_or_404(box_id)
+        if box.warehouse_id != current_user.warehouse_id:
+            abort(404)
+    return None
+
 
 @bp.route("/")
 def list_boxes():
@@ -19,9 +42,15 @@ def list_boxes():
     созданы все разом, а часть из них останется без наклейки. Здесь можно
     в любой момент найти нужные короба (по складу/номеру) и распечатать
     только оставшиеся, не создавая короба заново."""
-    warehouses = Warehouse.query.order_by(Warehouse.code).all()
-
-    warehouse_id = request.args.get("warehouse_id", type=int)
+    if current_user.is_fulfillment_only():
+        # Свой склад принудительно, без возможности подставить чужой через
+        # query-параметр — выбор склада в форме фулфилмент вообще не видит
+        # (см. boxes/list.html).
+        warehouses = [current_user.warehouse] if current_user.warehouse else []
+        warehouse_id = current_user.warehouse_id
+    else:
+        warehouses = Warehouse.query.order_by(Warehouse.code).all()
+        warehouse_id = request.args.get("warehouse_id", type=int)
     query_text = request.args.get("q", "").strip()
 
     query = Box.query

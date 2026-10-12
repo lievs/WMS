@@ -5,6 +5,14 @@ from ..models import Box, Cell, Nomenclature
 
 bp = Blueprint("api", __name__)
 
+# Фулфилмент (см. User.is_fulfillment_only) — только поиск номенклатуры
+# (нужен автокомплиту при добавлении строки в приемку, см.
+# app.js:initNomenclatureAutocomplete и чат: "при приемке подтягивалась
+# вся номенклатура"). Остальные api-маршруты (поиск коробов/ячеек по
+# всем складам без учета принадлежности) не открываем — не нужны для
+# задачи и не сужены по складу.
+FULFILLMENT_ALLOWED_ENDPOINTS = {"api.search_nomenclature", "api.nomenclature_by_barcode"}
+
 
 @bp.route("/nomenclature/search")
 def search_nomenclature():

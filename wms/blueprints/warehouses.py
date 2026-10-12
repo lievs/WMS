@@ -227,11 +227,21 @@ def list_warehouses():
     warehouses = Warehouse.query.order_by(Warehouse.code).all()
     for wh in warehouses:
         wh.in_current_plan = wh.marketplace is None or wh.id in active_city_warehouse_ids
-    fulfillment_warehouses = [wh for wh in warehouses if wh.marketplace is not None]
+    # Сопоставление с 1С (см. блок "Сопоставление складов с 1С" ниже) нужно
+    # не только складам-городам маркетплейсов, но и собственным физическим
+    # складам (marketplace пуст) — например, когда перемещение идет между
+    # основным складом и складом фулфилмент-партнера (см. чат: "для
+    # перемещений между собственными складами нужно чтобы в сопоставлении
+    # тоже были собственные склады"). Раньше список фильтровался только на
+    # склады-города, и собственные склады сопоставить было негде —
+    # integration_1c._to_warehouse_name_for_1c() для них либо подставлял
+    # общий запасной склад, либо (для двух захардкоженных имен) писал
+    # название WMS как есть, игнорируя это поле. Показываем все склады —
+    # бэкенд (update_fulfillment_1c_name) и так уже работает с любым.
     return render_template(
         "warehouses/list.html",
         warehouses=warehouses,
-        fulfillment_warehouses=fulfillment_warehouses,
+        mapping_warehouses=warehouses,
     )
 
 

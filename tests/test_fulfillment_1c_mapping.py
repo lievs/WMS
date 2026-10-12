@@ -199,3 +199,64 @@ def test_export_uses_configured_fulfillment_1c_name(db, client_logged_in):
     data = resp.get_json()
     movement = next(m for m in data["movements"] if m["number"] == "PER-M1")
     assert movement["to_warehouse"] == "Товары в пути ФФ КАЗАНЬ, Взлётная 30"
+
+
+def test_warehouse_mapping_list_includes_own_physical_warehouses(client_logged_in, db):
+    """Раньше в блок "Сопоставление складов с 1С" попадали только
+    склады-города маркетплейсов (marketplace задан) — собственные склады
+    (например, второй склад фулфилмент-партнера) сопоставить было негде
+    (см. чат: "для перемещений между собственными складами нужно чтобы в
+    сопоставлении также были собственные склады")."""
+    own = Warehouse(code="WH-OWN1", name="ЦЕХ Марат")
+    db.session.add(own)
+    db.session.commit()
+
+    html = client_logged_in.get("/warehouses/").get_data(as_text=True)
+    mapping_block = html.split("Сопоставление складов с 1С")[1]
+    assert "ЦЕХ Марат" in mapping_block
+    assert f"/warehouses/{own.id}/fulfillment-1c-name" in mapping_block
+
+
+def test_export_uses_mapped_1c_name_for_own_to_own_movement_outside_hardcoded_pair(db, client_logged_in):
+    """Перемещение между двумя собственными складами, ни один из которых не
+    входит в захардкоженную пару DIRECT_TRANSFER_WAREHOUSE_NAMES
+    ("Основной склад"/"Склад №2 (Шоссейная 167)") — раньше в 1С уезжал общий
+    запасной склад (FULFILLMENT_WAREHOUSE_NAME), как для отгрузки на
+    маркетплейс, хотя оба склада свои. После сопоставления (см. тест выше,
+    тот же механизм, что и для складов-городов) должно подтягиваться именно
+    заданное имя."""
+    _set_token()
+    sender = Warehouse(code="WH-OWN2", name="ЦЕХ Марат")
+    receiver = Warehouse(code="WH-OWN3", name="Склад №3")
+    db.session.add_all([sender, receiver])
+    db.session.commit()
+
+    client_logged_in.post(
+        f"/warehouses/{receiver.id}/fulfillment-1c-name",
+        data={"fulfillment_1c_name": "Склад №3 (внутреннее перемещение)"},
+    )
+
+    item = Nomenclature(sku="9990000100", barcode="9990000100", name="Товар", unit="шт")
+    db.session.add(item)
+    db.session.commit()
+    box = Box(box_number="BOX-OWN1", warehouse_id=sender.id, status="open")
+    db.session.add(box)
+    db.session.commit()
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=1))
+    doc = MovementDocument(number="PER-OWN1", from_warehouse_id=sender.id, to_warehouse_id=receiver.id)
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add(
+        MovementLine(document_id=doc.id, box_id=box.id, from_warehouse_id=sender.id, from_cell_id=box.cell_id)
+    )
+    db.session.commit()
+    client_logged_in.post(f"/movement/{doc.id}/complete")
+    doc = MovementDocument.query.get(doc.id)
+    doc.marketplace_request_created_at = doc.completed_at
+    doc.marketplace_request_number = "REQ-PER-OWN1"
+    db.session.commit()
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    data = resp.get_json()
+    movement = next(m for m in data["movements"] if m["number"] == "PER-OWN1")
+    assert movement["to_warehouse"] == "Склад №3 (внутреннее перемещение)"

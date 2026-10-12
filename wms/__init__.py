@@ -584,6 +584,9 @@ def create_app(config_class=Config):
             GOOGLE_SHEETS_PUBLIC_ENDPOINTS as PRODUCTION_ORDERS_PUBLIC_ENDPOINTS,
         )
         from .blueprints.mvb import MVB_PUBLIC_ENDPOINTS
+        from .blueprints.api import FULFILLMENT_ALLOWED_ENDPOINTS as FULFILLMENT_API_ENDPOINTS
+        from .blueprints.boxes import FULFILLMENT_ALLOWED_ENDPOINTS as FULFILLMENT_BOX_ENDPOINTS
+        from .blueprints.labels import FULFILLMENT_ALLOWED_ENDPOINTS as FULFILLMENT_LABEL_ENDPOINTS
         from .models import User
 
         if request.endpoint is None:
@@ -661,15 +664,28 @@ def create_app(config_class=Config):
             and not request.endpoint.startswith("onboarding.")
         ):
             return redirect(url_for("movement.transport_list"))
-        # Роль "фулфилмент" — доступ только к приемке и перемещениям своего
-        # склада (видимость внутри самих разделов дополнительно сужается по
+        # Роль "фулфилмент" — доступ к приемке и перемещениям своего склада
+        # (видимость внутри самих разделов дополнительно сужается по
         # warehouse_id, см. receiving._visible_receiving_query/
-        # movement._visible_movement_query), ничего больше в WMS (см. чат).
+        # movement._visible_movement_query), общей номенклатуре на чтение
+        # (см. chat: "видели номенклатуру общую", и FULFILLMENT_SECTIONS в
+        # auth.py), поиску номенклатуры по /api/ (нужен автокомплиту при
+        # приемке — "при приемке подтягивалась вся номенклатура") и печати
+        # этикеток своих коробов. Точный список для api/boxes/labels — в
+        # соответствующем blueprint'е (FULFILLMENT_ALLOWED_ENDPOINTS),
+        # принадлежность складу короба проверяется внутри них самих.
+        # Остальные маршруты api/boxes/labels (поиск ячеек/коробов по всем
+        # складам, правка содержимого короба в обход приемки и т.п.) этим
+        # не открываются. Ничего больше в WMS.
         if (
             current_user.is_fulfillment_only()
             and not request.endpoint.startswith("receiving.")
             and not request.endpoint.startswith("movement.")
+            and not request.endpoint.startswith("nomenclature.")
             and not request.endpoint.startswith("onboarding.")
+            and request.endpoint not in FULFILLMENT_API_ENDPOINTS
+            and request.endpoint not in FULFILLMENT_BOX_ENDPOINTS
+            and request.endpoint not in FULFILLMENT_LABEL_ENDPOINTS
         ):
             return redirect(url_for("receiving.list_documents"))
         # Точечное ограничение разделов (см. User.allowed_sections) — тоже

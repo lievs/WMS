@@ -114,16 +114,16 @@
 </div>
 
 {% if current_user.can_manage_warehouse_mapping() %}
-{% set hint_fulfillment_1c = "Сопоставление задается отдельно для каждого склада-города маркетплейса. Пустое поле использует общий запасной склад 1С." %}
+{% set hint_fulfillment_1c = "Задается отдельно для каждого склада — и для складов-городов маркетплейсов, и для собственных складов (например, когда перемещение идет напрямую между своими складами или складом фулфилмент-партнера). Пустое поле использует общий запасной склад 1С." %}
 <div class="card p-3 mt-4">
   <h5>Сопоставление складов с 1С</h5>
   <p class="text-muted small">{{ hint_fulfillment_1c }}</p>
   <table class="table table-sm table-mobile-compact mb-0">
     <thead><tr><th>Склад WMS</th><th>Склад в 1С</th></tr></thead>
     <tbody>
-    {% for wh in fulfillment_warehouses %}
+    {% for wh in mapping_warehouses %}
       <tr>
-        <td><span class="badge bg-secondary">{{ wh.marketplace_label() }}</span> {{ wh.name }}</td>
+        <td>{% if wh.marketplace %}<span class="badge bg-secondary">{{ wh.marketplace_label() }}</span> {% else %}<span class="badge bg-light text-dark border">Свой склад</span> {% endif %}{{ wh.name }}</td>
         <td style="min-width:340px">
           <form method="post" action="{{ url_for('warehouses.update_fulfillment_1c_name', warehouse_id=wh.id) }}" class="d-flex gap-1">
             <input type="text" name="fulfillment_1c_name" value="{{ wh.fulfillment_1c_name or '' }}" class="form-control form-control-sm" placeholder="Товары в пути ФФ ...">
@@ -132,7 +132,7 @@
         </td>
       </tr>
     {% else %}
-      <tr><td colspan="2" class="text-muted">Складов-городов маркетплейсов еще нет</td></tr>
+      <tr><td colspan="2" class="text-muted">Складов еще нет</td></tr>
     {% endfor %}
     </tbody>
   </table>

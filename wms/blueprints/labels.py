@@ -1,4 +1,5 @@
 from flask import Blueprint, Response, abort, render_template, request
+from flask_login import current_user
 
 from ..models import Box, Cell, Nomenclature, Zone
 from ..utils.barcodes import generate_barcode_data_uri
@@ -7,9 +8,29 @@ from ..utils.labels_pdf import build_label_pdf, build_labels_batch_pdf, build_zo
 
 bp = Blueprint("labels", __name__)
 
+# Фулфилмент (см. User.is_fulfillment_only, чат: "печатать стикеры для
+# своих коробов") — только этикетки коробов, и только своего склада
+# (проверка ниже); этикетки товара/ячейки/зоны по-прежнему недоступны —
+# не относятся к задаче (ячейки/зоны — это «Размещение», которого у
+# фулфилмента нет).
+FULFILLMENT_ALLOWED_ENDPOINTS = {
+    "labels.box_label",
+    "labels.box_label_pdf",
+    "labels.boxes_label_batch_pdf",
+    "labels.box_items_labels",
+}
+
 
 def _autoprint():
     return request.args.get("autoprint", "1") != "0"
+
+
+def _check_fulfillment_box_access(box):
+    """Общая проверка для всех этикеток коробов ниже — короб обязательно
+    должен принадлежать складу фулфилмента, иначе 404 (как и в boxes.py)."""
+    if current_user.is_authenticated and current_user.is_fulfillment_only():
+        if box.warehouse_id != current_user.warehouse_id:
+            abort(404)
 
 
 # ---------- Этикетка товара ----------
@@ -41,6 +62,7 @@ def item_label_pdf(item_id):
 @bp.route("/box/<int:box_id>")
 def box_label(box_id):
     box = Box.query.get_or_404(box_id)
+    _check_fulfillment_box_access(box)
     img = generate_barcode_data_uri(box.barcode_value)
     return render_template("labels/box.html", box=box, barcode_img=img, autoprint=_autoprint())
 
@@ -61,6 +83,7 @@ BOX_TEXT_GAP_MM = 2
 @bp.route("/box/<int:box_id>.pdf")
 def box_label_pdf(box_id):
     box = Box.query.get_or_404(box_id)
+    _check_fulfillment_box_access(box)
     subtitle = box.warehouse.name if box.warehouse else ""
     pdf = build_label_pdf(
         box.barcode_value, box.box_number, subtitle,
@@ -90,6 +113,8 @@ def boxes_label_batch_pdf():
         abort(404, "Список коробов пуст")
 
     boxes = Box.query.filter(Box.id.in_(ids)).all()
+    for box in boxes:
+        _check_fulfillment_box_access(box)
     boxes_by_id = {b.id: b for b in boxes}
     entries = []
     for box_id in ids:
@@ -118,6 +143,7 @@ def boxes_label_batch_pdf():
 def box_items_labels(box_id):
     """Печать этикеток всех товаров, упакованных в короб (для наклейки на каждую позицию)."""
     box = Box.query.get_or_404(box_id)
+    _check_fulfillment_box_access(box)
     labels = []
     for line in box.items:
         labels.append(
