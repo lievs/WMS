@@ -1,41 +1,161 @@
 {% extends "base.html" %}
 {% block title %}Выработка сотрудников{% endblock %}
+{% block extra_head %}
+<style>
+.eo { --eo-ink:#16202a; --eo-ink2:#4a5866; --eo-ink3:#7b8896; --eo-line:#dde3e9; --eo-grid:#e9edf1; --eo-accent:#0b6e8a;
+  --eo-good:#1a7f4b; --eo-good-bg:#dcf1e5; --eo-warn:#9a6200; --eo-warn-bg:#fbecc8; --eo-bad:#b3261e; --eo-bad-bg:#f9dcd9; --eo-plan:#16202a;
+  color: var(--eo-ink); }
+.eo[data-mode="pick"] { --eo-accent:#b4540a; }
+.eo .card { border-color: var(--eo-line); }
+.eo .seg { display:inline-flex; border:1px solid var(--eo-line); border-radius:6px; overflow:hidden; background:#fff; }
+.eo .seg button { font:inherit; border:0; background:transparent; color:var(--eo-ink2); padding:7px 14px; cursor:pointer; }
+.eo .seg button + button { border-left:1px solid var(--eo-line); }
+.eo .seg button[aria-pressed="true"] { background:var(--eo-accent); color:#fff; font-weight:500; }
+.eo .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; margin-bottom:16px; }
+.eo .kpi { background:#fff; border:1px solid var(--eo-line); border-radius:6px; padding:14px 16px; min-width:0; }
+.eo .kpi .lab { color:var(--eo-ink3); font-size:12px; }
+.eo .kpi .val { font-size:28px; font-weight:600; font-variant-numeric:tabular-nums; margin-top:2px; }
+.eo .kpi .val small { font-size:13px; color:var(--eo-ink2); margin-left:4px; font-weight:400; }
+.eo .kpi .note { color:var(--eo-ink2); font-size:12px; }
+.eo .kpi.hero { border-color:var(--eo-accent); } .eo .kpi.hero .val { color:var(--eo-accent); }
+.eo .chartbox { position:relative; }
+.eo svg text { fill:var(--eo-ink3); font-size:11px; }
+.eo .tip { position:absolute; pointer-events:none; background:#16202a; color:#fff; padding:8px 10px; border-radius:4px; font-size:12px;
+  line-height:1.4; min-width:160px; z-index:5; box-shadow:0 4px 14px rgba(0,0,0,.25); }
+.eo .tip .r { display:flex; justify-content:space-between; gap:12px; }
+.eo .legend { display:flex; flex-wrap:wrap; gap:6px 16px; color:var(--eo-ink2); font-size:12px; margin-top:8px; }
+.eo .legend i { display:inline-block; width:18px; height:0; border-top:2px solid; vertical-align:middle; margin-right:6px; }
+.eo .rrow { display:grid; grid-template-columns:minmax(120px,190px) minmax(120px,1fr) 62px 74px 90px; gap:12px; align-items:center;
+  padding:9px 0; border-top:1px solid var(--eo-grid); }
+.eo .rrow.head { border-top:0; color:var(--eo-ink3); font-size:12px; padding-top:0; }
+.eo .rname { font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.eo .track { position:relative; height:12px; background:var(--eo-grid); border-radius:2px; }
+.eo .fill { position:absolute; left:0; top:0; bottom:0; background:var(--eo-accent); border-radius:0 3px 3px 0; }
+.eo .ptick { position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--eo-plan); }
+.eo .num { font-variant-numeric:tabular-nums; text-align:right; }
+.eo .badge2 { display:inline-block; min-width:54px; text-align:center; padding:2px 8px; border-radius:3px; font-weight:600; font-size:12px; }
+.eo .b-good { background:var(--eo-good-bg); color:var(--eo-good); } .eo .b-warn { background:var(--eo-warn-bg); color:var(--eo-warn); }
+.eo .b-bad { background:var(--eo-bad-bg); color:var(--eo-bad); } .eo .b-none { background:var(--eo-grid); color:var(--eo-ink3); }
+.eo .matrix-wrap { overflow-x:auto; }
+.eo table.m { border-collapse:separate; border-spacing:2px; font-variant-numeric:tabular-nums; }
+.eo table.m th { font-weight:400; color:var(--eo-ink3); font-size:11px; padding:2px 4px; text-align:center; white-space:nowrap; }
+.eo table.m th.rowh { text-align:left; color:var(--eo-ink); font-size:13px; padding-right:12px; position:sticky; left:0; background:#fff; }
+.eo table.m td { min-width:44px; height:32px; text-align:center; border-radius:3px; font-size:12px; }
+.eo td.c-good { background:var(--eo-good-bg); color:var(--eo-good); } .eo td.c-warn { background:var(--eo-warn-bg); color:var(--eo-warn); }
+.eo td.c-bad { background:var(--eo-bad-bg); color:var(--eo-bad); } .eo td.c-none { color:var(--eo-ink3); }
+.eo th.we { color:var(--eo-bad); }
+.eo .keys { display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:10px; font-size:12px; color:var(--eo-ink2); }
+.eo .keys .badge2 { min-width:0; margin-right:6px; font-size:11px; }
+@media (max-width:720px) {
+  .eo .rrow { grid-template-columns:minmax(0,1fr) 62px 80px; }
+  .eo .rrow .track, .eo .rrow .h-track, .eo .rrow .h-tot { display:none; }
+}
+</style>
+{% endblock %}
 {% block content %}
+<div class="eo" id="eo" data-mode="pack">
 <p><a href="{{ url_for('reports.index') }}">&larr; Отчеты</a></p>
-<h3 class="mb-3">Выработка сотрудников</h3>
+<div class="d-flex flex-wrap justify-content-between align-items-baseline gap-2 mb-3">
+  <div>
+    <h3 class="mb-0">Выработка сотрудников</h3>
+    <div class="text-muted small" id="periodLabel">{{ date_from.strftime('%d.%m.%Y') }} – {{ date_to.strftime('%d.%m.%Y') }} · по московскому времени</div>
+  </div>
+</div>
 
 <div class="card p-3 mb-3">
   <form method="get" class="row g-2 align-items-end">
-    <div class="col-md-3">
-      <label class="form-label">С даты</label>
+    <div class="col-6 col-md-2">
+      <label class="form-label small mb-1">С даты</label>
       <input type="date" name="date_from" class="form-control" value="{{ date_from.isoformat() }}">
     </div>
-    <div class="col-md-3">
-      <label class="form-label">По дату</label>
+    <div class="col-6 col-md-2">
+      <label class="form-label small mb-1">По дату</label>
       <input type="date" name="date_to" class="form-control" value="{{ date_to.isoformat() }}">
     </div>
-    <div class="col-md-4">
-      <label class="form-label">Сотрудник</label>
+    <div class="col-12 col-md-4">
+      <label class="form-label small mb-1">Сотрудник</label>
       <select name="user_id" class="form-select">
         <option value="">Все сотрудники</option>
         {% for u in users %}<option value="{{ u.id }}" {% if user_id == u.id %}selected{% endif %}>{{ u.display_name() }}</option>{% endfor %}
       </select>
     </div>
-    <div class="col-md-2"><button type="submit" class="btn btn-primary w-100">Показать</button></div>
+    <div class="col-12 col-md-2"><button type="submit" class="btn btn-primary w-100">Показать</button></div>
+    <div class="col-12 col-md-2 d-flex gap-1">
+      <a class="btn btn-outline-secondary btn-sm flex-fill" href="{{ url_for('reports.employee_output', date_from=(date_to - timedelta(days=6)).isoformat(), date_to=date_to.isoformat(), user_id=user_id or None) }}">7 дн.</a>
+      <a class="btn btn-outline-secondary btn-sm flex-fill" href="{{ url_for('reports.employee_output', date_from=(date_to - timedelta(days=29)).isoformat(), date_to=date_to.isoformat(), user_id=user_id or None) }}">30 дн.</a>
+    </div>
   </form>
 </div>
 
-<div class="alert alert-light border small">
-  Учёт ведётся с момента обновления: <b>упаковка</b> — когда сотрудник кладёт товар в короб
-  (приёмка прямо в короб и «Размещение → упаковать»), <b>сборка на отгрузку</b> — когда он добавляет короб
-  в перемещение. За прошлые даты данных нет. Дата — по московскому времени.
+<div class="mb-3">
+  <div class="seg" id="modeSeg" role="group" aria-label="Что показывать">
+    <button type="button" data-mode="pack" aria-pressed="true">Упаковка</button>
+    <button type="button" data-mode="pick" aria-pressed="false">Сборка на отгрузку</button>
+  </div>
 </div>
 
+<div class="kpis" id="kpis"></div>
+
+<div class="card p-3 mb-3">
+  <h5 class="mb-0">Выработка по дням</h5>
+  <div class="text-muted small" id="chartSub"></div>
+  <div class="chartbox" id="chartbox">
+    <svg id="chart" role="img" aria-label="Столбчатый график выработки по дням с линией плана" style="width:100%;height:auto;display:block"></svg>
+    <div class="tip" id="tip" hidden></div>
+  </div>
+  <div class="legend">
+    <span><i style="border-color:var(--eo-accent);border-top-width:8px;width:12px"></i><span id="legMain">Факт</span></span>
+    <span><i style="border-color:var(--eo-plan);border-top-style:dashed"></i>План на день</span>
+    <span><i style="border-color:var(--eo-ink2);border-top-style:dotted"></i>Среднее за рабочий день</span>
+  </div>
+</div>
+
+<div class="card p-3 mb-3">
+  <h5 class="mb-0">Рейтинг и средняя выработка</h5>
+  <div class="text-muted small" id="rankSub"></div>
+  <div id="rank" style="margin-top:10px"></div>
+</div>
+
+<div class="card p-3 mb-3">
+  <h5 class="mb-0">Кто и когда выполнил план</h5>
+  <div class="text-muted small">В клетке — выработка за день, цвет — процент плана. Выходные подсвечены в шапке. Без плана клетки не окрашиваются.</div>
+  <div class="matrix-wrap" style="margin-top:10px"><table class="m" id="matrix"></table></div>
+  <div class="keys">
+    <span><span class="badge2 b-good">100%+</span>план выполнен</span>
+    <span><span class="badge2 b-warn">70–99%</span>почти</span>
+    <span><span class="badge2 b-bad">&lt;70%</span>сильно ниже</span>
+    <span><span class="badge2 b-none">·</span>не работал</span>
+  </div>
+</div>
+
+<div class="card p-3 mb-4">
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+    <div style="max-width:70ch">
+      <b>Данные за прошлые даты.</b>
+      <span class="text-muted small">Кто упаковывал и собирал, программа записывает только с момента обновления. Историю можно
+      восстановить приблизительно — по автору документа приёмки, размещения и перемещения (если документ вели несколько человек, всё
+      запишется на автора). Настоящие записи при этом не затрагиваются.
+      {% if history_events %}<br><b>В выбранном периоде есть восстановленные (приблизительные) данные: {{ history_events }} записей.</b>{% endif %}</span>
+    </div>
+    {% if current_user.is_admin %}
+    <form method="post" action="{{ url_for('reports.employee_output_backfill') }}"
+          onsubmit="return confirm('Восстановить историю выработки по авторам документов? Прежнее восстановление будет заменено.');">
+      <button type="submit" class="btn btn-outline-secondary">Подтянуть историю (приблизительно)</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+<script type="application/json" id="eo-data">{{ payload | tojson }}</script>
+
+<h5 class="mb-2">Планы и таблицы по дням</h5>
 <form method="post" action="{{ url_for('reports.employee_output_save_plans') }}">
   <input type="hidden" name="date_from" value="{{ date_from.isoformat() }}">
   <input type="hidden" name="date_to" value="{{ date_to.isoformat() }}">
   <input type="hidden" name="user_id" value="{{ user_id or '' }}">
 
+  <details class="mb-3">
+    <summary class="fw-semibold mb-2" style="cursor:pointer">Таблицы по дням и план на конкретную дату</summary>
   {% for section in sections %}
   <div class="card p-3 mb-4">
     <div class="d-flex justify-content-between flex-wrap gap-2">
@@ -113,6 +233,7 @@
     {% endif %}
   </div>
   {% endfor %}
+  </details>
 
   <div class="card p-3 mb-4">
     <h5 class="mb-1">План по умолчанию (на каждый рабочий день)</h5>
@@ -150,4 +271,158 @@
   <button type="submit" class="btn btn-primary mb-4">💾 Сохранить план</button>
   {% endif %}
 </form>
+
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  "use strict";
+  var D = JSON.parse(document.getElementById("eo-data").textContent);
+  var root = document.getElementById("eo");
+  var dates = D.dates.map(function (s) { var p = s.split("-"); return { iso: s, d: new Date(+p[0], +p[1] - 1, +p[2]) }; });
+  var MODES = {
+    pack: { label: "Упаковка", main: 0, mainUnit: "шт", sec: 1, secUnit: "кор.", mainName: "товаров" },
+    pick: { label: "Сборка", main: 1, mainUnit: "кор.", sec: 0, secUnit: "шт", mainName: "коробов" }
+  };
+  var state = { mode: "pack" };
+  var $ = function (id) { return document.getElementById(id); };
+  var fmt = function (n) { return Math.round(n).toLocaleString("ru-RU"); };
+  var dd = function (d) { return ("0" + d.getDate()).slice(-2) + "." + ("0" + (d.getMonth() + 1)).slice(-2); };
+  var isWe = function (d) { return d.getDay() === 0 || d.getDay() === 6; };
+  var pct = function (v, p) { return p ? Math.round(v / p * 100) : null; };
+  var cls = function (p) { return p === null ? "b-none" : p >= 100 ? "b-good" : p >= 70 ? "b-warn" : "b-bad"; };
+  var esc = function (s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); };
+
+  function planFor(uid, iso, m) {
+    var pl = (D.plans[state.mode] || {})[uid];
+    if (!pl) return null;
+    var v = null;
+    if (pl.days && pl.days[iso]) v = pl.days[iso][m.main];
+    if ((v === null || v === undefined) && pl.def) v = pl.def[m.main];
+    return v === undefined ? null : v;
+  }
+
+  function render() {
+    var m = MODES[state.mode];
+    root.dataset.mode = state.mode;
+    var byUser = D.data[state.mode] || {};
+    var uids = Object.keys(byUser).sort(function (a, b) { return D.users[a].localeCompare(D.users[b], "ru"); });
+    var perDay = dates.map(function () { return { sum: 0, sec: 0, plan: 0, who: [] }; });
+    var perEmp = uids.map(function (uid) {
+      var s = { uid: uid, name: D.users[uid], sum: 0, sec: 0, work: 0, planSum: 0, series: [], planDay: null };
+      dates.forEach(function (day, i) {
+        var c = byUser[uid][day.iso], plan = planFor(uid, day.iso, m);
+        var v = c ? c[m.main] : 0;
+        s.series.push(v);
+        if (c) {
+          s.sum += v; s.sec += c[m.sec]; s.work++;
+          if (plan) { s.planSum += plan; s.planDay = plan; perDay[i].plan += plan; }
+          perDay[i].sum += v; perDay[i].sec += c[m.sec]; perDay[i].who.push([s.name, v]);
+        }
+      });
+      s.avg = s.work ? s.sum / s.work : 0;
+      return s;
+    });
+    var total = perEmp.reduce(function (a, s) { return a + s.sum; }, 0);
+    var totalSec = perEmp.reduce(function (a, s) { return a + s.sec; }, 0);
+    var workDays = perDay.filter(function (d) { return d.sum > 0; }).length;
+    var empDays = perEmp.reduce(function (a, s) { return a + s.work; }, 0);
+    var avgPerEmpDay = empDays ? total / empDays : 0;
+    var planFact = perEmp.reduce(function (a, s) { return a + (s.planSum ? s.sum : 0); }, 0);
+    var planTotal = perEmp.reduce(function (a, s) { return a + s.planSum; }, 0);
+    var planPct = pct(planFact, planTotal);
+    var best = perDay.reduce(function (b, d, i) { return d.sum > b.v ? { v: d.sum, i: i } : b; }, { v: 0, i: 0 });
+    var empPlans = perEmp.filter(function (s) { return s.planDay; });
+    var avgPlan = empPlans.length ? empPlans.reduce(function (a, s) { return a + s.planDay; }, 0) / empPlans.length : null;
+
+    $("kpis").innerHTML =
+      '<div class="kpi hero"><div class="lab">Средняя выработка на сотрудника в день</div><div class="val">' + fmt(avgPerEmpDay) + '<small>' + m.mainUnit + '</small></div><div class="note">по дням, когда сотрудник работал' + (avgPlan ? ' · план ~' + fmt(avgPlan) + ' ' + m.mainUnit : '') + '</div></div>' +
+      '<div class="kpi"><div class="lab">Всего за период</div><div class="val">' + fmt(total) + '<small>' + m.mainUnit + '</small></div><div class="note">' + fmt(totalSec) + ' ' + m.secUnit + ' · ' + workDays + ' раб. дн.</div></div>' +
+      '<div class="kpi"><div class="lab">Выполнение плана</div><div class="val">' + (planPct === null ? "—" : planPct + "%") + '</div><div class="note">' + (planTotal ? 'факт ' + fmt(planFact) + ' из ' + fmt(planTotal) + ' ' + m.mainUnit : 'план не задан') + '</div></div>' +
+      '<div class="kpi"><div class="lab">Лучший день</div><div class="val">' + fmt(best.v) + '<small>' + m.mainUnit + '</small></div><div class="note">' + (best.v ? dd(dates[best.i].d) + ", " + perDay[best.i].who.length + " чел." : "—") + '</div></div>';
+
+    drawChart(perDay, m, workDays ? total / workDays : 0);
+    drawRank(perEmp, m, avgPlan);
+    drawMatrix(perEmp, m, byUser);
+  }
+
+  function niceMax(v) { if (v <= 0) return 10; var p = Math.pow(10, Math.floor(Math.log10(v))), n = v / p;
+    return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p; }
+
+  function drawChart(perDay, m, avgPerDay) {
+    var W = 820, H = 280, L = 46, R = 12, T = 12, B = 30, iw = W - L - R, ih = H - T - B;
+    var maxV = Math.max.apply(null, perDay.map(function (d) { return Math.max(d.sum, d.plan); }).concat([1]));
+    var top = niceMax(maxV * 1.05), y = function (v) { return T + ih - v / top * ih; };
+    var n = dates.length, step = iw / n, bw = Math.min(34, step * 0.62), s = "";
+    var every = n > 20 ? Math.ceil(n / 14) : 1;
+    for (var k = 0; k <= 4; k++) { var v = top / 4 * k, yy = y(v);
+      s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + yy + '" y2="' + yy + '" stroke="#e9edf1" stroke-width="1"/>' +
+           '<text x="' + (L - 8) + '" y="' + (yy + 4) + '" text-anchor="end">' + fmt(v) + '</text>'; }
+    dates.forEach(function (day, i) {
+      var cx = L + step * i + step / 2, x = cx - bw / 2, h = perDay[i].sum / top * ih, yTop = y(perDay[i].sum);
+      if (h > 0) { var r = Math.min(4, h);
+        s += '<path d="M' + x + ' ' + (T + ih) + ' V' + (yTop + r) + ' Q' + x + ' ' + yTop + ' ' + (x + r) + ' ' + yTop + ' H' + (x + bw - r) +
+             ' Q' + (x + bw) + ' ' + yTop + ' ' + (x + bw) + ' ' + (yTop + r) + ' V' + (T + ih) + ' Z" fill="var(--eo-accent)" opacity="' + (isWe(day.d) ? .65 : 1) + '"/>'; }
+      if (i % every === 0) s += '<text x="' + cx + '" y="' + (H - 10) + '" text-anchor="middle"' + (isWe(day.d) ? ' style="fill:#b3261e"' : '') + '>' + dd(day.d) + '</text>';
+    });
+    perDay.forEach(function (p, i) { if (p.plan) { var yp = y(p.plan);
+      s += '<line x1="' + (L + step * i + step * 0.08) + '" x2="' + (L + step * (i + 1) - step * 0.08) + '" y1="' + yp + '" y2="' + yp + '" stroke="var(--eo-plan)" stroke-width="2" stroke-dasharray="5 4"/>'; } });
+    var ya = y(avgPerDay);
+    s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + ya + '" y2="' + ya + '" stroke="#4a5866" stroke-width="1.5" stroke-dasharray="1.5 4" stroke-linecap="round"/>' +
+         '<text x="' + (W - R) + '" y="' + (ya - 6) + '" text-anchor="end" style="fill:#4a5866">среднее ' + fmt(avgPerDay) + '</text>';
+    dates.forEach(function (day, i) { s += '<rect data-i="' + i + '" x="' + (L + step * i) + '" y="' + T + '" width="' + step + '" height="' + ih + '" fill="transparent"/>'; });
+    var svg = $("chart"); svg.setAttribute("viewBox", "0 0 " + W + " " + H); svg.innerHTML = s;
+    $("chartSub").textContent = "Сумма по выбранным сотрудникам, " + m.mainName + " в день";
+    $("legMain").textContent = "Факт, " + m.mainUnit;
+    var tip = $("tip"), box = $("chartbox");
+    svg.onpointermove = function (ev) {
+      var t = ev.target; if (!t.dataset || t.dataset.i === undefined) { tip.hidden = true; return; }
+      var i = +t.dataset.i, p = perDay[i], rows = p.who.slice().sort(function (a, b) { return b[1] - a[1]; }).slice(0, 3), pc = pct(p.sum, p.plan);
+      tip.innerHTML = '<b>' + dd(dates[i].d) + (isWe(dates[i].d) ? ' · выходной' : '') + '</b>' +
+        '<div class="r"><span>Факт</span><span>' + fmt(p.sum) + ' ' + m.mainUnit + '</span></div>' +
+        '<div class="r"><span>План</span><span>' + (p.plan ? fmt(p.plan) + ' (' + pc + '%)' : '—') + '</span></div>' +
+        (rows.length ? '<div style="margin-top:4px;opacity:.8">' + rows.map(function (r) { return esc(r[0]) + ' — ' + fmt(r[1]); }).join('<br>') + '</div>' : '');
+      tip.hidden = false;
+      var br = box.getBoundingClientRect(), x = ev.clientX - br.left + 14, y0 = ev.clientY - br.top - 10;
+      if (x + 180 > br.width) x = ev.clientX - br.left - 190;
+      tip.style.left = Math.max(0, x) + "px"; tip.style.top = Math.max(0, y0) + "px";
+    };
+    svg.onpointerleave = function () { tip.hidden = true; };
+  }
+
+  function drawRank(perEmp, m, avgPlan) {
+    var rows = perEmp.slice().sort(function (a, b) { return b.avg - a.avg; });
+    var mx = Math.max.apply(null, rows.map(function (r) { return Math.max(r.avg, r.planDay || 0); }).concat([1])) * 1.05;
+    var teamAvg = rows.length ? rows.reduce(function (a, r) { return a + r.avg; }, 0) / rows.length : 0;
+    $("rankSub").textContent = "Среднее в день — по рабочим дням сотрудника. Чёрная метка — план. Среднее по команде: " + fmt(teamAvg) + " " + m.mainUnit;
+    var h = '<div class="rrow head"><span>Сотрудник</span><span class="h-track">Среднее в день, ' + m.mainUnit + '</span><span class="num">Среднее</span><span class="num h-tot">За период</span><span class="num">% плана</span></div>';
+    h += rows.map(function (r) { var p = pct(r.avg, r.planDay);
+      return '<div class="rrow"><span class="rname" title="' + esc(r.name) + '">' + esc(r.name) + '</span>' +
+        '<span class="track"><span class="fill" style="width:' + (r.avg / mx * 100) + '%"></span>' + (r.planDay ? '<span class="ptick" style="left:' + (r.planDay / mx * 100) + '%"></span>' : '') + '</span>' +
+        '<span class="num">' + fmt(r.avg) + '</span><span class="num h-tot">' + fmt(r.sum) + '</span>' +
+        '<span class="num"><span class="badge2 ' + cls(p) + '">' + (p === null ? "—" : p + "%") + '</span></span></div>'; }).join("");
+    $("rank").innerHTML = rows.length ? h : '<div class="text-muted small">Нет данных за выбранный период</div>';
+  }
+
+  function drawMatrix(perEmp, m, byUser) {
+    if (!perEmp.length) { $("matrix").innerHTML = '<tbody><tr><td class="c-none" style="min-width:0;padding:8px">Нет данных за выбранный период</td></tr></tbody>'; return; }
+    var h = '<thead><tr><th></th>' + dates.map(function (day) { return '<th class="' + (isWe(day.d) ? 'we' : '') + '">' + dd(day.d) + '</th>'; }).join("") + '</tr></thead><tbody>';
+    perEmp.forEach(function (s) {
+      h += '<tr><th class="rowh">' + esc(s.name) + '</th>' + dates.map(function (day) {
+        var c = byUser[s.uid][day.iso];
+        if (!c) return '<td class="c-none">·</td>';
+        var plan = planFor(s.uid, day.iso, m), p = pct(c[m.main], plan);
+        return '<td class="' + (p === null ? "c-none" : p >= 100 ? "c-good" : p >= 70 ? "c-warn" : "c-bad") + '"' + (p === null ? '' : ' title="' + p + '% плана"') + '>' + fmt(c[m.main]) + '</td>'; }).join("") + '</tr>';
+    });
+    $("matrix").innerHTML = h + '</tbody>';
+  }
+
+  $("modeSeg").addEventListener("click", function (ev) { var b = ev.target.closest("button"); if (!b) return;
+    state.mode = b.dataset.mode;
+    Array.prototype.forEach.call($("modeSeg").querySelectorAll("button"), function (x) { x.setAttribute("aria-pressed", x === b ? "true" : "false"); });
+    render(); });
+  render();
+})();
+</script>
 {% endblock %}

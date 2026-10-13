@@ -156,3 +156,103 @@ def test_dashboard_excludes_mvb_logistics_users(db, client_logged_in, admin_user
     html = client_logged_in.get("/reports/employee-output").get_data(as_text=True)
     assert "Складской Сергей" in html
     assert "Клиент Логистики" not in html and "Водитель Виктор" not in html
+
+
+def test_dashboard_page_embeds_chart_data_for_selected_period(db, client_logged_in, admin_user):
+    import json
+    import re
+
+    worker = User(username="chart1", full_name="Графикова", role="warehouse")
+    worker.set_password("x")
+    db.session.add(worker)
+    db.session.commit()
+    db.session.add_all([
+        WorkEvent(user_id=worker.id, work_date=date(2026, 9, 2), kind="pack", box_id=1, qty=30),
+        WorkEvent(user_id=worker.id, work_date=date(2026, 9, 2), kind="pack", box_id=2, qty=20),
+        WorkEvent(user_id=worker.id, work_date=date(2026, 9, 3), kind="pick", box_id=3, qty=40),
+        WorkPlan(user_id=worker.id, kind="pack", plan_date=None, qty_plan=100, boxes_plan=3),
+    ])
+    db.session.commit()
+    html = client_logged_in.get("/reports/employee-output?date_from=2026-09-01&date_to=2026-09-03").get_data(as_text=True)
+    data = json.loads(re.search(r'<script type="application/json" id="eo-data">(.*?)</script>', html, re.S).group(1))
+    assert data["dates"] == ["2026-09-01", "2026-09-02", "2026-09-03"]
+    uid = str(worker.id)
+    assert data["data"]["pack"][uid]["2026-09-02"] == [50.0, 2]
+    assert data["data"]["pick"][uid]["2026-09-03"] == [40.0, 1]
+    assert data["plans"]["pack"][uid]["def"] == [100.0, 3]
+    assert data["users"][uid] == "Графикова"
+
+
+def test_backfill_restores_history_from_document_authors_and_is_idempotent(db, client_logged_in, admin_user):
+    from wms.models import PlacementLine, ReceivingDocument, ReceivingLine
+
+    sender, dest = _warehouses()
+    item = _item("9")
+    author = User(username="hist1", full_name="Историк", role="warehouse")
+    author.set_password("x")
+    db.session.add(author)
+    box_a = Box(box_number="BOX-H-1", warehouse_id=sender.id, status="open")
+    box_b = Box(box_number="BOX-H-2", warehouse_id=sender.id, status="open")
+    db.session.add_all([box_a, box_b])
+    db.session.commit()
+    db.session.add(BoxItem(box_id=box_a.id, nomenclature_id=item.id, qty=12))
+
+    old = datetime(2026, 8, 10, 7, 0)
+    rdoc = ReceivingDocument(number="RC-H1", warehouse_id=sender.id, created_by_id=author.id, created_at=old)
+    pdoc = PlacementDocument(number="PL-H1", warehouse_id=sender.id, created_by_id=author.id, created_at=old)
+    mdoc = MovementDocument(number="PER-H1", from_warehouse_id=sender.id, to_warehouse_id=dest.id, created_by_id=author.id)
+    db.session.add_all([rdoc, pdoc, mdoc])
+    db.session.commit()
+    db.session.add_all([
+        ReceivingLine(document_id=rdoc.id, nomenclature_id=item.id, qty=7, box_id=box_a.id),
+        ReceivingLine(document_id=rdoc.id, nomenclature_id=item.id, qty=3),  # без короба — не упаковка
+        PlacementLine(document_id=pdoc.id, nomenclature_id=item.id, qty=5, box_id=box_b.id),
+        MovementLine(document_id=mdoc.id, box_id=box_a.id, from_warehouse_id=sender.id, scanned_at=old),
+    ])
+    db.session.commit()
+
+    client_logged_in.post("/reports/employee-output/backfill")
+    client_logged_in.post("/reports/employee-output/backfill")  # повтор не задваивает
+    events = WorkEvent.query.filter_by(ref_kind="history").all()
+    assert sorted((e.kind, e.qty) for e in events) == [("pack", 5), ("pack", 7), ("pick", 12)]
+    assert {e.user_id for e in events} == {author.id}
+    assert {e.work_date for e in events} == {date(2026, 8, 10)}
+
+    html = client_logged_in.get("/reports/employee-output?date_from=2026-08-01&date_to=2026-08-31").get_data(as_text=True)
+    assert "восстановленные (приблизительные) данные" in html
+
+
+def test_backfill_keeps_real_events_and_skips_period_after_them(db, client_logged_in, admin_user):
+    from wms.models import ReceivingDocument, ReceivingLine
+
+    sender, _ = _warehouses()
+    item = _item("8")
+    box = Box(box_number="BOX-H-3", warehouse_id=sender.id, status="open")
+    db.session.add(box)
+    db.session.commit()
+    real = WorkEvent(user_id=admin_user.id, work_date=work_day(), kind="pack", box_id=box.id, qty=1)
+    db.session.add(real)
+    db.session.commit()
+    # документ, созданный ПОСЛЕ начала настоящего учёта, не восстанавливается
+    doc = ReceivingDocument(number="RC-H2", warehouse_id=sender.id, created_by_id=admin_user.id,
+                            created_at=datetime.utcnow())
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=9, box_id=box.id))
+    db.session.commit()
+
+    client_logged_in.post("/reports/employee-output/backfill")
+    assert WorkEvent.query.filter_by(ref_kind="history").count() == 0
+    assert WorkEvent.query.filter(WorkEvent.ref_kind.is_(None)).count() == 1
+
+
+def test_backfill_requires_admin(db, client):
+    worker = User(username="nb1", full_name="Не админ", role="warehouse")
+    worker.set_password("pw12345")
+    db.session.add(worker)
+    db.session.commit()
+    with client.session_transaction() as sess:
+        sess["_user_id"] = str(worker.id)
+        sess["_fresh"] = True
+    client.post("/reports/employee-output/backfill")
+    assert WorkEvent.query.count() == 0

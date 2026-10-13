@@ -15,6 +15,7 @@ from ..models import (
     Nomenclature,
     OneCQuantityCheck,
     PlacementDocument,
+    PlacementLine,
     ProductCategory,
     ReceivingDocument,
     ReceivingLine,
@@ -548,6 +549,43 @@ def _percent(fact, plan):
     return round(fact / plan * 100)
 
 
+def _dashboard_payload(date_from, date_to, facts, users, defaults, overrides):
+    """Данные для графиков страницы (рисуются в браузере, переключение
+    «упаковка / сборка» без перезагрузки): даты периода, факт по
+    сотрудникам и дням [шт, коробов], планы [шт, коробов]."""
+    days = []
+    day = date_from
+    while day <= date_to:
+        days.append(day)
+        day += timedelta(days=1)
+    payload = {
+        "dates": [d.isoformat() for d in days],
+        "users": {str(uid): u.display_name() for uid, u in users.items()},
+        "data": {"pack": {}, "pick": {}},
+        "plans": {"pack": {}, "pick": {}},
+    }
+    for (kind, uid, day), (qty, boxes) in facts.items():
+        if uid in users:
+            payload["data"][kind].setdefault(str(uid), {})[day.isoformat()] = [round(qty, 3), boxes]
+    for (kind, uid), plan in defaults.items():
+        if uid in users:
+            payload["plans"][kind].setdefault(str(uid), {})["def"] = [plan.qty_plan, plan.boxes_plan]
+    for (kind, uid, day), plan in overrides.items():
+        if uid in users:
+            payload["plans"][kind].setdefault(str(uid), {}).setdefault("days", {})[day.isoformat()] = [
+                plan.qty_plan, plan.boxes_plan,
+            ]
+    return payload
+
+
+def _history_events_in_range(date_from, date_to):
+    return WorkEvent.query.filter(
+        WorkEvent.ref_kind == "history",
+        WorkEvent.work_date >= date_from,
+        WorkEvent.work_date <= date_to,
+    ).count()
+
+
 def _employee_output_context(date_from, date_to, user_id):
     events = (
         db.session.query(
@@ -607,6 +645,8 @@ def _employee_output_context(date_from, date_to, user_id):
             "totals": sorted(totals.values(), key=lambda t: -t["boxes"]),
         })
     return {
+        "payload": _dashboard_payload(date_from, date_to, facts, users, defaults, overrides),
+        "history_events": _history_events_in_range(date_from, date_to),
         "sections": sections,
         "defaults": defaults,
         "users": sorted((u for u in users.values() if u.is_active_user), key=lambda u: u.display_name().lower()),
@@ -616,13 +656,18 @@ def _employee_output_context(date_from, date_to, user_id):
 @bp.route("/employee-output")
 def employee_output():
     today = work_day()
-    date_from = _parse_day(request.args.get("date_from")) or (today - timedelta(days=6))
+    date_from = _parse_day(request.args.get("date_from")) or (today - timedelta(days=13))
     date_to = _parse_day(request.args.get("date_to")) or today
     user_id = request.args.get("user_id", type=int)
+    if date_from > date_to:
+        date_from, date_to = date_to, date_from
+    if (date_to - date_from).days > 120:
+        date_from = date_to - timedelta(days=120)
+        flash("Период ограничен 120 днями", "warning")
     context = _employee_output_context(date_from, date_to, user_id)
     return render_template(
         "reports/employee_output.html",
-        date_from=date_from, date_to=date_to, user_id=user_id, kinds=WORK_KINDS, **context,
+        date_from=date_from, date_to=date_to, user_id=user_id, kinds=WORK_KINDS, timedelta=timedelta, **context,
     )
 
 
@@ -693,3 +738,80 @@ def employee_output_save_plans():
     db.session.commit()
     flash("План выработки сохранен", "success")
     return redirect(back)
+
+
+@bp.route("/employee-output/backfill", methods=["POST"])
+def employee_output_backfill():
+    """Приблизительное восстановление истории выработки (до появления
+    журнала WorkEvent кто именно упаковывал/собирал нигде не хранилось):
+    автор документа приёмки/размещения/перемещения считается тем, кто
+    сделал все его строки, дата — дата документа (у строк перемещения —
+    время скана). Заполняется только период ДО первой настоящей записи
+    журнала; повторный запуск заменяет прежнее восстановление."""
+    if not current_user.is_admin:
+        flash("Восстанавливать историю может только администратор", "danger")
+        return redirect(url_for("reports.employee_output"))
+
+    real = db.session.query(db.func.min(WorkEvent.created_at)).filter(
+        db.or_(WorkEvent.ref_kind.is_(None), WorkEvent.ref_kind != "history")
+    ).scalar()
+    cutoff = real or datetime.utcnow()
+    WorkEvent.query.filter_by(ref_kind="history").delete(synchronize_session=False)
+
+    rows = []
+
+    def add(kind, user_id, moment, box_id, qty, nomenclature_id=None):
+        rows.append({
+            "user_id": user_id, "work_date": work_day(moment), "kind": kind, "box_id": box_id,
+            "nomenclature_id": nomenclature_id, "qty": qty, "ref_kind": "history", "created_at": moment,
+        })
+
+    packed = 0
+    for line, doc in (
+        db.session.query(ReceivingLine, ReceivingDocument)
+        .join(ReceivingDocument, ReceivingLine.document_id == ReceivingDocument.id)
+        .filter(ReceivingLine.box_id.isnot(None), ReceivingDocument.created_by_id.isnot(None),
+                ReceivingDocument.created_at < cutoff, ReceivingLine.qty > 0)
+    ):
+        add("pack", doc.created_by_id, doc.created_at, line.box_id, line.qty, line.nomenclature_id)
+        packed += 1
+    for line, doc in (
+        db.session.query(PlacementLine, PlacementDocument)
+        .join(PlacementDocument, PlacementLine.document_id == PlacementDocument.id)
+        .filter(PlacementLine.box_id.isnot(None), PlacementDocument.created_by_id.isnot(None),
+                PlacementDocument.created_at < cutoff, PlacementLine.qty > 0)
+    ):
+        add("pack", doc.created_by_id, doc.created_at, line.box_id, line.qty, line.nomenclature_id)
+        packed += 1
+
+    picked = 0
+    movement_lines = (
+        db.session.query(MovementLine, MovementDocument)
+        .join(MovementDocument, MovementLine.document_id == MovementDocument.id)
+        .filter(MovementDocument.created_by_id.isnot(None), MovementLine.scanned_at < cutoff)
+        .all()
+    )
+    box_ids = {line.box_id for line, _ in movement_lines}
+    totals = {}
+    if box_ids:
+        for box_id, qty in (
+            db.session.query(BoxItem.box_id, db.func.sum(BoxItem.qty))
+            .filter(BoxItem.box_id.in_(box_ids)).group_by(BoxItem.box_id)
+        ):
+            totals[box_id] = qty or 0
+    for line, doc in movement_lines:
+        add("pick", doc.created_by_id, line.scanned_at, line.box_id, totals.get(line.box_id, 0))
+        rows[-1]["ref_id"] = doc.id
+        picked += 1
+    # ref_kind="history" у сборки тоже — отличать восстановленное от настоящего
+    if rows:
+        for row in rows:
+            row.setdefault("ref_id", None)
+        db.session.bulk_insert_mappings(WorkEvent, rows)
+    db.session.commit()
+    flash(
+        f"История восстановлена приблизительно, по авторам документов: упаковка — {packed} записей, "
+        f"сборка — {picked} записей. Настоящий учёт идёт с {work_day(cutoff).strftime('%d.%m.%Y')}.",
+        "success",
+    )
+    return redirect(url_for("reports.employee_output"))
