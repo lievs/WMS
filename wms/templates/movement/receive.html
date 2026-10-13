@@ -33,11 +33,12 @@
 <form method="post" action="{{ url_for('movement.receive', doc_id=doc.id) }}">
   <div class="card p-3">
     <table class="table table-sm align-middle" id="receiveTable">
-      <thead><tr><th>Товар</th><th>Отправлено</th><th style="width:160px">Принято по факту</th></tr></thead>
+      <thead><tr><th>Товар</th><th>Штрихкод</th><th>Отправлено</th><th style="width:160px">Принято по факту</th></tr></thead>
       <tbody>
       {% for row in rows %}
         <tr>
           <td>{{ row.nomenclature.name }} <span class="text-muted">({{ row.nomenclature.sku }})</span></td>
+          <td class="text-nowrap">{{ row.nomenclature.barcode }}{% if row.nomenclature.barcode2 %}<br><span class="text-muted small">{{ row.nomenclature.barcode2 }}</span>{% endif %}</td>
           <td>{{ row.expected_qty | round(3) }} {{ row.nomenclature.unit }}</td>
           <td>
             <input type="number" step="0.001" min="0" name="qty_{{ row.nomenclature.id }}"
@@ -110,6 +111,9 @@
     extraInput.name = "extra_nomenclature_id";
     extraInput.value = id;
     tdName.appendChild(extraInput);
+    var tdBarcode = document.createElement("td");
+    tdBarcode.className = "text-nowrap";
+    tdBarcode.textContent = input.dataset.selectedBarcode || "";
     var tdExpected = document.createElement("td");
     tdExpected.textContent = "0 " + unit;
     var tdQty = document.createElement("td");
@@ -122,6 +126,7 @@
     qtyField.value = qty;
     tdQty.appendChild(qtyField);
     tr.appendChild(tdName);
+    tr.appendChild(tdBarcode);
     tr.appendChild(tdExpected);
     tr.appendChild(tdQty);
     tbody.appendChild(tr);

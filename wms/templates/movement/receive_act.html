@@ -30,13 +30,14 @@
 {% if rec.boxes %}
 <div class="card p-3 mb-3">
   <table class="table table-sm align-middle mb-0">
-    <thead><tr><th>Короб</th><th>Товар</th><th class="text-end">Отправлено</th><th class="text-end">Принято по акту</th></tr></thead>
+    <thead><tr><th>Короб</th><th>Товар</th><th>Штрихкод</th><th class="text-end">Отправлено</th><th class="text-end">Принято по акту</th></tr></thead>
     <tbody>
     {% for b in rec.boxes %}
       {% for r in b.rows %}
       <tr class="{{ 'table-warning' if r.expected != r.accepted else '' }}">
         {% if loop.first %}<td rowspan="{{ b.rows | length }}"><b>{{ b.box_number }}</b>{% if not b.has_diff %} <span class="badge bg-success">совпало</span>{% endif %}</td>{% endif %}
         <td>{{ r.nomenclature.name }} <span class="text-muted">({{ r.nomenclature.sku }})</span></td>
+        <td class="text-nowrap">{{ r.nomenclature.barcode }}</td>
         <td class="text-end">{{ r.expected | round(3) }}</td>
         <td class="text-end">{{ r.accepted | round(3) }}</td>
       </tr>

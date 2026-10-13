@@ -266,3 +266,11 @@ def test_fast_and_openpyxl_readers_give_same_result():
         aa._iter_sheet_rows_fast = original
     assert fast == slow
     assert dict(fast[0]) == {"BOX-A1": {"2000000000011": 3.0}, "BOX-A2": {"2000000000028": 3.0}}
+
+
+def test_receive_pages_show_barcode_column(db, client_logged_in):
+    doc, sender, dest, n1, n2, boxes, _ = _setup()
+    html = client_logged_in.get(f"/movement/{doc.id}/receive").get_data(as_text=True)
+    assert "Штрихкод" in html and n1.barcode in html and n2.barcode in html and n2.barcode2 in html
+    html = _upload(client_logged_in, doc, [(n1.barcode, "BOX-A1", 3)]).get_data(as_text=True)
+    assert "Штрихкод" in html and n1.barcode in html
