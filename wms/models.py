@@ -1709,6 +1709,8 @@ MVB_MARKETPLACES = {
     "wb": "Wildberries", "ozon": "Ozon", "lamoda": "Lamoda", "yandex": "Яндекс Маркет", "ff": "Фулфилмент",
 }
 MVB_DELIVERY_METHODS = {"pickup": "Забор транспортной компанией", "self": "Самопривоз"}
+# Куда клиент сам привозит короба при самопривозе (пункты приема МВБ).
+MVB_DROPOFF_CITIES = ("Черкесск", "Учкекен", "Пятигорск")
 MVB_ORDER_STATUSES = {"draft": "Черновик", "confirmed": "Оформлена", "cancelled": "Отменена"}
 # Порядок важен: короб движется только вперед по этому списку.
 MVB_BOX_STATUSES = [
@@ -1798,6 +1800,7 @@ class MvbOrder(db.Model):
     pickup_cost = db.Column(db.Float)
     # Зона забора (Черкесск / регионы / ...) — фиксированная цена забора.
     pickup_zone_id = db.Column(db.Integer, db.ForeignKey("mvb_pickup_zones.id"))
+    dropoff_city = db.Column(db.String(100))  # город сдачи при самопривозе
     sc_cost = db.Column(db.Float)
     # Палетирование: цена паллеты делится между заявками по доле их коробов
     # на паллете (пересчитывается при сборе паллет).

@@ -49,6 +49,7 @@ def _create_order(http, **overrides):
         "slot_date": "2026-10-06",
         "time_from": "10:00",
         "time_to": "14:00",
+        "dropoff_city": "Черкесск",  # учитывается только при самопривозе
     }
     form.update(overrides)
     return http.post("/mvb/orders/new", data=form)
@@ -1838,3 +1839,19 @@ def test_operator_creates_pickup_driver_with_vehicle(db, client):
     # Водитель сам сюда не попадает.
     _login(client, _user("drv_other", "mvb_driver"))
     assert client.get("/mvb/drivers").status_code == 302
+
+
+def test_self_delivery_needs_dropoff_city_and_date(db, client):
+    seller = _user("seller_self", "mvb_client", _mvb_client())
+    _login(client, seller)
+    page = client.get("/mvb/orders/new").get_data(as_text=True)
+    assert "Город сдачи" in page and "Учкекен" in page and "Пятигорск" in page
+    _create_order(client, delivery_method="self", pickup_address="", planned_date="2026-10-15", dropoff_city="")
+    assert MvbOrder.query.count() == 0  # без города
+    _create_order(client, delivery_method="self", pickup_address="", planned_date="", dropoff_city="Черкесск")
+    assert MvbOrder.query.count() == 0  # без даты
+    _create_order(client, delivery_method="self", pickup_address="ул. Мира 1", planned_date="2026-10-15", dropoff_city="Учкекен")
+    order = MvbOrder.query.one()
+    assert order.dropoff_city == "Учкекен" and str(order.planned_date) == "2026-10-15" and order.pickup_address is None
+    detail = client.get(f"/mvb/orders/{order.id}").get_data(as_text=True)
+    assert "Город сдачи:</b> Учкекен" in detail

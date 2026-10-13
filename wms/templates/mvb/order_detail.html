@@ -72,6 +72,7 @@
       <div><b>Способ:</b> {{ order.delivery_label }}</div>
       {% if order.pickup_address %}<div><b>Адрес забора:</b> {{ order.pickup_address }}</div>{% endif %}
       {% if order.pickup_zone and order.delivery_method == 'pickup' %}<div><b>Зона забора:</b> {{ order.pickup_zone.name }}</div>{% endif %}
+      {% if order.delivery_method == 'self' and order.dropoff_city %}<div><b>Город сдачи:</b> {{ order.dropoff_city }}</div>{% endif %}
       <div><b>Дата забора / сдачи:</b> {{ order.planned_date.strftime('%d.%m.%Y') if order.planned_date else '—' }}{% if order.time_from %} {{ order.time_from }}{% if order.time_to %}–{{ order.time_to }}{% endif %}{% endif %}</div>
       <div><b>Коробов всего:</b> {{ order.box_count }}{% if order.lines|length > 1 %} · направлений {{ order.lines|length }}{% endif %}</div>
       {% if order.status == 'confirmed' and not order.client.is_internal and (mvb_is_operator or mvb_is_client) %}

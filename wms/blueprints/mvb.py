@@ -24,7 +24,7 @@ from flask_login import current_user, login_user, logout_user
 from ..extensions import db
 from ..models import (
     MVB_BOX_STATUS_LABELS, MVB_BOX_STATUS_ORDER, MVB_BOX_STATUSES, MVB_DELIVERY_METHODS,
-    MVB_MARKETPLACES, MVB_ROLES, MvbCity, MvbDestination, MvbOrderLine, MVB_TRIP_STATUSES, MvbBox, MvbBoxEvent, MvbClient, MvbOrder,
+    MVB_DROPOFF_CITIES, MVB_MARKETPLACES, MVB_ROLES, MvbCity, MvbDestination, MvbOrderLine, MVB_TRIP_STATUSES, MvbBox, MvbBoxEvent, MvbClient, MvbOrder,
     AppSetting, MVB_PRICE_KINDS, MvbPallet, MvbPickupZone, MvbPriceTier, MvbTrip, MvbTripStop, MvbVehicle, User,
 )
 from ..utils.http import content_disposition
@@ -154,6 +154,7 @@ def _inject():
         "MVB_BOX_STATUSES": MVB_BOX_STATUSES,
         "MVB_BOX_STATUS_LABELS": MVB_BOX_STATUS_LABELS,
         "MVB_MARKETPLACES": MVB_MARKETPLACES,
+        "MVB_DROPOFF_CITIES": MVB_DROPOFF_CITIES,
         "MVB_DELIVERY_METHODS": MVB_DELIVERY_METHODS,
         "MVB_ROLES": MVB_ROLES,
         "SCAN_MODES": SCAN_MODES,
@@ -402,6 +403,14 @@ def _fill_order_from_form(order):
     pickup_address = request.form.get("pickup_address", "").strip()
     if delivery_method == "pickup" and not pickup_address:
         return "Для забора укажите адрес"
+    dropoff_city = None
+    if delivery_method == "self":
+        dropoff_city = request.form.get("dropoff_city", "").strip()
+        if dropoff_city not in MVB_DROPOFF_CITIES:
+            return "Для самопривоза выберите город сдачи"
+        if planned_date is None:
+            return "Для самопривоза укажите дату сдачи товара"
+        pickup_address = ""
     zone = None
     if delivery_method == "pickup" and MvbPickupZone.active():
         zone = db.session.get(MvbPickupZone, request.form.get("pickup_zone_id", type=int) or 0)
@@ -414,6 +423,7 @@ def _fill_order_from_form(order):
     order.delivery_method = delivery_method
     order.pickup_address = pickup_address or None
     order.pickup_zone = zone
+    order.dropoff_city = dropoff_city
     order.planned_date = planned_date
     order.time_from = _parse_time(request.form.get("time_from"))
     order.time_to = _parse_time(request.form.get("time_to"))
