@@ -1764,7 +1764,8 @@ def trip_detail(trip_id):
     return render_template(
         "mvb/trip_detail.html", trip=trip, ready=ready,
         driver_link=url_for("mvb.trip_public", token=trip.access_token, _external=True) if _is_operator() else None,
-        vehicles=MvbVehicle.query.filter_by(is_active=True).order_by(MvbVehicle.plate).all() if _is_operator() else [],
+        vehicles=MvbVehicle.query.filter(MvbVehicle.driver_id.is_(None), MvbVehicle.is_active.is_(True))
+        .order_by(MvbVehicle.plate).all() if _is_operator() else [],
         drivers=_active_drivers() if _is_operator() else [],
     )
 
@@ -1861,6 +1862,8 @@ def trip_plan(trip_id):
         abort(400)
     vehicle_id = request.form.get("vehicle_id", type=int)
     vehicle = db.session.get(MvbVehicle, vehicle_id) if vehicle_id else None
+    # Машина выбирается из «Машин для СЦ»; ее госномер, модель и вместимость
+    # подставляются в рейс, если оператор не вписал свои.
     driver_id = request.form.get("driver_id", type=int)
     trip.vehicle = vehicle
     driver = db.session.get(User, driver_id) if driver_id else (vehicle.driver if vehicle else None)
@@ -1874,9 +1877,9 @@ def trip_plan(trip_id):
     # Наемный водитель (обычно случайный) — без учетной записи.
     trip.driver_name = request.form.get("driver_name", "").strip() or None
     trip.driver_phone = request.form.get("driver_phone", "").strip() or None
-    trip.car_plate = request.form.get("car_plate", "").strip().upper() or None
-    trip.car_model = request.form.get("car_model", "").strip() or None
-    trip.capacity_boxes = request.form.get("capacity_boxes", type=int) or None
+    trip.car_plate = request.form.get("car_plate", "").strip().upper() or (vehicle.plate.upper() if vehicle else None)
+    trip.car_model = request.form.get("car_model", "").strip() or (vehicle.model if vehicle else None)
+    trip.capacity_boxes = request.form.get("capacity_boxes", type=int) or (vehicle.capacity_boxes if vehicle else None) or None
     if not trip.access_token:
         trip.access_token = secrets.token_urlsafe(16)
     if trip.has_transport() and trip.status == "searching":
@@ -1978,8 +1981,9 @@ def trip_action(trip_id, action):
 
 @bp.route("/trips/<int:trip_id>/scan", methods=["POST"])
 def trip_scan(trip_id):
-    """Погрузка сканом (кладовщик): короб или паллета целиком; короб
-    попадает на точку маршрута своего направления. Первый скан сам отмечает
+    """Погрузка сканом (кладовщик): только паллетами — скан паллеты или
+    любого ее короба грузит паллету целиком; короб без паллеты не грузится.
+    Короба попадают на точку маршрута своего направления. Первый скан сам отмечает
     начало погрузки. Сверх вместимости авто — предупреждение."""
     if not _is_staff():
         return jsonify(ok=False, message="Нет доступа"), 403
@@ -2003,7 +2007,15 @@ def trip_scan(trip_id):
             return jsonify(ok=True, already=True, message=f"{box.barcode} уже в этом рейсе", count=len(trip.boxes))
         if box.status != "received" or box.trip_id is not None:
             return jsonify(ok=False, message=f"Короб в статусе «{box.status_label}»"), 409
-        boxes = [box]
+        if box.pallet is None:
+            # Без паллеты короба в машину не грузим.
+            return jsonify(
+                ok=False,
+                message=f"{box.barcode} не на паллете — сначала поставьте короб на паллету, грузим только паллеты",
+            ), 409
+        # Скан короба с паллеты грузит всю его паллету.
+        pallet = box.pallet
+        boxes = [b for b in pallet.boxes if b.status == "received" and b.trip_id is None]
         order, line = box.order, box.line
     stop = trip.stop_for(line.marketplace, line.destination)
     if stop is None:

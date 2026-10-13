@@ -46,6 +46,7 @@ document.addEventListener("DOMContentLoaded", function () {
     if (navigator.vibrate) navigator.vibrate(data.ok ? 60 : [100, 60, 100]);
   }
 
+  window.mvbScanSend = send;
   initBarcodeInput(input, send);
 });
 </script>

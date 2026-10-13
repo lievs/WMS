@@ -6,9 +6,9 @@
   <div class="text-muted">{{ trip.number }} · {{ trip.route_label() }}{% if trip.driver_label() %} · {{ trip.driver_label() }}{% endif %}</div>
   <div class="fs-5 mt-1">Погружено: <b id="loadedCount">{{ trip.boxes|length }}</b>{% if trip.planned_boxes %} из {{ trip.planned_boxes }}{% endif %} кор.</div>
 </div>
-<p class="text-muted">Сканируйте паллеты (или отдельные короба) — каждая коробка сама попадает на свою точку маршрута.</p>
+<p class="text-muted">Грузим только паллетами: сканируйте этикетку паллеты (или любой короб на ней) — паллета целиком попадает на свою точку маршрута. Короб без паллеты не грузится.</p>
 {% set scan_url = url_for('mvb.trip_scan', trip_id=trip.id) %}
-{% set scan_placeholder = 'Штрихкод паллеты или короба' %}
+{% set scan_placeholder = 'Штрихкод паллеты' %}
 {% include "mvb/_scan_widget.html" %}
 <form method="post" action="{{ url_for('mvb.trip_action', trip_id=trip.id, action='depart') }}" style="max-width:560px"
       onsubmit="return confirm('Завершить погрузку и отправить рейс?')">
