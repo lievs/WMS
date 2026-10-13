@@ -24,7 +24,9 @@ from ..models import (
     Warehouse,
     UnplacedStock,
 )
-from ..utils.acceptance_act import ARTICLE_KEY_PREFIX, ActParseError, MAX_ACT_BYTES, parse_act
+from ..utils.acceptance_act import (
+    ARTICLE_KEY_PREFIX, UNIDENTIFIED_KEY, ActParseError, MAX_ACT_BYTES, parse_act,
+)
 from ..utils.excel_io import export_movement_summary_to_excel, export_movement_to_excel, timestamp_for_filename
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
@@ -1516,6 +1518,8 @@ def _reconcile_with_act(doc, act_boxes):
     result = {
         "boxes": [], "missing": [], "unknown_keys": [], "unknown_barcodes": [],
         "payload": {}, "error": None, "is_ozon": is_ozon,
+        "unidentified": [], "ignored_qty": 0, "matched_qty": 0, "unidentified_qty": 0,
+        "sent_qty": sum(_expected_qty_by_nomenclature(doc).values()),
     }
     key_to_box = {}
     if is_ozon:
@@ -1534,9 +1538,14 @@ def _reconcile_with_act(doc, act_boxes):
         box_number = key_to_box.get(key) if is_ozon else key
         if box_number is None:
             result["unknown_keys"].append(key)
+            result["ignored_qty"] += sum(items.values())
             continue
         target = act_by_box.setdefault(box_number, {})
         for code, qty in items.items():
+            if code == UNIDENTIFIED_KEY:
+                result["unidentified"].append((box_number, qty))
+                result["unidentified_qty"] += qty
+                continue
             if code not in barcode_cache:
                 barcode_cache[code] = _nomenclature_for_act_item(code)
             nom, label = barcode_cache[code]
@@ -1579,6 +1588,9 @@ def _reconcile_with_act(doc, act_boxes):
     for number in act_by_box:
         if number not in doc_box_numbers:
             result["unknown_keys"].append(number)
+            result["ignored_qty"] += sum(act_by_box[number].values())
+    result["matched_qty"] = sum(sum(v.values()) for v in result["payload"].values())
+    result["payload"] = {k: v for k, v in result["payload"].items()}
     if not result["boxes"]:
         result["error"] = "Ни один короб из акта не найден в этом перемещении — нечего принимать."
     elif result["unknown_barcodes"]:

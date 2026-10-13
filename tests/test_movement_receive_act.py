@@ -365,3 +365,18 @@ def test_ozon_act_unmapped_article_and_unknown_barcode_blocks(db, client_logged_
         data={"act_file": (report, "r.xlsx")}, content_type="multipart/form-data",
     ).get_data(as_text=True)
     assert "НЕТ-ТАКОГО" in html and "act_payload" not in html
+
+
+def test_act_unidentified_row_is_counted_separately_and_totals_shown(db, client_logged_in):
+    doc, sender, dest, n1, n2, boxes, _ = _setup()
+    rows = [(n1.barcode, "BOX-A1", 10), ("", "BOX-A1", 1), (n2.barcode, "BOX-A2", 5)]
+    html = client_logged_in.post(
+        f"/movement/{doc.id}/receive/act",
+        data={"act_file": (_act_file(rows), "a.xlsx")}, content_type="multipart/form-data",
+    ).get_data(as_text=True)
+    assert "Неопознан" in html and "В акте всего" in html
+    assert "act_payload" in html  # не блокирует подтверждение
+    import re
+    from html import unescape
+    payload = json.loads(unescape(re.search(r'name="act_payload" value="([^"]*)"', html).group(1)))
+    assert payload == {"BOX-A1": {str(n1.id): 10.0}, "BOX-A2": {str(n2.id): 5.0}}

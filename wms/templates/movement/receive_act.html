@@ -6,6 +6,23 @@
 <h3 class="mb-1">Сверка с актом приёмки — {{ doc.number }}</h3>
 <div class="text-muted mb-3">{{ doc.from_warehouse.name }} → {{ doc.to_warehouse.name }} · файл «{{ filename }}» · в акте {{ act_total | round(3) }} шт.</div>
 
+<div class="card p-3 mb-3">
+  <div class="row text-center g-2">
+    <div class="col"><div class="text-muted small">В акте всего</div><div class="fs-4">{{ act_total | round(3) }}</div></div>
+    <div class="col"><div class="text-muted small">Учтено в коробах перемещения</div><div class="fs-4">{{ rec.matched_qty | round(3) }}</div></div>
+    <div class="col"><div class="text-muted small">Отправлено по WMS</div><div class="fs-4">{{ rec.sent_qty | round(3) }}</div></div>
+    {% if rec.unidentified_qty %}<div class="col"><div class="text-muted small">Неопознано</div><div class="fs-4 text-danger">{{ rec.unidentified_qty | round(3) }}</div></div>{% endif %}
+    {% if rec.ignored_qty %}<div class="col"><div class="text-muted small">Из других коробов</div><div class="fs-4 text-danger">{{ rec.ignored_qty | round(3) }}</div></div>{% endif %}
+  </div>
+</div>
+
+{% if rec.unidentified %}
+<div class="alert alert-warning">
+  В акте есть позиции без баркода («Неопознанный товар»): {% for box, qty in rec.unidentified %}{{ box }} — {{ qty | round(3) }} шт.{% if not loop.last %}, {% endif %}{% endfor %}.
+  Маркетплейс их принял, но какой это товар — неизвестно, поэтому в состав коробов они не вносятся.
+</div>
+{% endif %}
+
 {% if rec.error %}
 <div class="alert alert-danger">{{ rec.error }}</div>
 {% endif %}

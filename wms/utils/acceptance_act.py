@@ -31,6 +31,10 @@ _ARTICLE_HEADERS = ("артикул товара", "артикул", "артик
 # Ключ позиции в режиме «по артикулу» (Ozon): артикул и, запасным путём,
 # баркод той же строки. Префикс не совпадает ни с одним реальным баркодом.
 ARTICLE_KEY_PREFIX = "\x00art:"
+# Позиция без баркода/артикула («Неопознанный товар» в акте WB): маркетплейс
+# её принял, но мы не можем сказать, что это. Считаем отдельно, в состав
+# коробов не вносим.
+UNIDENTIFIED_KEY = "\x00unidentified"
 _QTY_HEADERS = (
     "кол-во", "количество", "кол во", "принято", "принято на склад (шт.)", "принято на склад", "qty",
 )
@@ -184,10 +188,15 @@ def _parse_rows(rows, wanted, prefer_article=False):
         article = ""
         if art_col is not None and art_col < len(row):
             article = normalize_code(row[art_col])
-        if not box or not (barcode or article):
+        if not box:
             continue
         if i - header_row <= 3 and _is_column_numbering_row(row):
             continue
+        if not (barcode or article):
+            # строка с коробом и количеством, но без товара
+            if qty_col is None or qty_col >= len(row) or row[qty_col] in (None, ""):
+                continue
+            barcode = UNIDENTIFIED_KEY
         qty = 1.0
         if qty_col is not None and qty_col < len(row) and row[qty_col] not in (None, ""):
             try:
@@ -197,6 +206,8 @@ def _parse_rows(rows, wanted, prefer_article=False):
         if qty <= 0:
             continue
         key = f"{ARTICLE_KEY_PREFIX}{article}\x1f{barcode}" if article else barcode
+        if barcode == UNIDENTIFIED_KEY:
+            key = UNIDENTIFIED_KEY
         items = boxes.setdefault(box, {})
         items[key] = items.get(key, 0) + qty
         total += qty
