@@ -274,3 +274,50 @@ def test_receive_pages_show_barcode_column(db, client_logged_in):
     assert "Штрихкод" in html and n1.barcode in html and n2.barcode in html and n2.barcode2 in html
     html = _upload(client_logged_in, doc, [(n1.barcode, "BOX-A1", 3)]).get_data(as_text=True)
     assert "Штрихкод" in html and n1.barcode in html
+
+
+def _ozon_report(rows):
+    """Отчёт Ozon «supply-…-acceptance-report.xlsx»: лист по поставке (без
+    ГМ) и лист «Отчёт по ГМ» (ШК ГМ, ШК товара, заявлено, принято)."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Отчёт по поставке"
+    ws.append(["Принято ГМ / Заявлено ГМ", "3/3"])
+    ws.append([])
+    ws.append(["Ozon ID", "ШК", "Артикул товара", "Наименование товара", "Заявлено (шт.)", "Принято на склад (шт.)"])
+    ws2 = wb.create_sheet("Отчёт по ГМ")
+    ws2.append(["Принято ГМ / Заявлено ГМ", "3/3"])
+    ws2.append([])
+    ws2.append(["ШК ГМ", "ГМ", "Тип ГМ", "Ozon ID", "ШК товара", "Артикул товара", "Наименование товара",
+                "Заявлено (шт.)", "Принято на склад (шт.)", "Разница по ГМ"])
+    for gm, barcode, declared, accepted in rows:
+        ws2.append([gm, "Коробка", "Моно", 1, barcode, "арт", "Товар", declared, accepted, accepted - declared])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def test_ozon_acceptance_report_layout_is_recognized(db, client_logged_in):
+    doc, sender, dest, n1, n2, boxes, _ = _setup(ozon=True)
+    db.session.add_all([
+        MovementCargoPlace(document_id=doc.id, box_id=boxes[0].id, box_number="BOX-A1", cargo_barcode="1000000000000001"),
+        MovementCargoPlace(document_id=doc.id, box_id=boxes[1].id, box_number="BOX-A2", cargo_barcode="1000000000000002"),
+        MovementCargoPlace(document_id=doc.id, box_id=boxes[2].id, box_number="BOX-A3", cargo_barcode="1000000000000003"),
+    ])
+    db.session.commit()
+    report = _ozon_report([
+        ("1000000000000001", "0" + n1.barcode, 10, 7),   # ведущий ноль, недостача
+        ("1000000000000002", n2.barcode, 5, 5),
+        ("1000000000000003", n1.barcode, 4, 4),
+        ("1000000000000003", n2.barcode, 6, 6),
+    ])
+    resp = client_logged_in.post(
+        f"/movement/{doc.id}/receive/act",
+        data={"act_file": (report, "supply-1-acceptance-report.xlsx")}, content_type="multipart/form-data",
+    )
+    html = resp.get_data(as_text=True)
+    assert "act_payload" in html and "Не приняты вовсе" not in html
+    _confirm(client_logged_in, doc, html)
+    assert BoxItem.query.filter_by(box_id=boxes[0].id).first().qty == 7
+    assert MovementDocument.query.get(doc.id).total_received_qty() == 22
