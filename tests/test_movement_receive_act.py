@@ -290,8 +290,9 @@ def _ozon_report(rows):
     ws2.append([])
     ws2.append(["ШК ГМ", "ГМ", "Тип ГМ", "Ozon ID", "ШК товара", "Артикул товара", "Наименование товара",
                 "Заявлено (шт.)", "Принято на склад (шт.)", "Разница по ГМ"])
-    for gm, barcode, declared, accepted in rows:
-        ws2.append([gm, "Коробка", "Моно", 1, barcode, "арт", "Товар", declared, accepted, accepted - declared])
+    for gm, barcode, declared, accepted, *article in rows:
+        ws2.append([gm, "Коробка", "Моно", 1, barcode, article[0] if article else "арт", "Товар",
+                    declared, accepted, accepted - declared])
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -321,3 +322,46 @@ def test_ozon_acceptance_report_layout_is_recognized(db, client_logged_in):
     _confirm(client_logged_in, doc, html)
     assert BoxItem.query.filter_by(box_id=boxes[0].id).first().qty == 7
     assert MovementDocument.query.get(doc.id).total_received_qty() == 22
+
+
+def test_ozon_act_matches_goods_by_ozon_article_not_barcode(db, client_logged_in):
+    from wms.models import OzonArticleMapping
+
+    doc, sender, dest, n1, n2, boxes, _ = _setup(ozon=True)
+    db.session.add_all([
+        MovementCargoPlace(document_id=doc.id, box_id=boxes[0].id, box_number="BOX-A1", cargo_barcode="1000000000000001"),
+        MovementCargoPlace(document_id=doc.id, box_id=boxes[1].id, box_number="BOX-A2", cargo_barcode="1000000000000002"),
+        MovementCargoPlace(document_id=doc.id, box_id=boxes[2].id, box_number="BOX-A3", cargo_barcode="1000000000000003"),
+        OzonArticleMapping(barcode=n1.barcode, article="ШАПКА-1"),
+        OzonArticleMapping(barcode=n2.barcode, article="СВИТЕР-2"),
+    ])
+    db.session.commit()
+    report = _ozon_report([
+        # баркод в отчёте искажён (потерян/лишний знак), товар определяется по артикулу
+        ("1000000000000001", "999", 10, 7, "ШАПКА-1"),
+        ("1000000000000002", "", 5, 5, "свитер-2"),  # регистр артикула не важен
+        # артикула нет в справочнике — запасной путь по баркоду строки
+        ("1000000000000003", "0" + n1.barcode, 4, 4, "НЕТ-В-СПРАВОЧНИКЕ"),
+        ("1000000000000003", n2.barcode, 6, 6, "СВИТЕР-2"),
+    ])
+    resp = client_logged_in.post(
+        f"/movement/{doc.id}/receive/act",
+        data={"act_file": (report, "r.xlsx")}, content_type="multipart/form-data",
+    )
+    html = resp.get_data(as_text=True)
+    assert "act_payload" in html
+    _confirm(client_logged_in, doc, html)
+    assert BoxItem.query.filter_by(box_id=boxes[0].id, nomenclature_id=n1.id).first().qty == 7
+    assert MovementDocument.query.get(doc.id).total_received_qty() == 22
+
+
+def test_ozon_act_unmapped_article_and_unknown_barcode_blocks(db, client_logged_in):
+    doc, sender, dest, n1, n2, boxes, _ = _setup(ozon=True)
+    db.session.add(MovementCargoPlace(document_id=doc.id, box_id=boxes[0].id, box_number="BOX-A1", cargo_barcode="1000000000000001"))
+    db.session.commit()
+    report = _ozon_report([("1000000000000001", "123", 10, 7, "НЕТ-ТАКОГО")])
+    html = client_logged_in.post(
+        f"/movement/{doc.id}/receive/act",
+        data={"act_file": (report, "r.xlsx")}, content_type="multipart/form-data",
+    ).get_data(as_text=True)
+    assert "НЕТ-ТАКОГО" in html and "act_payload" not in html

@@ -27,6 +27,10 @@ _BOX_HEADERS = (
     "шк гм", "штрихкод гм", "шк грузоместа", "штрихкод грузоместа", "номер грузоместа", "грузоместо", "грузовое место", "гм",
 )
 _BARCODE_HEADERS = ("баркод", "штрихкод товара", "штрихкод", "шк товара", "barcode")
+_ARTICLE_HEADERS = ("артикул товара", "артикул", "артикул продавца")
+# Ключ позиции в режиме «по артикулу» (Ozon): артикул и, запасным путём,
+# баркод той же строки. Префикс не совпадает ни с одним реальным баркодом.
+ARTICLE_KEY_PREFIX = "\x00art:"
 _QTY_HEADERS = (
     "кол-во", "количество", "кол во", "принято", "принято на склад (шт.)", "принято на склад", "qty",
 )
@@ -151,9 +155,9 @@ def _iter_sheet_rows_openpyxl(data, wanted):
         yield ws.iter_rows(values_only=True)
 
 
-def _parse_rows(rows, wanted):
+def _parse_rows(rows, wanted, prefer_article=False):
     """rows — итератор строк одного листа. None, если шапки нет."""
-    box_col = bc_col = qty_col = None
+    box_col = bc_col = qty_col = art_col = None
     header_found = False
     header_row = 0
     boxes = OrderedDict()
@@ -169,13 +173,18 @@ def _parse_rows(rows, wanted):
                 qty_col = _find_column(headers, _QTY_HEADERS)
                 header_found = True
                 header_row = i
-                wanted.update(c for c in (box_col, bc_col, qty_col) if c is not None)
+                if prefer_article:
+                    art_col = _find_column(headers, _ARTICLE_HEADERS)
+                wanted.update(c for c in (box_col, bc_col, qty_col, art_col) if c is not None)
             continue
         if len(row) <= max(box_col, bc_col):
             continue
         box = normalize_code(row[box_col])
         barcode = normalize_code(row[bc_col])
-        if not box or not barcode:
+        article = ""
+        if art_col is not None and art_col < len(row):
+            article = normalize_code(row[art_col])
+        if not box or not (barcode or article):
             continue
         if i - header_row <= 3 and _is_column_numbering_row(row):
             continue
@@ -187,8 +196,9 @@ def _parse_rows(rows, wanted):
                 continue
         if qty <= 0:
             continue
+        key = f"{ARTICLE_KEY_PREFIX}{article}\x1f{barcode}" if article else barcode
         items = boxes.setdefault(box, {})
-        items[barcode] = items.get(barcode, 0) + qty
+        items[key] = items.get(key, 0) + qty
         total += qty
     if not header_found:
         return None
@@ -218,12 +228,14 @@ def unwrap_archive(data):
     return zf.read(xlsx[0])
 
 
-def parse_act(data):
+def parse_act(data, prefer_article=False):
     """Возвращает (boxes, total_qty): boxes = OrderedDict {ключ: {баркод: qty}}.
 
     Шапка ищется среди первых 40 строк (в акте WB она двухстрочная — над
     ней группа «Фактически принято»): нужна строка, где есть и колонка
-    короба, и колонка баркода. Строки читаются потоком и сразу
+    короба, и колонка баркода. prefer_article (Ozon): позиции ключуются
+    артикулом из акта (ARTICLE_KEY_PREFIX) — баркод в отчётах Ozon
+    теряет/добавляет ведущий ноль, а артикул у нас уже есть в справочнике. Строки читаются потоком и сразу
     суммируются — акт на десятки тысяч строк не держится в памяти."""
     if not data:
         raise ActParseError("Файл пустой")
@@ -238,7 +250,7 @@ def parse_act(data):
             wanted = set()
             for rows in reader(data, wanted):
                 wanted.clear()
-                result = _parse_rows(rows, wanted)
+                result = _parse_rows(rows, wanted, prefer_article)
                 if result is not None:
                     return result
             break  # файл прочитан, но шапки нет ни на одном листе

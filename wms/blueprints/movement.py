@@ -18,12 +18,13 @@ from ..models import (
     MovementLine,
     MovementReceiptDiscrepancy,
     Nomenclature,
+    OzonArticleMapping,
     ShipmentPlanLine,
     User,
     Warehouse,
     UnplacedStock,
 )
-from ..utils.acceptance_act import ActParseError, MAX_ACT_BYTES, parse_act
+from ..utils.acceptance_act import ARTICLE_KEY_PREFIX, ActParseError, MAX_ACT_BYTES, parse_act
 from ..utils.excel_io import export_movement_summary_to_excel, export_movement_to_excel, timestamp_for_filename
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
@@ -1485,6 +1486,26 @@ def _nomenclature_for_act_barcode(code):
     return item
 
 
+def _nomenclature_for_act_item(key):
+    """Позиция акта → товар. Обычный ключ — баркод. Ключ Ozon
+    «артикул␟баркод»: сначала по справочнику артикулов Ozon
+    (OzonArticleMapping: артикул → баркод → товар), баркод строки — запасной
+    путь. Возвращает (товар, описание для сообщения)."""
+    if not key.startswith(ARTICLE_KEY_PREFIX):
+        return _nomenclature_for_act_barcode(key), key
+    article, _, barcode = key[len(ARTICLE_KEY_PREFIX):].partition("\x1f")
+    mappings = OzonArticleMapping.query.filter(OzonArticleMapping.article == article).all()
+    if not mappings:
+        mappings = OzonArticleMapping.query.filter(
+            func.lower(OzonArticleMapping.article) == article.lower()
+        ).all()
+    for mapping in mappings:
+        item = _nomenclature_for_act_barcode(mapping.barcode)
+        if item is not None:
+            return item, article
+    return _nomenclature_for_act_barcode(barcode), article
+
+
 def _reconcile_with_act(doc, act_boxes):
     """Сверка акта приёмки с составом коробов перемещения. Ничего не
     записывает. Ключ короба в акте: у WB — наш номер короба, у Ozon —
@@ -1517,11 +1538,11 @@ def _reconcile_with_act(doc, act_boxes):
         target = act_by_box.setdefault(box_number, {})
         for code, qty in items.items():
             if code not in barcode_cache:
-                barcode_cache[code] = _nomenclature_for_act_barcode(code)
-            nom = barcode_cache[code]
+                barcode_cache[code] = _nomenclature_for_act_item(code)
+            nom, label = barcode_cache[code]
             if nom is None:
-                if code not in result["unknown_barcodes"]:
-                    result["unknown_barcodes"].append(code)
+                if label not in result["unknown_barcodes"]:
+                    result["unknown_barcodes"].append(label)
                 continue
             target[nom.id] = target.get(nom.id, 0) + qty
 
@@ -1562,9 +1583,9 @@ def _reconcile_with_act(doc, act_boxes):
         result["error"] = "Ни один короб из акта не найден в этом перемещении — нечего принимать."
     elif result["unknown_barcodes"]:
         result["error"] = (
-            "В акте есть баркоды, которых нет в номенклатуре: "
+            "В акте есть товары, которых нет в номенклатуре (для Ozon — артикулы без сопоставления в «Артикулы Ozon»): "
             + ", ".join(result["unknown_barcodes"][:10])
-            + ". Добавьте их товару (основной или доп. штрихкод) и загрузите акт снова."
+            + ". Добавьте сопоставление артикула/штрихкод и загрузите акт снова."
         )
     return result
 
@@ -1647,7 +1668,7 @@ def receive_act(doc_id):
         return redirect(url_for("movement.receive", doc_id=doc.id))
     data = upload.read(MAX_ACT_BYTES + 1)
     try:
-        act_boxes, act_total = parse_act(data)
+        act_boxes, act_total = parse_act(data, prefer_article=doc.to_warehouse.marketplace == "ozon")
     except ActParseError as exc:
         flash(str(exc), "danger")
         return redirect(url_for("movement.receive", doc_id=doc.id))
