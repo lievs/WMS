@@ -1914,3 +1914,27 @@ def test_trip_vehicle_picked_from_sc_cars(db, client):
     db.session.refresh(trip)
     assert trip.vehicle_id == sc_car.id and trip.car_plate == "Е777КХ09"
     assert trip.car_model == "ГАЗель" and trip.capacity() == 150 and trip.status == "assigned"
+
+
+def test_operator_receives_all_boxes_if_driver_forgot_to_scan(db, client):
+    """Водитель забыл отсканировать — оператор принимает все короба заявки на
+    склад одной кнопкой."""
+    client_user = _user("client1", "mvb_client", _mvb_client())
+    _login(client, client_user)
+    order = _confirmed_order(client)
+    driver = _user("driver", "mvb_driver")
+    _login(client, driver)
+    client.post("/mvb/scan/pickup", data={"barcode": order.boxes[0].barcode})
+
+    _login(client, client_user)
+    assert client.post(f"/mvb/orders/{order.id}/receive-all").status_code == 302
+    assert order.boxes[1].status == "created"  # клиенту кнопка не доступна
+
+    _login(client, _user("operator", "mvb_staff"))
+    page = client.get(f"/mvb/orders/{order.id}").get_data(as_text=True)
+    assert f"Принять все короба на склад ({len(order.boxes)})" in page
+    client.post(f"/mvb/orders/{order.id}/receive-all")
+    db.session.refresh(order)
+    assert {b.status for b in order.boxes} == {"received"}
+    assert all(b.received_at for b in order.boxes) and order.pickup_done_at is not None
+    assert "Принять все короба на склад" not in client.get(f"/mvb/orders/{order.id}").get_data(as_text=True)

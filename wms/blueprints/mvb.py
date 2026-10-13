@@ -1160,6 +1160,32 @@ def _same_direction(line, marketplace, destination):
 # ---------- назначение водителя ----------
 
 
+@bp.route("/orders/<int:order_id>/receive-all", methods=["POST"])
+def order_receive_all(order_id):
+    """Оператор принимает на склад МВБ все еще не принятые короба заявки
+    (созданные и забранные) — если водитель забыл их отсканировать."""
+    if not _require_operator():
+        return redirect(url_for("mvb.order_detail", order_id=order_id))
+    order = MvbOrder.query.get_or_404(order_id)
+    if order.status != "confirmed":
+        abort(400)
+    boxes = [b for b in order.boxes if b.status in ("created", "picked_up")]
+    if not boxes:
+        flash("Все короба заявки уже приняты на склад", "info")
+        return redirect(url_for("mvb.order_detail", order_id=order.id))
+    now = datetime.utcnow()
+    for box in boxes:
+        if box.status == "created" and order.delivery_method == "pickup":
+            box.picked_up_at = box.picked_up_at or now
+            box.picked_up_by_id = box.picked_up_by_id or order.driver_id
+        _move_box(box, "received", now)
+    if order.delivery_method == "pickup":
+        order.pickup_done_at = order.pickup_done_at or now
+    db.session.commit()
+    flash(f"Принято на склад МВБ: {len(boxes)} кор. по заявке {order.number}", "success")
+    return redirect(url_for("mvb.order_detail", order_id=order.id))
+
+
 @bp.route("/orders/<int:order_id>/driver", methods=["POST"])
 def order_assign_driver(order_id):
     if not _require_operator():

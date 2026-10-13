@@ -16,6 +16,12 @@
     {% elif order.status == 'confirmed' %}
       <a class="btn btn-success" target="_blank" href="{{ url_for('mvb.order_labels_pdf', order_id=order.id) }}">🖨 Этикетки на все короба</a>
     {% endif %}
+    {% set not_received = order.boxes|selectattr('status', 'in', ['created', 'picked_up'])|list|length %}
+    {% if mvb_is_operator and order.status == 'confirmed' and not_received %}
+      <form method="post" action="{{ url_for('mvb.order_receive_all', order_id=order.id) }}" onsubmit="return confirm('Принять на склад МВБ все непринятые короба заявки ({{ not_received }} кор.)?')">
+        <button class="btn btn-outline-success">📥 Принять все короба на склад ({{ not_received }})</button>
+      </form>
+    {% endif %}
     {% if can_edit and order.status != 'cancelled' and counts.created == order.boxes|length %}
       <form method="post" action="{{ url_for('mvb.order_cancel', order_id=order.id) }}" onsubmit="return confirm('Отменить заявку?')">
         <button class="btn btn-outline-danger">Отменить</button>
