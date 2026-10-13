@@ -15,7 +15,7 @@ def _payload(client, query=""):
     import json
     import re
 
-    html = client.get("/reports/employee-output" + query).get_data(as_text=True)
+    html = client.get("/production/employee-output" + query).get_data(as_text=True)
     return json.loads(re.search(r'<script type="application/json" id="eo-data">(.*?)</script>', html, re.S).group(1))
 
 
@@ -94,7 +94,7 @@ def test_dashboard_aggregates_facts_and_applies_plans(db, client_logged_in, admi
     assert data["plans"]["pack"][uid]["def"] == [200.0, 4]
 
     # план на конкретную дату перекрывает план по умолчанию
-    client_logged_in.post("/reports/employee-output/plans", data={
+    client_logged_in.post("/production/employee-output/plans", data={
         f"day__pack__{worker.id}__{today.isoformat()}__qty": "100",
         f"day__pack__{worker.id}__{today.isoformat()}__boxes": "",
         f"def__pick__{worker.id}__boxes": "3",
@@ -113,12 +113,12 @@ def test_one_day_plan_form_sets_and_clears_plan(db, client_logged_in, admin_user
     db.session.add(worker)
     db.session.commit()
     day = "2026-09-10"
-    client_logged_in.post("/reports/employee-output/plans", data={
+    client_logged_in.post("/production/employee-output/plans", data={
         "one_user": str(worker.id), "one_kind": "pick", "one_date": day, "one_qty": "", "one_boxes": "25",
     })
     plan = WorkPlan.query.filter_by(user_id=worker.id, kind="pick", plan_date=date(2026, 9, 10)).first()
     assert plan.boxes_plan == 25
-    client_logged_in.post("/reports/employee-output/plans", data={
+    client_logged_in.post("/production/employee-output/plans", data={
         "one_user": str(worker.id), "one_kind": "pick", "one_date": day, "one_qty": "", "one_boxes": "",
     })
     assert WorkPlan.query.count() == 0
@@ -132,7 +132,7 @@ def test_blank_plan_removes_it_and_only_admin_can_edit(db, client_logged_in, adm
     db.session.add(WorkPlan(user_id=worker.id, kind="pick", plan_date=None, boxes_plan=5))
     db.session.commit()
 
-    client_logged_in.post("/reports/employee-output/plans", data={f"def__pick__{worker.id}__boxes": ""})
+    client_logged_in.post("/production/employee-output/plans", data={f"def__pick__{worker.id}__boxes": ""})
     assert WorkPlan.query.count() == 0
 
 
@@ -144,7 +144,7 @@ def test_non_admin_cannot_change_plans(db, client):
     with client.session_transaction() as sess:
         sess["_user_id"] = str(worker.id)
         sess["_fresh"] = True
-    resp = client.post("/reports/employee-output/plans", data={f"def__pick__{worker.id}__boxes": "9"})
+    resp = client.post("/production/employee-output/plans", data={f"def__pick__{worker.id}__boxes": "9"})
     assert resp.status_code == 302
     assert WorkPlan.query.count() == 0
 
@@ -181,7 +181,7 @@ def test_dashboard_excludes_mvb_logistics_users(db, client_logged_in, admin_user
     for u in (worker, client, driver):
         db.session.add(WorkEvent(user_id=u.id, work_date=today, kind="pick", box_id=u.id, qty=1))
     db.session.commit()
-    html = client_logged_in.get("/reports/employee-output").get_data(as_text=True)
+    html = client_logged_in.get("/production/employee-output").get_data(as_text=True)
     assert "Складской Сергей" in html
     assert "Клиент Логистики" not in html and "Водитель Виктор" not in html
 
@@ -201,7 +201,7 @@ def test_dashboard_page_embeds_chart_data_for_selected_period(db, client_logged_
         WorkPlan(user_id=worker.id, kind="pack", plan_date=None, qty_plan=100, boxes_plan=3),
     ])
     db.session.commit()
-    html = client_logged_in.get("/reports/employee-output?date_from=2026-09-01&date_to=2026-09-03").get_data(as_text=True)
+    html = client_logged_in.get("/production/employee-output?date_from=2026-09-01&date_to=2026-09-03").get_data(as_text=True)
     data = json.loads(re.search(r'<script type="application/json" id="eo-data">(.*?)</script>', html, re.S).group(1))
     assert data["dates"] == ["2026-09-01", "2026-09-02", "2026-09-03"]
     uid = str(worker.id)
@@ -239,14 +239,14 @@ def test_backfill_restores_history_from_document_authors_and_is_idempotent(db, c
     ])
     db.session.commit()
 
-    client_logged_in.post("/reports/employee-output/backfill")
-    client_logged_in.post("/reports/employee-output/backfill")  # повтор не задваивает
+    client_logged_in.post("/production/employee-output/backfill")
+    client_logged_in.post("/production/employee-output/backfill")  # повтор не задваивает
     events = WorkEvent.query.filter_by(ref_kind="history").all()
     assert sorted((e.kind, e.qty) for e in events) == [("pack", 5), ("pack", 7), ("pick", 12)]
     assert {e.user_id for e in events} == {author.id}
     assert {e.work_date for e in events} == {date(2026, 8, 10)}
 
-    html = client_logged_in.get("/reports/employee-output?date_from=2026-08-01&date_to=2026-08-31").get_data(as_text=True)
+    html = client_logged_in.get("/production/employee-output?date_from=2026-08-01&date_to=2026-08-31").get_data(as_text=True)
     assert "восстановленные (приблизительные) данные" in html
 
 
@@ -269,7 +269,7 @@ def test_backfill_keeps_real_events_and_skips_period_after_them(db, client_logge
     db.session.add(ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=9, box_id=box.id))
     db.session.commit()
 
-    client_logged_in.post("/reports/employee-output/backfill")
+    client_logged_in.post("/production/employee-output/backfill")
     assert WorkEvent.query.filter_by(ref_kind="history").count() == 0
     assert WorkEvent.query.filter(WorkEvent.ref_kind.is_(None)).count() == 1
 
@@ -282,5 +282,30 @@ def test_backfill_requires_admin(db, client):
     with client.session_transaction() as sess:
         sess["_user_id"] = str(worker.id)
         sess["_fresh"] = True
-    client.post("/reports/employee-output/backfill")
+    client.post("/production/employee-output/backfill")
     assert WorkEvent.query.count() == 0
+
+
+def test_old_reports_url_redirects_to_production_section(db, client_logged_in):
+    resp = client_logged_in.get("/reports/employee-output?date_from=2026-09-01&date_to=2026-09-03")
+    assert resp.status_code == 302
+    assert resp.headers["Location"].startswith("/production/employee-output")
+    assert "date_from=2026-09-01" in resp.headers["Location"]
+
+
+def test_production_index_links_to_dashboard_and_reports_index_does_not(db, client_logged_in):
+    assert "Выработка сотрудников" in client_logged_in.get("/production/").get_data(as_text=True)
+    assert "employee-output" not in client_logged_in.get("/reports/").get_data(as_text=True)
+
+
+def test_production_only_worker_cannot_open_dashboard(db, client):
+    worker = User(username="prod_only", full_name="Производственник", role="production")
+    worker.set_password("pw12345")
+    db.session.add(worker)
+    db.session.commit()
+    with client.session_transaction() as sess:
+        sess["_user_id"] = str(worker.id)
+        sess["_fresh"] = True
+    resp = client.get("/production/employee-output")
+    assert resp.status_code == 302 and resp.headers["Location"].endswith("/production/")
+    assert "Выработка сотрудников" not in client.get("/production/").get_data(as_text=True)
