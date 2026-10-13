@@ -1,6 +1,6 @@
 import statistics
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from flask import Blueprint, Response, flash, redirect, render_template, request, url_for
 from flask_login import current_user
@@ -18,7 +18,10 @@ from ..models import (
     ProductCategory,
     ReceivingDocument,
     ReceivingLine,
+    User,
     Warehouse,
+    WorkEvent,
+    WorkPlan,
 )
 from ..utils.excel_io import (
     export_movement_to_excel,
@@ -29,6 +32,7 @@ from ..utils.excel_io import (
     timestamp_for_filename,
 )
 from ..utils.http import content_disposition
+from ..utils.work_log import work_day
 
 bp = Blueprint("reports", __name__)
 
@@ -522,3 +526,167 @@ def box_anomalies_report():
         threshold=threshold,
         boxes_by_nomenclature=boxes_by_nomenclature,
     )
+
+
+# --- Выработка сотрудников -------------------------------------------------
+
+WORK_KINDS = (
+    ("pack", "Упаковка", "Сколько товара положил в короба и в скольких коробах"),
+    ("pick", "Сборка на отгрузку", "Сколько коробов собрал в перемещения"),
+)
+
+
+def _parse_day(value):
+    parsed = _parse_date(value)
+    return parsed.date() if parsed else None
+
+
+def _percent(fact, plan):
+    if not plan:
+        return None
+    return round(fact / plan * 100)
+
+
+def _employee_output_context(date_from, date_to, user_id):
+    events = (
+        db.session.query(
+            WorkEvent.kind,
+            WorkEvent.user_id,
+            WorkEvent.work_date,
+            db.func.sum(WorkEvent.qty),
+            db.func.count(db.func.distinct(WorkEvent.box_id)),
+        )
+        .filter(WorkEvent.work_date >= date_from, WorkEvent.work_date <= date_to)
+        .group_by(WorkEvent.kind, WorkEvent.user_id, WorkEvent.work_date)
+    )
+    if user_id:
+        events = events.filter(WorkEvent.user_id == user_id)
+    facts = {}
+    for kind, uid, day, qty, boxes in events.all():
+        facts[(kind, uid, day)] = (qty or 0, boxes or 0)
+
+    defaults, overrides = {}, {}
+    for plan in WorkPlan.query.all():
+        if plan.plan_date is None:
+            defaults[(plan.kind, plan.user_id)] = plan
+        elif date_from <= plan.plan_date <= date_to:
+            overrides[(plan.kind, plan.user_id, plan.plan_date)] = plan
+
+    users = {u.id: u for u in User.query.all()}
+    sections = []
+    for kind, title, hint in WORK_KINDS:
+        rows = []
+        totals = {}
+        for (k, uid, day), (qty, boxes) in sorted(
+            facts.items(), key=lambda item: (item[0][2], users[item[0][1]].display_name() if item[0][1] in users else ""),
+            reverse=True,
+        ):
+            if k != kind:
+                continue
+            default = defaults.get((kind, uid))
+            override = overrides.get((kind, uid, day))
+            plan = override or default
+            plan_qty = plan.qty_plan if plan else None
+            plan_boxes = plan.boxes_plan if plan else None
+            rows.append({
+                "user": users.get(uid), "user_id": uid, "day": day, "qty": qty, "boxes": boxes,
+                "plan_qty": plan_qty, "plan_boxes": plan_boxes,
+                "override_qty": override.qty_plan if override else None,
+                "override_boxes": override.boxes_plan if override else None,
+                "pct_qty": _percent(qty, plan_qty), "pct_boxes": _percent(boxes, plan_boxes),
+            })
+            total = totals.setdefault(uid, {"user": users.get(uid), "qty": 0, "boxes": 0, "days": 0})
+            total["qty"] += qty
+            total["boxes"] += boxes
+            total["days"] += 1
+        sections.append({
+            "kind": kind, "title": title, "hint": hint, "rows": rows,
+            "totals": sorted(totals.values(), key=lambda t: -t["boxes"]),
+        })
+    return {
+        "sections": sections,
+        "defaults": defaults,
+        "users": sorted((u for u in users.values() if u.is_active_user), key=lambda u: u.display_name().lower()),
+    }
+
+
+@bp.route("/employee-output")
+def employee_output():
+    today = work_day()
+    date_from = _parse_day(request.args.get("date_from")) or (today - timedelta(days=6))
+    date_to = _parse_day(request.args.get("date_to")) or today
+    user_id = request.args.get("user_id", type=int)
+    context = _employee_output_context(date_from, date_to, user_id)
+    return render_template(
+        "reports/employee_output.html",
+        date_from=date_from, date_to=date_to, user_id=user_id, kinds=WORK_KINDS, **context,
+    )
+
+
+def _number_or_none(raw, as_int=False):
+    raw = (raw or "").strip().replace(",", ".")
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if value < 0:
+        return None
+    return int(round(value)) if as_int else value
+
+
+def _save_plan(user_id, kind, plan_date, qty_plan, boxes_plan):
+    plan = WorkPlan.query.filter_by(user_id=user_id, kind=kind, plan_date=plan_date).first()
+    if qty_plan is None and boxes_plan is None:
+        if plan:
+            db.session.delete(plan)
+        return
+    if plan is None:
+        plan = WorkPlan(user_id=user_id, kind=kind, plan_date=plan_date)
+        db.session.add(plan)
+    plan.qty_plan = qty_plan
+    plan.boxes_plan = boxes_plan
+
+
+@bp.route("/employee-output/plans", methods=["POST"])
+def employee_output_save_plans():
+    """Сохранение планов с формы дашборда. Имена полей:
+    def__<kind>__<user_id>__qty|boxes — план по умолчанию (на каждый день),
+    day__<kind>__<user_id>__<YYYY-MM-DD>__qty|boxes — на конкретную дату.
+    Пустое значение убирает план."""
+    back = url_for(
+        "reports.employee_output",
+        date_from=request.form.get("date_from") or None,
+        date_to=request.form.get("date_to") or None,
+        user_id=request.form.get("user_id") or None,
+    )
+    if not current_user.is_admin:
+        flash("План выработки может менять только администратор", "danger")
+        return redirect(back)
+
+    pending = {}
+    for name, raw in request.form.items():
+        parts = name.split("__")
+        if parts[0] == "def" and len(parts) == 4:
+            _, kind, uid, field = parts
+            plan_date = None
+        elif parts[0] == "day" and len(parts) == 5:
+            _, kind, uid, day, field = parts
+            plan_date = _parse_day(day)
+            if plan_date is None:
+                continue
+        else:
+            continue
+        if kind not in ("pack", "pick") or field not in ("qty", "boxes") or not uid.isdigit():
+            continue
+        entry = pending.setdefault((int(uid), kind, plan_date), {})
+        entry[field] = _number_or_none(raw, as_int=field == "boxes")
+
+    valid_users = {u.id for u in User.query.filter(User.id.in_({key[0] for key in pending})).all()} if pending else set()
+    for (uid, kind, plan_date), fields in pending.items():
+        if uid in valid_users:
+            _save_plan(uid, kind, plan_date, fields.get("qty"), fields.get("boxes"))
+    db.session.commit()
+    flash("План выработки сохранен", "success")
+    return redirect(back)

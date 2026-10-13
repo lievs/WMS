@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Выработка сотрудников{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('reports.index') }}">&larr; Отчеты</a></p>
+<h3 class="mb-3">Выработка сотрудников</h3>
+
+<div class="card p-3 mb-3">
+  <form method="get" class="row g-2 align-items-end">
+    <div class="col-md-3">
+      <label class="form-label">С даты</label>
+      <input type="date" name="date_from" class="form-control" value="{{ date_from.isoformat() }}">
+    </div>
+    <div class="col-md-3">
+      <label class="form-label">По дату</label>
+      <input type="date" name="date_to" class="form-control" value="{{ date_to.isoformat() }}">
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Сотрудник</label>
+      <select name="user_id" class="form-select">
+        <option value="">Все сотрудники</option>
+        {% for u in users %}<option value="{{ u.id }}" {% if user_id == u.id %}selected{% endif %}>{{ u.display_name() }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-md-2"><button type="submit" class="btn btn-primary w-100">Показать</button></div>
+  </form>
+</div>
+
+<div class="alert alert-light border small">
+  Учёт ведётся с момента обновления: <b>упаковка</b> — когда сотрудник кладёт товар в короб
+  (приёмка прямо в короб и «Размещение → упаковать»), <b>сборка на отгрузку</b> — когда он добавляет короб
+  в перемещение. За прошлые даты данных нет. Дата — по московскому времени.
+</div>
+
+<form method="post" action="{{ url_for('reports.employee_output_save_plans') }}">
+  <input type="hidden" name="date_from" value="{{ date_from.isoformat() }}">
+  <input type="hidden" name="date_to" value="{{ date_to.isoformat() }}">
+  <input type="hidden" name="user_id" value="{{ user_id or '' }}">
+
+  {% for section in sections %}
+  <div class="card p-3 mb-4">
+    <div class="d-flex justify-content-between flex-wrap gap-2">
+      <div>
+        <h5 class="mb-0">{{ section.title }}</h5>
+        <div class="text-muted small mb-2">{{ section.hint }}</div>
+      </div>
+    </div>
+
+    {% if section.totals %}
+    <div class="d-flex flex-wrap gap-2 mb-3">
+      {% for t in section.totals %}
+      <div class="border rounded px-3 py-2 small">
+        <b>{{ t.user.display_name() if t.user else '—' }}</b><br>
+        {% if section.kind == 'pack' %}{{ t.qty | round(0) | int }} шт · {% endif %}{{ t.boxes }} кор. · {{ t.days }} дн.
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead>
+        <tr>
+          <th>Дата</th>
+          <th>Сотрудник</th>
+          {% if section.kind == 'pack' %}<th class="text-end">Товаров, шт</th>{% endif %}
+          <th class="text-end">Коробов</th>
+          {% if section.kind == 'pack' %}<th class="text-end">План, шт</th><th>%</th>{% endif %}
+          <th class="text-end">План, кор.</th>
+          <th>% кор.</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in section.rows %}
+        {% set day = r.day.isoformat() %}
+        <tr>
+          <td>{{ r.day.strftime('%d.%m.%Y') }}</td>
+          <td>{{ r.user.display_name() if r.user else '—' }}</td>
+          {% if section.kind == 'pack' %}<td class="text-end">{{ r.qty | round(0) | int }}</td>{% endif %}
+          <td class="text-end">{{ r.boxes }}</td>
+          {% if section.kind == 'pack' %}
+          <td class="text-end" style="width:120px">
+            {% if current_user.is_admin %}
+            <input type="number" min="0" step="1" class="form-control form-control-sm text-end"
+                   name="day__{{ section.kind }}__{{ r.user_id }}__{{ day }}__qty"
+                   value="{{ r.override_qty | int if r.override_qty is not none else '' }}"
+                   placeholder="{{ r.plan_qty | int if r.plan_qty is not none else '—' }}">
+            {% else %}{{ r.plan_qty | int if r.plan_qty is not none else '—' }}{% endif %}
+          </td>
+          <td>
+            {% if r.pct_qty is not none %}<span class="badge {{ 'bg-success' if r.pct_qty >= 100 else ('bg-warning text-dark' if r.pct_qty >= 70 else 'bg-danger') }}">{{ r.pct_qty }}%</span>{% else %}<span class="text-muted">—</span>{% endif %}
+          </td>
+          {% endif %}
+          <td class="text-end" style="width:120px">
+            {% if current_user.is_admin %}
+            <input type="number" min="0" step="1" class="form-control form-control-sm text-end"
+                   name="day__{{ section.kind }}__{{ r.user_id }}__{{ day }}__boxes"
+                   value="{{ r.override_boxes if r.override_boxes is not none else '' }}"
+                   placeholder="{{ r.plan_boxes if r.plan_boxes is not none else '—' }}">
+            {% else %}{{ r.plan_boxes if r.plan_boxes is not none else '—' }}{% endif %}
+          </td>
+          <td>
+            {% if r.pct_boxes is not none %}<span class="badge {{ 'bg-success' if r.pct_boxes >= 100 else ('bg-warning text-dark' if r.pct_boxes >= 70 else 'bg-danger') }}">{{ r.pct_boxes }}%</span>{% else %}<span class="text-muted">—</span>{% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8" class="text-muted">Нет данных за выбранный период</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% if current_user.is_admin and section.rows %}
+    <div class="text-muted small mt-2">В поле «План» серым показан план по умолчанию; впишите число, чтобы задать план именно на этот день.</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+  <div class="card p-3 mb-4">
+    <h5 class="mb-1">План по умолчанию (на каждый рабочий день)</h5>
+    <div class="text-muted small mb-2">Пусто — плана нет. Применяется ко всем дням, где нет плана на конкретную дату.</div>
+    <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead>
+        <tr><th>Сотрудник</th>
+          <th class="text-end">Упаковка: шт</th><th class="text-end">Упаковка: коробов</th>
+          <th class="text-end">Сборка: коробов</th></tr>
+      </thead>
+      <tbody>
+      {% for u in users %}
+        {% set pk = defaults.get(('pack', u.id)) %}
+        {% set pc = defaults.get(('pick', u.id)) %}
+        <tr>
+          <td>{{ u.display_name() }}</td>
+          {% if current_user.is_admin %}
+          <td style="width:140px"><input type="number" min="0" step="1" class="form-control form-control-sm text-end" name="def__pack__{{ u.id }}__qty" value="{{ pk.qty_plan | int if pk and pk.qty_plan is not none else '' }}"></td>
+          <td style="width:140px"><input type="number" min="0" step="1" class="form-control form-control-sm text-end" name="def__pack__{{ u.id }}__boxes" value="{{ pk.boxes_plan if pk and pk.boxes_plan is not none else '' }}"></td>
+          <td style="width:140px"><input type="number" min="0" step="1" class="form-control form-control-sm text-end" name="def__pick__{{ u.id }}__boxes" value="{{ pc.boxes_plan if pc and pc.boxes_plan is not none else '' }}"></td>
+          {% else %}
+          <td class="text-end">{{ pk.qty_plan | int if pk and pk.qty_plan is not none else '—' }}</td>
+          <td class="text-end">{{ pk.boxes_plan if pk and pk.boxes_plan is not none else '—' }}</td>
+          <td class="text-end">{{ pc.boxes_plan if pc and pc.boxes_plan is not none else '—' }}</td>
+          {% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  {% if current_user.is_admin %}
+  <button type="submit" class="btn btn-primary mb-4">💾 Сохранить план</button>
+  {% endif %}
+</form>
+{% endblock %}

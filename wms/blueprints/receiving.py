@@ -41,6 +41,7 @@ from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 from ..utils.receiving_invoice_import import InvoiceParseError, parse_invoice
 from ..utils.timezone import to_moscow
+from ..utils.work_log import log_pack
 
 bp = Blueprint("receiving", __name__)
 
@@ -767,6 +768,7 @@ def _receive_item_into_box(doc, box, item, qty, request_token=None):
         request_token=request_token or None,
     )
     db.session.add(line)
+    log_pack(current_user, box, item.id, qty)
     line, duplicate = _commit_receiving_add(line, request_token)
     if duplicate:
         return line, None, True

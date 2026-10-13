@@ -1252,6 +1252,50 @@ class ProductionRecord(db.Model):
         return f"<ProductionRecord {self.id}>"
 
 
+class WorkEvent(db.Model):
+    """Журнал выработки сотрудников для дашборда «Выработка сотрудников».
+
+    kind="pack" — товар помещён в короб (упаковка): qty — сколько единиц,
+    box_id — в какой короб. kind="pick" — короб собран на отгрузку (добавлен
+    в перемещение): qty — сколько единиц было в коробе в этот момент,
+    ref_kind/ref_id — документ перемещения (чтобы убрать событие, если короб
+    потом вынули из списка). work_date — рабочий день по московскому
+    времени. Пишется с момента появления журнала: за более ранние даты
+    данных нет (кто упаковывал — раньше нигде не сохранялось)."""
+
+    __tablename__ = "work_events"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    work_date = db.Column(db.Date, nullable=False, index=True)
+    kind = db.Column(db.String(10), nullable=False)  # pack | pick
+    box_id = db.Column(db.Integer, nullable=True)
+    nomenclature_id = db.Column(db.Integer, nullable=True)
+    qty = db.Column(db.Float, nullable=False, default=0)
+    ref_kind = db.Column(db.String(20), nullable=True)
+    ref_id = db.Column(db.Integer, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    user = db.relationship("User")
+
+
+class WorkPlan(db.Model):
+    """План выработки сотрудника на день. plan_date пустая — план по
+    умолчанию (на любой день), заполненная — на конкретную дату (перекрывает
+    план по умолчанию). qty_plan — единиц товара, boxes_plan — коробов."""
+
+    __tablename__ = "work_plans"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    kind = db.Column(db.String(10), nullable=False)  # pack | pick
+    plan_date = db.Column(db.Date, nullable=True)
+    qty_plan = db.Column(db.Float, nullable=True)
+    boxes_plan = db.Column(db.Integer, nullable=True)
+
+    user = db.relationship("User")
+
+
 class InventoryDocument(db.Model):
     """Лист инвентаризации по складу: сканируются короба один за другим,
     товар внутри каждого короба автоматически суммируется в общий список

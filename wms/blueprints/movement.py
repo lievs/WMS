@@ -32,6 +32,7 @@ from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 from ..utils.shipping_label_pdf import build_movement_shipping_labels_pdf
 from ..utils.timezone import to_moscow
+from ..utils.work_log import drop_pick_events, log_pick
 from ..utils.waybill_pdf import build_movement_waybills_pdf
 
 bp = Blueprint("movement", __name__)
@@ -669,6 +670,7 @@ def _create_movement_line(doc, box):
     )
     db.session.add(line)
     box.mark_scanned(current_user)
+    log_pick(current_user, box, doc.id)
     return line
 
 
@@ -1113,6 +1115,7 @@ def delete_line(doc_id, line_id):
         # там нужно убрать (см. composition_changed_at).
         doc.composition_changed_at = datetime.utcnow()
 
+    drop_pick_events(doc.id, line.box_id)
     db.session.delete(line)
     if doc.status == "collected":
         doc.status = "draft"
@@ -1228,6 +1231,7 @@ def delete_document(doc_id):
         source.status = "draft"
 
     number = doc.number
+    drop_pick_events(doc.id)
     db.session.delete(doc)
     db.session.commit()
     flash(f"Список перемещения {number} удален", "success")
