@@ -3,10 +3,12 @@
 {% block extra_head %}
 <style>
 /* Тёмная панель, как в макете: токены цвета в одном месте */
+body { background:#0f151b !important; color:#aab6c2; }
+footer.text-muted, .text-muted.small { color:#7f8d9a !important; }
 .eo { --eo-bg:#0f151b; --eo-surface:#17202a; --eo-ink:#e8eef3; --eo-ink2:#aab6c2; --eo-ink3:#7f8d9a; --eo-line:#28343f; --eo-grid:#212c36;
   --eo-accent:#4cb8d6; --eo-accent-ink:#0b1217;
   --eo-good:#5fd08f; --eo-good-bg:#17382a; --eo-warn:#f0b84a; --eo-warn-bg:#3a2f14; --eo-bad:#ff8a80; --eo-bad-bg:#40201e; --eo-plan:#e8eef3;
-  background:var(--eo-bg); color:var(--eo-ink); border-radius:10px; padding:16px; color-scheme:dark; }
+  background:transparent; color:var(--eo-ink); color-scheme:dark; }
 .eo[data-mode="pick"] { --eo-accent:#f09a55; }
 .eo a { color:var(--eo-accent); }
 .eo .text-muted { color:var(--eo-ink3) !important; }
@@ -63,6 +65,23 @@
   .eo .rrow { grid-template-columns:minmax(0,1fr) 62px 80px; }
   .eo .rrow .track, .eo .rrow .h-track, .eo .rrow .h-tot { display:none; }
 }
+.eo .split { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; align-items:start; margin-bottom:16px; }
+@media (max-width:1000px) { .eo .split { grid-template-columns:minmax(0,1fr); } }
+.eo .panel { background:var(--eo-surface); border:1px solid var(--eo-line); border-top:3px solid var(--eo-accent); border-radius:6px; padding:14px; min-width:0; display:flex; flex-direction:column; gap:14px; }
+.eo .panel[data-mode="pick"] { --eo-accent:#f09a55; }
+.eo .panel > header { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+.eo .panel h2 { font-size:16px; font-weight:600; margin:0; color:var(--eo-ink); }
+.eo .panel h2 span { color:var(--eo-accent); }
+.eo .panel .sec h3 { font-size:14px; font-weight:600; margin:0; }
+.eo .panel .sec { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.eo .mini { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+.eo .mini .kpi { padding:10px 12px; background:var(--eo-bg); }
+.eo .mini .kpi .val { font-size:22px; }
+.eo .mini .kpi .lab { font-size:11.5px; } .eo .mini .kpi .note { font-size:11px; }
+.eo .panel .rrow { grid-template-columns:minmax(90px,140px) minmax(60px,1fr) 46px 62px; gap:10px; padding:7px 0; }
+.eo .panel table.m td { min-width:36px; height:26px; font-size:11px; }
+.eo .panel table.m th.rowh { font-size:12px; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+@media (max-width:520px) { .eo .mini { grid-template-columns:minmax(0,1fr); } }
 </style>
 {% endblock %}
 {% block content %}
@@ -100,49 +119,35 @@
   </form>
 </div>
 
-<div class="mb-3">
-  <div class="seg" id="modeSeg" role="group" aria-label="Что показывать">
-    <button type="button" data-mode="pack" aria-pressed="true">Упаковка</button>
-    <button type="button" data-mode="pick" aria-pressed="false">Сборка на отгрузку</button>
-  </div>
+<div class="split">
+  <section class="panel" data-mode="pack" id="p-pack" aria-label="Упаковка">
+    <header><h2><span>▍</span>Упаковка</h2><span class="text-muted small">товары в коробах</span></header>
+    <div class="mini" data-slot="kpis"></div>
+    <div class="sec"><h3>По дням</h3>
+      <div class="chartbox" data-slot="chartbox"><svg data-slot="chart" role="img" aria-label="Выработка по дням: Упаковка" style="width:100%;height:auto;display:block"></svg><div class="tip" data-slot="tip" hidden></div></div>
+      <div class="legend"><span><i style="border-color:var(--eo-accent);border-top-width:8px;width:12px"></i>Факт</span><span><i style="border-color:var(--eo-plan);border-top-style:dashed"></i>План</span><span><i style="border-color:var(--eo-ink2);border-top-style:dotted"></i>Среднее</span></div>
+    </div>
+    <div class="sec"><h3>Рейтинг, среднее в день</h3><div class="text-muted small" data-slot="rankSub"></div><div data-slot="rank"></div></div>
+    <div class="sec"><h3>План по дням</h3><div class="matrix-wrap"><table class="m" data-slot="matrix"></table></div></div>
+  </section>
+  <section class="panel" data-mode="pick" id="p-pick" aria-label="Сборка на отгрузку">
+    <header><h2><span>▍</span>Сборка на отгрузку</h2><span class="text-muted small">короба в перемещениях</span></header>
+    <div class="mini" data-slot="kpis"></div>
+    <div class="sec"><h3>По дням</h3>
+      <div class="chartbox" data-slot="chartbox"><svg data-slot="chart" role="img" aria-label="Выработка по дням: Сборка на отгрузку" style="width:100%;height:auto;display:block"></svg><div class="tip" data-slot="tip" hidden></div></div>
+      <div class="legend"><span><i style="border-color:var(--eo-accent);border-top-width:8px;width:12px"></i>Факт</span><span><i style="border-color:var(--eo-plan);border-top-style:dashed"></i>План</span><span><i style="border-color:var(--eo-ink2);border-top-style:dotted"></i>Среднее</span></div>
+    </div>
+    <div class="sec"><h3>Рейтинг, среднее в день</h3><div class="text-muted small" data-slot="rankSub"></div><div data-slot="rank"></div></div>
+    <div class="sec"><h3>План по дням</h3><div class="matrix-wrap"><table class="m" data-slot="matrix"></table></div></div>
+  </section>
 </div>
 
-<div class="kpis" id="kpis"></div>
-
-<div class="card p-3 mb-3">
-  <h5 class="mb-0">Выработка по дням</h5>
-  <div class="text-muted small" id="chartSub"></div>
-  <div class="chartbox" id="chartbox">
-    <svg id="chart" role="img" aria-label="Столбчатый график выработки по дням с линией плана" style="width:100%;height:auto;display:block"></svg>
-    <div class="tip" id="tip" hidden></div>
-  </div>
-  <div class="legend">
-    <span><i style="border-color:var(--eo-accent);border-top-width:8px;width:12px"></i><span id="legMain">Факт</span></span>
-    <span><i style="border-color:var(--eo-plan);border-top-style:dashed"></i>План на день</span>
-    <span><i style="border-color:var(--eo-ink2);border-top-style:dotted"></i>Среднее за рабочий день</span>
-  </div>
-</div>
-
-<div class="card p-3 mb-3">
-  <h5 class="mb-0">Рейтинг и средняя выработка</h5>
-  <div class="text-muted small" id="rankSub"></div>
-  <div id="rank" style="margin-top:10px"></div>
-  <details class="mt-2">
-    <summary class="small" style="cursor:pointer;color:var(--eo-accent)">Показать таблицей</summary>
-    <div class="table-responsive"><table class="table table-sm mb-0" id="tbl" style="font-variant-numeric:tabular-nums"></table></div>
-  </details>
-</div>
-
-<div class="card p-3 mb-3">
-  <h5 class="mb-0">Кто и когда выполнил план</h5>
-  <div class="text-muted small">В клетке — выработка за день, цвет — процент плана. Выходные подсвечены в шапке. Без плана клетки не окрашиваются.</div>
-  <div class="matrix-wrap" style="margin-top:10px"><table class="m" id="matrix"></table></div>
-  <div class="keys">
-    <span><span class="badge2 b-good">100%+</span>план выполнен</span>
-    <span><span class="badge2 b-warn">70–99%</span>почти</span>
-    <span><span class="badge2 b-bad">&lt;70%</span>сильно ниже</span>
-    <span><span class="badge2 b-none">·</span>не работал</span>
-  </div>
+<div class="card p-3 mb-3 keys" style="flex-direction:row;margin-top:0">
+  <span><span class="badge2 b-good">100%+</span>план выполнен</span>
+  <span><span class="badge2 b-warn">70–99%</span>почти</span>
+  <span><span class="badge2 b-bad">&lt;70%</span>сильно ниже</span>
+  <span><span class="badge2 b-none">·</span>не работал</span>
+  <span class="text-muted small">Выходные подсвечены красным в шапке дней. Клетки без плана не окрашиваются.</span>
 </div>
 
 <div class="card p-3 mb-4">
@@ -243,14 +248,11 @@
 (function () {
   "use strict";
   var D = JSON.parse(document.getElementById("eo-data").textContent);
-  var root = document.getElementById("eo");
   var dates = D.dates.map(function (s) { var p = s.split("-"); return { iso: s, d: new Date(+p[0], +p[1] - 1, +p[2]) }; });
   var MODES = {
-    pack: { label: "Упаковка", main: 0, mainUnit: "шт", sec: 1, secUnit: "кор.", mainName: "товаров" },
-    pick: { label: "Сборка", main: 1, mainUnit: "кор.", sec: 0, secUnit: "шт", mainName: "коробов" }
+    pack: { main: 0, mainUnit: "шт", sec: 1, secUnit: "кор.", mainName: "товаров" },
+    pick: { main: 1, mainUnit: "кор.", sec: 0, secUnit: "шт", mainName: "коробов" }
   };
-  var state = { mode: "pack" };
-  var $ = function (id) { return document.getElementById(id); };
   var fmt = function (n) { return Math.round(n).toLocaleString("ru-RU"); };
   var dd = function (d) { return ("0" + d.getDate()).slice(-2) + "." + ("0" + (d.getMonth() + 1)).slice(-2); };
   var isWe = function (d) { return d.getDay() === 0 || d.getDay() === 6; };
@@ -258,143 +260,95 @@
   var cls = function (p) { return p === null ? "b-none" : p >= 100 ? "b-good" : p >= 70 ? "b-warn" : "b-bad"; };
   var esc = function (s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); };
 
-  function planFor(uid, iso, m) {
-    var pl = (D.plans[state.mode] || {})[uid];
+  function planFor(mode, uid, iso, m) {
+    var pl = (D.plans[mode] || {})[uid];
     if (!pl) return null;
     var v = null;
     if (pl.days && pl.days[iso]) v = pl.days[iso][m.main];
     if ((v === null || v === undefined) && pl.def) v = pl.def[m.main];
     return v === undefined ? null : v;
   }
+  function niceMax(v) { if (v <= 0) return 10; var p = Math.pow(10, Math.floor(Math.log10(v))), n = v / p;
+    return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p; }
 
-  function render() {
-    var m = MODES[state.mode];
-    root.dataset.mode = state.mode;
-    var byUser = D.data[state.mode] || {};
+  function renderPanel(mode) {
+    var root = document.getElementById("p-" + mode), slot = function (n) { return root.querySelector('[data-slot="' + n + '"]'); };
+    var m = MODES[mode], byUser = D.data[mode] || {};
     var uids = Object.keys(byUser).sort(function (a, b) { return D.users[a].localeCompare(D.users[b], "ru"); });
-    var perDay = dates.map(function () { return { sum: 0, sec: 0, plan: 0, who: [] }; });
+    var perDay = dates.map(function () { return { sum: 0, plan: 0, who: [] }; });
     var perEmp = uids.map(function (uid) {
-      var s = { uid: uid, name: D.users[uid], sum: 0, sec: 0, work: 0, planSum: 0, series: [], planDay: null };
+      var s = { uid: uid, name: D.users[uid], sum: 0, sec: 0, work: 0, planDay: null };
       dates.forEach(function (day, i) {
-        var c = byUser[uid][day.iso], plan = planFor(uid, day.iso, m);
-        var v = c ? c[m.main] : 0;
-        s.series.push(v);
-        if (c) {
-          s.sum += v; s.sec += c[m.sec]; s.work++;
-          if (plan) { s.planSum += plan; s.planDay = plan; perDay[i].plan += plan; }
-          perDay[i].sum += v; perDay[i].sec += c[m.sec]; perDay[i].who.push([s.name, v]);
-        }
+        var c = byUser[uid][day.iso]; if (!c) return;
+        var plan = planFor(mode, uid, day.iso, m), v = c[m.main];
+        s.sum += v; s.sec += c[m.sec]; s.work++;
+        if (plan) { s.planDay = plan; perDay[i].plan += plan; s.planSum = (s.planSum || 0) + plan; s.planFact = (s.planFact || 0) + v; }
+        perDay[i].sum += v; perDay[i].who.push([s.name, v]);
       });
       s.avg = s.work ? s.sum / s.work : 0;
       return s;
     });
     var total = perEmp.reduce(function (a, s) { return a + s.sum; }, 0);
-    var totalSec = perEmp.reduce(function (a, s) { return a + s.sec; }, 0);
     var workDays = perDay.filter(function (d) { return d.sum > 0; }).length;
     var empDays = perEmp.reduce(function (a, s) { return a + s.work; }, 0);
-    var avgPerEmpDay = empDays ? total / empDays : 0;
-    var planFact = perEmp.reduce(function (a, s) { return a + (s.planSum ? s.sum : 0); }, 0);
-    var planTotal = perEmp.reduce(function (a, s) { return a + s.planSum; }, 0);
+    var avgEmp = empDays ? total / empDays : 0;
+    var planTotal = perEmp.reduce(function (a, s) { return a + (s.planSum || 0); }, 0);
+    var planFact = perEmp.reduce(function (a, s) { return a + (s.planFact || 0); }, 0);
     var planPct = pct(planFact, planTotal);
-    var best = perDay.reduce(function (b, d, i) { return d.sum > b.v ? { v: d.sum, i: i } : b; }, { v: 0, i: 0 });
-    var empPlans = perEmp.filter(function (s) { return s.planDay; });
-    var avgPlan = empPlans.length ? empPlans.reduce(function (a, s) { return a + s.planDay; }, 0) / empPlans.length : null;
+    var withPlan = perEmp.filter(function (s) { return s.planDay; });
+    var avgPlan = withPlan.length ? withPlan.reduce(function (a, s) { return a + s.planDay; }, 0) / withPlan.length : null;
 
-    $("kpis").innerHTML =
-      '<div class="kpi hero"><div class="lab">Средняя выработка на сотрудника в день</div><div class="val">' + fmt(avgPerEmpDay) + '<small>' + m.mainUnit + '</small></div><div class="note">по дням, когда сотрудник работал' + (avgPlan ? ' · план ~' + fmt(avgPlan) + ' ' + m.mainUnit : '') + '</div></div>' +
-      '<div class="kpi"><div class="lab">Всего за период</div><div class="val">' + fmt(total) + '<small>' + m.mainUnit + '</small></div><div class="note">' + fmt(totalSec) + ' ' + m.secUnit + ' · ' + workDays + ' раб. дн.</div></div>' +
-      '<div class="kpi"><div class="lab">Выполнение плана</div><div class="val">' + (planPct === null ? "—" : planPct + "%") + '</div><div class="note">' + (planTotal ? 'факт ' + fmt(planFact) + ' из ' + fmt(planTotal) + ' ' + m.mainUnit : 'план не задан') + '</div></div>' +
-      '<div class="kpi"><div class="lab">Лучший день</div><div class="val">' + fmt(best.v) + '<small>' + m.mainUnit + '</small></div><div class="note">' + (best.v ? dd(dates[best.i].d) + ", " + perDay[best.i].who.length + " чел." : "—") + '</div></div>';
+    slot("kpis").innerHTML =
+      '<div class="kpi hero"><div class="lab">Среднее на сотрудника в день</div><div class="val">' + fmt(avgEmp) + '<small>' + m.mainUnit + '</small></div><div class="note">' + (avgPlan ? 'план ~' + fmt(avgPlan) : 'план не задан') + '</div></div>' +
+      '<div class="kpi"><div class="lab">Всего за период</div><div class="val">' + fmt(total) + '<small>' + m.mainUnit + '</small></div><div class="note">' + workDays + ' раб. дн.</div></div>' +
+      '<div class="kpi"><div class="lab">Выполнение плана</div><div class="val">' + (planPct === null ? "—" : planPct + "%") + '</div><div class="note">' + (planTotal ? 'из ' + fmt(planTotal) + ' ' + m.mainUnit : '—') + '</div></div>';
 
-    drawChart(perDay, m, workDays ? total / workDays : 0);
-    drawRank(perEmp, m, avgPlan);
-    drawMatrix(perEmp, m, byUser);
-    drawTable(perEmp, m);
-  }
-
-  function drawTable(perEmp, m) {
-    var rows = perEmp.slice().sort(function (a, b) { return b.avg - a.avg; });
-    $("tbl").innerHTML = '<thead><tr class="small text-muted"><th>Сотрудник</th><th class="text-end">Раб. дней</th><th class="text-end">' + m.mainUnit + ' за период</th><th class="text-end">' + m.secUnit + ' за период</th><th class="text-end">Среднее в день</th><th class="text-end">План в день</th><th class="text-end">% плана</th></tr></thead><tbody>' +
-      rows.map(function (r) { var p = pct(r.avg, r.planDay);
-        return '<tr><td>' + esc(r.name) + '</td><td class="text-end">' + r.work + '</td><td class="text-end">' + fmt(r.sum) + '</td><td class="text-end">' + fmt(r.sec) + '</td><td class="text-end">' + fmt(r.avg) + '</td><td class="text-end">' + (r.planDay ? fmt(r.planDay) : "—") + '</td><td class="text-end">' + (p === null ? "—" : p + "%") + '</td></tr>'; }).join("") + '</tbody>';
-  }
-
-  function niceMax(v) { if (v <= 0) return 10; var p = Math.pow(10, Math.floor(Math.log10(v))), n = v / p;
-    return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p; }
-
-  function drawChart(perDay, m, avgPerDay) {
-    var W = 820, H = 280, L = 46, R = 12, T = 12, B = 30, iw = W - L - R, ih = H - T - B;
+    var W = 560, H = 200, L = 40, R = 8, T = 8, B = 24, iw = W - L - R, ih = H - T - B;
     var maxV = Math.max.apply(null, perDay.map(function (d) { return Math.max(d.sum, d.plan); }).concat([1]));
     var top = niceMax(maxV * 1.05), y = function (v) { return T + ih - v / top * ih; };
-    var n = dates.length, step = iw / n, bw = Math.min(34, step * 0.62), s = "";
-    var every = n > 20 ? Math.ceil(n / 14) : 1;
-    for (var k = 0; k <= 4; k++) { var v = top / 4 * k, yy = y(v);
-      s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + yy + '" y2="' + yy + '" stroke="var(--eo-grid)" stroke-width="1"/>' +
-           '<text x="' + (L - 8) + '" y="' + (yy + 4) + '" text-anchor="end">' + fmt(v) + '</text>'; }
+    var n = dates.length, step = iw / n, bw = Math.min(26, step * 0.62), s = "", every = n > 16 ? Math.ceil(n / 12) : (n > 8 ? 2 : 1);
+    for (var k = 0; k <= 3; k++) { var v = top / 3 * k, yy = y(v);
+      s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + yy + '" y2="' + yy + '" stroke="var(--eo-grid)"/><text x="' + (L - 6) + '" y="' + (yy + 4) + '" text-anchor="end">' + fmt(v) + '</text>'; }
     dates.forEach(function (day, i) {
       var cx = L + step * i + step / 2, x = cx - bw / 2, h = perDay[i].sum / top * ih, yTop = y(perDay[i].sum);
-      if (h > 0) { var r = Math.min(4, h);
-        s += '<path d="M' + x + ' ' + (T + ih) + ' V' + (yTop + r) + ' Q' + x + ' ' + yTop + ' ' + (x + r) + ' ' + yTop + ' H' + (x + bw - r) +
-             ' Q' + (x + bw) + ' ' + yTop + ' ' + (x + bw) + ' ' + (yTop + r) + ' V' + (T + ih) + ' Z" fill="var(--eo-accent)" opacity="' + (isWe(day.d) ? .65 : 1) + '"/>'; }
-      if (i % every === 0) s += '<text x="' + cx + '" y="' + (H - 10) + '" text-anchor="middle"' + (isWe(day.d) ? ' style="fill:var(--eo-bad)"' : '') + '>' + dd(day.d) + '</text>';
+      if (h > 0) { var r = Math.min(3, h);
+        s += '<path d="M' + x + ' ' + (T + ih) + ' V' + (yTop + r) + ' Q' + x + ' ' + yTop + ' ' + (x + r) + ' ' + yTop + ' H' + (x + bw - r) + ' Q' + (x + bw) + ' ' + yTop + ' ' + (x + bw) + ' ' + (yTop + r) + ' V' + (T + ih) + ' Z" fill="var(--eo-accent)" opacity="' + (isWe(day.d) ? .65 : 1) + '"/>'; }
+      if (i % every === 0) s += '<text x="' + cx + '" y="' + (H - 7) + '" text-anchor="middle"' + (isWe(day.d) ? ' style="fill:var(--eo-bad)"' : '') + '>' + dd(day.d) + '</text>';
+      if (perDay[i].plan) { var yp = y(perDay[i].plan); s += '<line x1="' + (L + step * i + step * .08) + '" x2="' + (L + step * (i + 1) - step * .08) + '" y1="' + yp + '" y2="' + yp + '" stroke="var(--eo-plan)" stroke-width="2" stroke-dasharray="4 3"/>'; }
     });
-    perDay.forEach(function (p, i) { if (p.plan) { var yp = y(p.plan);
-      s += '<line x1="' + (L + step * i + step * 0.08) + '" x2="' + (L + step * (i + 1) - step * 0.08) + '" y1="' + yp + '" y2="' + yp + '" stroke="var(--eo-plan)" stroke-width="2" stroke-dasharray="5 4"/>'; } });
-    var ya = y(avgPerDay);
-    s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + ya + '" y2="' + ya + '" stroke="var(--eo-ink2)" stroke-width="1.5" stroke-dasharray="1.5 4" stroke-linecap="round"/>' +
-         '<text x="' + (W - R) + '" y="' + (ya - 6) + '" text-anchor="end" style="fill:var(--eo-ink2)">среднее ' + fmt(avgPerDay) + '</text>';
+    var avgDay = workDays ? total / workDays : 0, ya = y(avgDay);
+    s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + ya + '" y2="' + ya + '" stroke="var(--eo-ink2)" stroke-width="1.5" stroke-dasharray="1.5 4" stroke-linecap="round"/>';
     dates.forEach(function (day, i) { s += '<rect data-i="' + i + '" x="' + (L + step * i) + '" y="' + T + '" width="' + step + '" height="' + ih + '" fill="transparent"/>'; });
-    var svg = $("chart"); svg.setAttribute("viewBox", "0 0 " + W + " " + H); svg.innerHTML = s;
-    $("chartSub").textContent = "Сумма по выбранным сотрудникам, " + m.mainName + " в день";
-    $("legMain").textContent = "Факт, " + m.mainUnit;
-    var tip = $("tip"), box = $("chartbox");
+    var svg = slot("chart"); svg.setAttribute("viewBox", "0 0 " + W + " " + H); svg.innerHTML = s;
+    var tip = slot("tip"), box = slot("chartbox");
     svg.onpointermove = function (ev) {
       var t = ev.target; if (!t.dataset || t.dataset.i === undefined) { tip.hidden = true; return; }
-      var i = +t.dataset.i, p = perDay[i], rows = p.who.slice().sort(function (a, b) { return b[1] - a[1]; }).slice(0, 3), pc = pct(p.sum, p.plan);
-      tip.innerHTML = '<b>' + dd(dates[i].d) + (isWe(dates[i].d) ? ' · выходной' : '') + '</b>' +
-        '<div class="r"><span>Факт</span><span>' + fmt(p.sum) + ' ' + m.mainUnit + '</span></div>' +
-        '<div class="r"><span>План</span><span>' + (p.plan ? fmt(p.plan) + ' (' + pc + '%)' : '—') + '</span></div>' +
+      var i = +t.dataset.i, p = perDay[i], rows = p.who.slice().sort(function (a, b) { return b[1] - a[1]; }).slice(0, 3);
+      tip.innerHTML = '<b>' + dd(dates[i].d) + (isWe(dates[i].d) ? ' · выходной' : '') + '</b><div class="r"><span>Факт</span><span>' + fmt(p.sum) + ' ' + m.mainUnit + '</span></div><div class="r"><span>План</span><span>' + (p.plan ? fmt(p.plan) + ' (' + pct(p.sum, p.plan) + '%)' : '—') + '</span></div>' +
         (rows.length ? '<div style="margin-top:4px;opacity:.8">' + rows.map(function (r) { return esc(r[0]) + ' — ' + fmt(r[1]); }).join('<br>') + '</div>' : '');
-      tip.hidden = false;
-      var br = box.getBoundingClientRect(), x = ev.clientX - br.left + 14, y0 = ev.clientY - br.top - 10;
+      tip.hidden = false; var br = box.getBoundingClientRect(), x = ev.clientX - br.left + 14;
       if (x + 180 > br.width) x = ev.clientX - br.left - 190;
-      tip.style.left = Math.max(0, x) + "px"; tip.style.top = Math.max(0, y0) + "px";
+      tip.style.left = Math.max(0, x) + "px"; tip.style.top = Math.max(0, ev.clientY - br.top - 10) + "px";
     };
     svg.onpointerleave = function () { tip.hidden = true; };
-  }
 
-  function drawRank(perEmp, m, avgPlan) {
     var rows = perEmp.slice().sort(function (a, b) { return b.avg - a.avg; });
     var mx = Math.max.apply(null, rows.map(function (r) { return Math.max(r.avg, r.planDay || 0); }).concat([1])) * 1.05;
-    var teamAvg = rows.length ? rows.reduce(function (a, r) { return a + r.avg; }, 0) / rows.length : 0;
-    $("rankSub").textContent = "Среднее в день — по рабочим дням сотрудника. Светлая метка — план. Среднее по команде: " + fmt(teamAvg) + " " + m.mainUnit;
-    var h = '<div class="rrow head"><span>Сотрудник</span><span class="h-track">Среднее в день, ' + m.mainUnit + '</span><span class="num">Среднее</span><span class="num h-tot">За период</span><span class="num">% плана</span></div>';
-    h += rows.map(function (r) { var p = pct(r.avg, r.planDay);
-      return '<div class="rrow"><span class="rname" title="' + esc(r.name) + '">' + esc(r.name) + '</span>' +
-        '<span class="track"><span class="fill" style="width:' + (r.avg / mx * 100) + '%"></span>' + (r.planDay ? '<span class="ptick" style="left:' + (r.planDay / mx * 100) + '%"></span>' : '') + '</span>' +
-        '<span class="num">' + fmt(r.avg) + '</span><span class="num h-tot">' + fmt(r.sum) + '</span>' +
-        '<span class="num"><span class="badge2 ' + cls(p) + '">' + (p === null ? "—" : p + "%") + '</span></span></div>'; }).join("");
-    $("rank").innerHTML = rows.length ? h : '<div class="text-muted small">Нет данных за выбранный период</div>';
-  }
+    slot("rankSub").textContent = "Светлая метка — план";
+    slot("rank").innerHTML = rows.map(function (r) { var p = pct(r.avg, r.planDay);
+      return '<div class="rrow"><span class="rname" title="' + esc(r.name) + '">' + esc(r.name) + '</span><span class="track"><span class="fill" style="width:' + (r.avg / mx * 100) + '%"></span>' + (r.planDay ? '<span class="ptick" style="left:' + (r.planDay / mx * 100) + '%"></span>' : '') + '</span><span class="num">' + fmt(r.avg) + '</span><span class="num"><span class="badge2 ' + cls(p) + '" style="min-width:46px">' + (p === null ? "—" : p + "%") + '</span></span></div>'; }).join("") || '<div class="text-muted small">Нет данных за выбранный период</div>';
 
-  function drawMatrix(perEmp, m, byUser) {
-    if (!perEmp.length) { $("matrix").innerHTML = '<tbody><tr><td class="c-none" style="min-width:0;padding:8px">Нет данных за выбранный период</td></tr></tbody>'; return; }
-    var h = '<thead><tr><th></th>' + dates.map(function (day) { return '<th class="' + (isWe(day.d) ? 'we' : '') + '">' + dd(day.d) + '</th>'; }).join("") + '</tr></thead><tbody>';
-    perEmp.forEach(function (s) {
-      h += '<tr><th class="rowh">' + esc(s.name) + '</th>' + dates.map(function (day) {
-        var c = byUser[s.uid][day.iso];
-        if (!c) return '<td class="c-none">·</td>';
-        var plan = planFor(s.uid, day.iso, m), p = pct(c[m.main], plan);
-        return '<td class="' + (p === null ? "c-none" : p >= 100 ? "c-good" : p >= 70 ? "c-warn" : "c-bad") + '"' + (p === null ? '' : ' title="' + p + '% плана"') + '>' + fmt(c[m.main]) + '</td>'; }).join("") + '</tr>';
+    if (!perEmp.length) { slot("matrix").innerHTML = '<tbody><tr><td class="c-none" style="min-width:0;padding:8px">Нет данных за выбранный период</td></tr></tbody>'; return; }
+    var h = '<thead><tr><th></th>' + dates.map(function (day) { return '<th class="' + (isWe(day.d) ? 'we' : '') + '">' + ("0" + day.d.getDate()).slice(-2) + '</th>'; }).join("") + '</tr></thead><tbody>';
+    perEmp.forEach(function (s2) {
+      h += '<tr><th class="rowh" title="' + esc(s2.name) + '">' + esc(s2.name) + '</th>' + dates.map(function (day) {
+        var c = byUser[s2.uid][day.iso]; if (!c) return '<td class="c-none">·</td>';
+        var plan = planFor(mode, s2.uid, day.iso, m), p = pct(c[m.main], plan);
+        return '<td class="' + (p === null ? "c-none" : p >= 100 ? "c-good" : p >= 70 ? "c-warn" : "c-bad") + '" title="' + dd(day.d) + (p === null ? '' : ' · ' + p + '% плана') + '">' + fmt(c[m.main]) + '</td>'; }).join("") + '</tr>';
     });
-    $("matrix").innerHTML = h + '</tbody>';
+    slot("matrix").innerHTML = h + '</tbody>';
   }
-
-  $("modeSeg").addEventListener("click", function (ev) { var b = ev.target.closest("button"); if (!b) return;
-    state.mode = b.dataset.mode;
-    Array.prototype.forEach.call($("modeSeg").querySelectorAll("button"), function (x) { x.setAttribute("aria-pressed", x === b ? "true" : "false"); });
-    render(); });
-  render();
+  renderPanel("pack"); renderPanel("pick");
 })();
 </script>
 {% endblock %}
