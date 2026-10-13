@@ -1643,7 +1643,7 @@ def receive_act(doc_id):
         return blocked
     upload = request.files.get("act_file")
     if upload is None or not upload.filename:
-        flash("Выберите файл акта приёмки (.xlsx)", "danger")
+        flash("Выберите файл акта приёмки (.xlsx или .zip)", "danger")
         return redirect(url_for("movement.receive", doc_id=doc.id))
     data = upload.read(MAX_ACT_BYTES + 1)
     try:

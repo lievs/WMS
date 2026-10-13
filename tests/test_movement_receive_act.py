@@ -215,3 +215,54 @@ def test_act_cannot_be_applied_twice(db, client_logged_in):
     assert resp.status_code == 302
     assert MovementReceiptDiscrepancy.query.count() == 0
     assert ShipmentPlanLine.query.filter_by(nomenclature_id=n1.id).first().fulfilled_qty == 14
+
+
+def test_act_zip_archive_is_accepted_as_is(db, client_logged_in):
+    import zipfile
+
+    doc, sender, dest, n1, n2, boxes, _ = _setup()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("signature.sig", b"sig")
+        zf.writestr("act-income-1.xlsx", _act_file([(n1.barcode, "BOX-A1", 3)]).getvalue())
+        zf.writestr("mchd.zip", b"PK-not-an-act")
+    buf.seek(0)
+    resp = client_logged_in.post(
+        f"/movement/{doc.id}/receive/act",
+        data={"act_file": (buf, "Acceptance-certificate.zip")},
+        content_type="multipart/form-data",
+    )
+    html = resp.get_data(as_text=True)
+    assert "act_payload" in html and "BOX-A1" in html
+
+
+def test_zip_without_xlsx_is_rejected(db, client_logged_in):
+    import zipfile
+
+    doc, *_ = _setup()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("readme.txt", b"x")
+    buf.seek(0)
+    resp = client_logged_in.post(
+        f"/movement/{doc.id}/receive/act",
+        data={"act_file": (buf, "a.zip")}, content_type="multipart/form-data", follow_redirects=True,
+    )
+    assert "нет файла акта" in resp.get_data(as_text=True)
+
+
+def test_fast_and_openpyxl_readers_give_same_result():
+    from wms.utils import acceptance_act as aa
+
+    data = _act_file([("2000000000011", "BOX-A1", 2), ("2000000000028", "BOX-A2", 3), ("2000000000011", "BOX-A1", 1)]).getvalue()
+    fast = aa.parse_act(data)
+    original = aa._iter_sheet_rows_fast
+    try:
+        def boom(d, w):
+            raise RuntimeError("force fallback")
+        aa._iter_sheet_rows_fast = boom
+        slow = aa.parse_act(data)
+    finally:
+        aa._iter_sheet_rows_fast = original
+    assert fast == slow
+    assert dict(fast[0]) == {"BOX-A1": {"2000000000011": 3.0}, "BOX-A2": {"2000000000028": 3.0}}
