@@ -139,3 +139,20 @@ def test_dashboard_date_filter_and_user_filter(db, client_logged_in, admin_user)
     assert "01.09.2026" in html and ">7<" in html and ">9<" not in html
     html = client_logged_in.get("/reports/employee-output?date_from=2026-09-05&date_to=2026-09-06").get_data(as_text=True)
     assert "Нет данных за выбранный период" in html
+
+
+def test_dashboard_excludes_mvb_logistics_users(db, client_logged_in, admin_user):
+    worker = User(username="wh1", full_name="Складской Сергей", role="warehouse")
+    client = User(username="cl1", full_name="Клиент Логистики", role="mvb_client")
+    driver = User(username="dr1", full_name="Водитель Виктор", role="mvb_driver")
+    for u in (worker, client, driver):
+        u.set_password("x")
+    db.session.add_all([worker, client, driver])
+    db.session.commit()
+    today = work_day()
+    for u in (worker, client, driver):
+        db.session.add(WorkEvent(user_id=u.id, work_date=today, kind="pick", box_id=u.id, qty=1))
+    db.session.commit()
+    html = client_logged_in.get("/reports/employee-output").get_data(as_text=True)
+    assert "Складской Сергей" in html
+    assert "Клиент Логистики" not in html and "Водитель Виктор" not in html

@@ -19,6 +19,7 @@ from ..models import (
     ReceivingDocument,
     ReceivingLine,
     User,
+    MVB_ROLES,
     Warehouse,
     WorkEvent,
     WorkPlan,
@@ -572,13 +573,15 @@ def _employee_output_context(date_from, date_to, user_id):
         elif date_from <= plan.plan_date <= date_to:
             overrides[(plan.kind, plan.user_id, plan.plan_date)] = plan
 
-    users = {u.id: u for u in User.query.all()}
+    # Только сотрудники склада: клиенты, водители и операторы МВБ Логистики —
+    # другой контур (отдельный вход), в этот отчет они не попадают.
+    users = {u.id: u for u in User.query.all() if (u.role or "") not in MVB_ROLES or u.is_admin}
     sections = []
     for kind, title, hint in WORK_KINDS:
         rows = []
         totals = {}
         for (k, uid, day), (qty, boxes) in sorted(
-            facts.items(), key=lambda item: (item[0][2], users[item[0][1]].display_name() if item[0][1] in users else ""),
+            ((key, val) for key, val in facts.items() if key[1] in users), key=lambda item: (item[0][2], users[item[0][1]].display_name() if item[0][1] in users else ""),
             reverse=True,
         ):
             if k != kind:
