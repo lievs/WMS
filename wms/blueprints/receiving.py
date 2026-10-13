@@ -1,6 +1,6 @@
 import io
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import (
     Blueprint,
@@ -170,6 +170,82 @@ def _apply_receiving_search(query):
     )
 
 
+COLUMN_FILTER_KEYS = (
+    "f_number", "f_date", "f_warehouse", "f_supplier", "f_order", "f_author",
+    "f_status", "f_qty", "f_returns", "f_checked",
+)
+
+
+def _apply_column_filters(query):
+    """Поиск по каждой колонке списка приемок (строка фильтров под шапкой
+    таблицы). Все заполненные фильтры объединяются через И и работают
+    вместе с общим поиском q и галочками над таблицей."""
+    args = request.args
+
+    def text(key):
+        return args.get(key, "").strip()
+
+    if text("f_number"):
+        query = query.filter(ReceivingDocument.number.ilike(f"%{text('f_number')}%"))
+    if text("f_date"):
+        try:
+            day = datetime.strptime(text("f_date"), "%Y-%m-%d")
+        except ValueError:
+            day = None
+        if day is not None:
+            # день в московском времени -> диапазон в UTC (в БД хранится UTC)
+            start = day - timedelta(hours=3)
+            query = query.filter(
+                ReceivingDocument.created_at >= start,
+                ReceivingDocument.created_at < start + timedelta(days=1),
+            )
+    if text("f_warehouse"):
+        query = query.filter(
+            ReceivingDocument.warehouse.has(Warehouse.name.ilike(f"%{text('f_warehouse')}%"))
+        )
+    if text("f_supplier"):
+        like = f"%{text('f_supplier')}%"
+        query = query.filter(
+            or_(
+                ReceivingDocument.supplier.ilike(like),
+                ReceivingDocument.supplier_ref.has(Supplier.name.ilike(like)),
+            )
+        )
+    if text("f_order"):
+        query = query.filter(ReceivingDocument.order_number.ilike(f"%{text('f_order')}%"))
+    if text("f_author"):
+        like = f"%{text('f_author')}%"
+        query = query.filter(
+            ReceivingDocument.created_by.has(
+                or_(User.username.ilike(like), User.full_name.ilike(like))
+            )
+        )
+    if text("f_status") in ("draft", "recounting", "sorting", "completed"):
+        query = query.filter(ReceivingDocument.status == text("f_status"))
+    if text("f_qty"):
+        try:
+            wanted = float(text("f_qty").replace(",", "."))
+        except ValueError:
+            wanted = None
+        if wanted is not None:
+            matching = (
+                db.session.query(ReceivingLine.document_id)
+                .group_by(ReceivingLine.document_id)
+                .having(func.abs(func.sum(ReceivingLine.qty) - wanted) < 0.0005)
+            )
+            query = query.filter(ReceivingDocument.id.in_(matching))
+    returns = text("f_returns")
+    if returns in ("yes", "no"):
+        has_returns = ReceivingDocument.id.in_(db.session.query(SupplierReturn.receiving_document_id))
+        query = query.filter(has_returns if returns == "yes" else ~has_returns)
+    checked = text("f_checked")
+    if checked == "yes":
+        query = query.filter(ReceivingDocument.checked_in_1c_at.isnot(None))
+    elif checked == "no":
+        query = query.filter(ReceivingDocument.checked_in_1c_at.is_(None))
+    return query
+
+
 @bp.route("/")
 def list_documents():
     # "Приемка по накладной" — документы, созданные загрузкой файла
@@ -178,6 +254,9 @@ def list_documents():
     # от ручного создания, где поставщик — просто свободный текст.
     unfinished_only = request.args.get("unfinished") == "on"
     invoice_only = request.args.get("invoice_only") == "on"
+    # «Приемки без накладных» — ручные приемки (поставщик не из справочника,
+    # накладная не загружалась), обратное к «Приемка по накладным».
+    no_invoice = request.args.get("no_invoice") == "on"
     q = request.args.get("q", "").strip()
     warehouse_id = request.args.get("warehouse_id", type=int)
 
@@ -186,7 +265,10 @@ def list_documents():
         query = query.filter(ReceivingDocument.status != "completed")
     if invoice_only:
         query = query.filter(ReceivingDocument.supplier_id.isnot(None))
+    if no_invoice:
+        query = query.filter(ReceivingDocument.supplier_id.is_(None))
     query = _apply_receiving_search(query)
+    query = _apply_column_filters(query)
     if warehouse_id:
         query = query.filter(ReceivingDocument.warehouse_id == warehouse_id)
 
@@ -231,6 +313,8 @@ def list_documents():
         documents=documents,
         unfinished_only=unfinished_only,
         invoice_only=invoice_only,
+        no_invoice=no_invoice,
+        filters={key: request.args.get(key, "").strip() for key in COLUMN_FILTER_KEYS},
         q=q,
         warehouse_id=warehouse_id,
         warehouses=_receiving_warehouses(),
