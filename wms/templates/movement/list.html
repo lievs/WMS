@@ -177,7 +177,7 @@
           {% for wh in destination_choices %}<option value="{{ wh.id }}">{{ wh.marketplace_label() }} · {{ wh.name }}</option>{% endfor %}
         </select>
         <button type="submit" formmethod="post" formaction="{{ url_for('movement.change_destination') }}" class="btn btn-outline-secondary btn-sm" id="changeDestBtn" disabled
-                onclick="var s=document.getElementById('newDestSelect'); return confirm('Сменить склад назначения у выбранных перемещений на «' + s.options[s.selectedIndex].text + '»? Принятые и объединенные документы не изменятся; номер заявки на МП сбросится, если маркетплейс другой.');">↪ Сменить склад получатель (<span id="selectedDocsCount4">0</span>)</button>
+                onclick="var s=document.getElementById('newDestSelect'); return confirm('Сменить склад назначения у выбранных перемещений на «' + s.options[s.selectedIndex].text + '»? Принятые и объединенные документы не изменятся; номер заявки на МП сбросится, если маркетплейс другой. Для Озон документы больше 30 коробов разобьются по 30.');">↪ Сменить склад получатель (<span id="selectedDocsCount4">0</span>)</button>
         {% endif %}
         <button type="submit" formmethod="post" formaction="{{ url_for('movement.merge_documents') }}" class="btn btn-outline-secondary btn-sm" id="mergeDocsBtn" disabled
                 onclick="return confirm('Объединить выбранные черновики в один документ? Короба переедут в новый документ, старые останутся в истории со статусом «Объединен».');">🔀 Объединить выбранные (<span id="selectedDocsCount3">0</span>)</button>

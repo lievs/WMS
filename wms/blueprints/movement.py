@@ -23,6 +23,7 @@ from ..models import (
     User,
     Warehouse,
     UnplacedStock,
+    WorkEvent,
 )
 from ..utils.acceptance_act import (
     ARTICLE_KEY_PREFIX, UNIDENTIFIED_KEY, ActParseError, MAX_ACT_BYTES, parse_act,
@@ -562,14 +563,23 @@ def change_destination():
         if doc.received_at is not None:
             skipped.append(f"{doc.number} (уже принят — сначала «Вернуть в работу»)")
             continue
-        line_count = doc.lines.count()
+        all_lines = doc.lines.order_by(MovementLine.id.asc()).all()
+        line_count = len(all_lines)
+        # В Ozon-перемещении не больше 30 коробов — документ побольше
+        # дробим на несколько по 30 (первый остается за исходным номером).
+        chunks = [all_lines]
         if new_warehouse.marketplace == "ozon" and line_count > 30:
-            skipped.append(f"{doc.number} ({line_count} коробов — в Ozon не больше 30)")
-            continue
+            if doc.synced_to_1c_at is not None:
+                skipped.append(
+                    f"{doc.number} ({line_count} коробов, уже выгружен в 1С — дробить нельзя, "
+                    "в 1С уйдут дубли; сначала разбейте вручную)"
+                )
+                continue
+            chunks = [all_lines[i:i + 30] for i in range(0, line_count, 30)]
 
         old_warehouse = doc.to_warehouse
         if doc.status == "completed":
-            for line in doc.lines:
+            for line in all_lines:
                 box = line.box
                 if box.warehouse_id == old_warehouse.id:
                     box.warehouse_id = new_warehouse.id
@@ -578,7 +588,7 @@ def change_destination():
                     box.zone_id = None
                     box.status = "open"
         elif new_warehouse.marketplace == "ozon":
-            if line_count >= 30:
+            if len(chunks[0]) >= 30:
                 doc.status = "collected"
         elif doc.status == "collected":
             doc.status = "draft"
@@ -591,6 +601,30 @@ def change_destination():
             synced_numbers.append(doc.number)
         doc.to_warehouse_id = new_warehouse.id
         changed.append(doc.number)
+        for chunk in chunks[1:]:
+            part = MovementDocument(
+                number=next_number("movement"),
+                from_warehouse_id=doc.from_warehouse_id,
+                to_warehouse_id=new_warehouse.id,
+                created_by_id=doc.created_by_id,
+                created_at=doc.created_at,
+                status=doc.status if doc.status == "completed" else ("collected" if len(chunk) >= 30 else "draft"),
+                completed_at=doc.completed_at,
+                shipped_at=doc.shipped_at,
+                delivery_slot_date=doc.delivery_slot_date,
+                marketplace_request_number=doc.marketplace_request_number,
+                marketplace_request_created_at=doc.marketplace_request_created_at,
+            )
+            db.session.add(part)
+            db.session.flush()
+            moved_box_ids = [line.box_id for line in chunk]
+            for line in chunk:
+                line.document_id = part.id
+            WorkEvent.query.filter(
+                WorkEvent.kind == "pick", WorkEvent.ref_kind == "movement", WorkEvent.ref_id == doc.id,
+                WorkEvent.box_id.in_(moved_box_ids),
+            ).update({"ref_id": part.id}, synchronize_session=False)
+            changed.append(f"{part.number} (из {doc.number}, {len(chunk)} кор.)")
         current_app.logger.warning(
             "Склад назначения перемещения %s: «%s» → «%s» (%s)",
             doc.number, old_warehouse.name, new_warehouse.name, current_user.username,

@@ -79,11 +79,59 @@ def test_received_merged_and_same_destination_are_skipped(db, client_logged_in):
     assert MovementDocument.query.get(merged.id).to_warehouse_id == wb.id
 
 
-def test_ozon_limit_of_30_boxes(db, client_logged_in):
-    doc, sender, wb, ozon, boxes = _setup(n_boxes=31)
+def test_ozon_destination_splits_big_document_into_chunks_of_30(db, client_logged_in):
+    doc, sender, wb, ozon, boxes = _setup(n_boxes=65, status="completed")
+    doc.shipped_at = datetime.utcnow()
+    doc.completed_at = datetime.utcnow()
+    db.session.commit()
     resp = _change(client_logged_in, [doc.id], ozon.id)
-    assert "не больше 30" in resp.get_data(as_text=True)
+    html = resp.get_data(as_text=True)
+    assert "из PER-CD1, 30 кор." in html and "из PER-CD1, 5 кор." in html
+
+    docs = MovementDocument.query.order_by(MovementDocument.id).all()
+    assert [d.lines.count() for d in docs] == [30, 30, 5]
+    assert {d.to_warehouse_id for d in docs} == {ozon.id}
+    assert {d.status for d in docs} == {"completed"}
+    assert all(d.shipped_at is not None for d in docs)
+    # все короба на Ozon-складе, ни один не потерян и не задвоен
+    all_box_ids = [line.box_id for d in docs for line in d.lines]
+    assert len(all_box_ids) == len(set(all_box_ids)) == 65
+    assert all(Box.query.get(i).warehouse_id == ozon.id for i in all_box_ids)
+
+
+def test_split_draft_marks_full_chunks_as_collected(db, client_logged_in):
+    doc, sender, wb, ozon, boxes = _setup(n_boxes=45)
+    _change(client_logged_in, [doc.id], ozon.id)
+    docs = MovementDocument.query.order_by(MovementDocument.id).all()
+    assert [(d.lines.count(), d.status) for d in docs] == [(30, "collected"), (15, "draft")]
+
+
+def test_big_document_synced_to_1c_is_not_split(db, client_logged_in):
+    doc, sender, wb, ozon, boxes = _setup(n_boxes=40)
+    doc.synced_to_1c_at = datetime.utcnow()
+    db.session.commit()
+    resp = _change(client_logged_in, [doc.id], ozon.id)
+    assert "дробить нельзя" in resp.get_data(as_text=True)
+    assert MovementDocument.query.count() == 1
     assert MovementDocument.query.get(doc.id).to_warehouse_id == wb.id
+
+
+def test_split_keeps_author_and_moves_pick_events(db, client_logged_in, admin_user):
+    from wms.models import WorkEvent
+
+    doc, sender, wb, ozon, boxes = _setup(n_boxes=32)
+    doc.created_by_id = admin_user.id
+    for box in boxes:
+        db.session.add(WorkEvent(user_id=admin_user.id, work_date=datetime.utcnow().date(), kind="pick",
+                                 box_id=box.id, qty=5, ref_kind="movement", ref_id=doc.id))
+    db.session.commit()
+    _change(client_logged_in, [doc.id], ozon.id)
+    parts = MovementDocument.query.order_by(MovementDocument.id).all()
+    assert {d.created_by_id for d in parts} == {admin_user.id}
+    for d in parts:
+        box_ids = {line.box_id for line in d.lines}
+        events = WorkEvent.query.filter_by(kind="pick", ref_id=d.id).all()
+        assert {e.box_id for e in events} == box_ids
 
 
 def test_cannot_pick_sender_as_destination(db, client_logged_in):
