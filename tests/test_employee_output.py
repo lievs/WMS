@@ -11,6 +11,14 @@ from wms.models import (
 from wms.utils.work_log import work_day
 
 
+def _payload(client, query=""):
+    import json
+    import re
+
+    html = client.get("/reports/employee-output" + query).get_data(as_text=True)
+    return json.loads(re.search(r'<script type="application/json" id="eo-data">(.*?)</script>', html, re.S).group(1))
+
+
 def _warehouses():
     sender = Warehouse(code="WH-EO1", name="Основной")
     dest = Warehouse(code="WH-EO2", name="Склад МП", marketplace="wb", marketplace_city="Коледино")
@@ -79,10 +87,11 @@ def test_dashboard_aggregates_facts_and_applies_plans(db, client_logged_in, admi
     db.session.add(WorkPlan(user_id=worker.id, kind="pack", plan_date=None, qty_plan=200, boxes_plan=4))
     db.session.commit()
 
-    html = client_logged_in.get("/reports/employee-output").get_data(as_text=True)
-    assert "Иванова Анна" in html
-    assert ">100<" in html          # 30+20+50 шт
-    assert "50%" in html            # 100 из плана 200 (и 2 из 4 коробов)
+    uid = str(worker.id)
+    data = _payload(client_logged_in)
+    assert data["data"]["pack"][uid][today.isoformat()] == [100.0, 2]   # 30+20+50 шт в 2 коробах
+    assert data["data"]["pick"][uid][today.isoformat()] == [12.0, 1]
+    assert data["plans"]["pack"][uid]["def"] == [200.0, 4]
 
     # план на конкретную дату перекрывает план по умолчанию
     client_logged_in.post("/reports/employee-output/plans", data={
@@ -90,11 +99,29 @@ def test_dashboard_aggregates_facts_and_applies_plans(db, client_logged_in, admi
         f"day__pack__{worker.id}__{today.isoformat()}__boxes": "",
         f"def__pick__{worker.id}__boxes": "3",
     })
-    html = client_logged_in.get("/reports/employee-output").get_data(as_text=True)
-    assert "100%" in html
     override = WorkPlan.query.filter_by(user_id=worker.id, kind="pack", plan_date=today).first()
     assert override.qty_plan == 100 and override.boxes_plan is None
     assert WorkPlan.query.filter_by(user_id=worker.id, kind="pick", plan_date=None).first().boxes_plan == 3
+    data = _payload(client_logged_in)
+    assert data["plans"]["pack"][uid]["days"][today.isoformat()] == [100.0, None]
+    assert data["plans"]["pick"][uid]["def"] == [None, 3]
+
+
+def test_one_day_plan_form_sets_and_clears_plan(db, client_logged_in, admin_user):
+    worker = User(username="oneday1", full_name="Дневной", role="user")
+    worker.set_password("x")
+    db.session.add(worker)
+    db.session.commit()
+    day = "2026-09-10"
+    client_logged_in.post("/reports/employee-output/plans", data={
+        "one_user": str(worker.id), "one_kind": "pick", "one_date": day, "one_qty": "", "one_boxes": "25",
+    })
+    plan = WorkPlan.query.filter_by(user_id=worker.id, kind="pick", plan_date=date(2026, 9, 10)).first()
+    assert plan.boxes_plan == 25
+    client_logged_in.post("/reports/employee-output/plans", data={
+        "one_user": str(worker.id), "one_kind": "pick", "one_date": day, "one_qty": "", "one_boxes": "",
+    })
+    assert WorkPlan.query.count() == 0
 
 
 def test_blank_plan_removes_it_and_only_admin_can_edit(db, client_logged_in, admin_user):
@@ -133,12 +160,13 @@ def test_dashboard_date_filter_and_user_filter(db, client_logged_in, admin_user)
         WorkEvent(user_id=b.id, work_date=day, kind="pack", box_id=2, qty=9),
     ])
     db.session.commit()
-    html = client_logged_in.get("/reports/employee-output?date_from=2026-09-01&date_to=2026-09-02").get_data(as_text=True)
-    assert "Анна" in html and "Борис" in html
-    html = client_logged_in.get(f"/reports/employee-output?date_from=2026-09-01&date_to=2026-09-02&user_id={a.id}").get_data(as_text=True)
-    assert "01.09.2026" in html and ">7<" in html and ">9<" not in html
-    html = client_logged_in.get("/reports/employee-output?date_from=2026-09-05&date_to=2026-09-06").get_data(as_text=True)
-    assert "Нет данных за выбранный период" in html
+    data = _payload(client_logged_in, "?date_from=2026-09-01&date_to=2026-09-02")
+    assert set(data["data"]["pack"]) == {str(a.id), str(b.id)}
+    data = _payload(client_logged_in, f"?date_from=2026-09-01&date_to=2026-09-02&user_id={a.id}")
+    assert set(data["data"]["pack"]) == {str(a.id)}
+    assert data["data"]["pack"][str(a.id)]["2026-09-01"] == [7.0, 1]
+    data = _payload(client_logged_in, "?date_from=2026-09-05&date_to=2026-09-06")
+    assert data["data"]["pack"] == {} and data["data"]["pick"] == {}
 
 
 def test_dashboard_excludes_mvb_logistics_users(db, client_logged_in, admin_user):

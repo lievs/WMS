@@ -2,17 +2,29 @@
 {% block title %}Выработка сотрудников{% endblock %}
 {% block extra_head %}
 <style>
-.eo { --eo-ink:#16202a; --eo-ink2:#4a5866; --eo-ink3:#7b8896; --eo-line:#dde3e9; --eo-grid:#e9edf1; --eo-accent:#0b6e8a;
-  --eo-good:#1a7f4b; --eo-good-bg:#dcf1e5; --eo-warn:#9a6200; --eo-warn-bg:#fbecc8; --eo-bad:#b3261e; --eo-bad-bg:#f9dcd9; --eo-plan:#16202a;
-  color: var(--eo-ink); }
-.eo[data-mode="pick"] { --eo-accent:#b4540a; }
-.eo .card { border-color: var(--eo-line); }
-.eo .seg { display:inline-flex; border:1px solid var(--eo-line); border-radius:6px; overflow:hidden; background:#fff; }
+/* Тёмная панель, как в макете: токены цвета в одном месте */
+.eo { --eo-bg:#0f151b; --eo-surface:#17202a; --eo-ink:#e8eef3; --eo-ink2:#aab6c2; --eo-ink3:#7f8d9a; --eo-line:#28343f; --eo-grid:#212c36;
+  --eo-accent:#4cb8d6; --eo-accent-ink:#0b1217;
+  --eo-good:#5fd08f; --eo-good-bg:#17382a; --eo-warn:#f0b84a; --eo-warn-bg:#3a2f14; --eo-bad:#ff8a80; --eo-bad-bg:#40201e; --eo-plan:#e8eef3;
+  background:var(--eo-bg); color:var(--eo-ink); border-radius:10px; padding:16px; color-scheme:dark; }
+.eo[data-mode="pick"] { --eo-accent:#f09a55; }
+.eo a { color:var(--eo-accent); }
+.eo .text-muted { color:var(--eo-ink3) !important; }
+.eo .card { background:var(--eo-surface); border-color:var(--eo-line); color:var(--eo-ink); }
+.eo .form-control, .eo .form-select { background-color:var(--eo-bg); border-color:var(--eo-line); color:var(--eo-ink); }
+.eo .form-control::placeholder { color:var(--eo-ink3); }
+.eo .form-label { color:var(--eo-ink2); }
+.eo .btn-primary { background:var(--eo-accent); border-color:var(--eo-accent); color:var(--eo-accent-ink); }
+.eo .btn-outline-secondary, .eo .btn-outline-primary { color:var(--eo-ink2); border-color:var(--eo-line); background:transparent; }
+.eo .btn-outline-secondary:hover, .eo .btn-outline-primary:hover { background:var(--eo-grid); color:var(--eo-ink); }
+.eo .table { --bs-table-bg:transparent; --bs-table-color:var(--eo-ink); --bs-table-border-color:var(--eo-grid); color:var(--eo-ink); }
+.eo .table > :not(caption) > * > * { background-color:transparent; color:inherit; border-bottom-color:var(--eo-grid); }
+.eo .seg { display:inline-flex; border:1px solid var(--eo-line); border-radius:6px; overflow:hidden; background:var(--eo-surface); }
 .eo .seg button { font:inherit; border:0; background:transparent; color:var(--eo-ink2); padding:7px 14px; cursor:pointer; }
 .eo .seg button + button { border-left:1px solid var(--eo-line); }
-.eo .seg button[aria-pressed="true"] { background:var(--eo-accent); color:#fff; font-weight:500; }
+.eo .seg button[aria-pressed="true"] { background:var(--eo-accent); color:var(--eo-accent-ink); font-weight:500; }
 .eo .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; margin-bottom:16px; }
-.eo .kpi { background:#fff; border:1px solid var(--eo-line); border-radius:6px; padding:14px 16px; min-width:0; }
+.eo .kpi { background:var(--eo-surface); border:1px solid var(--eo-line); border-radius:6px; padding:14px 16px; min-width:0; }
 .eo .kpi .lab { color:var(--eo-ink3); font-size:12px; }
 .eo .kpi .val { font-size:28px; font-weight:600; font-variant-numeric:tabular-nums; margin-top:2px; }
 .eo .kpi .val small { font-size:13px; color:var(--eo-ink2); margin-left:4px; font-weight:400; }
@@ -20,8 +32,8 @@
 .eo .kpi.hero { border-color:var(--eo-accent); } .eo .kpi.hero .val { color:var(--eo-accent); }
 .eo .chartbox { position:relative; }
 .eo svg text { fill:var(--eo-ink3); font-size:11px; }
-.eo .tip { position:absolute; pointer-events:none; background:#16202a; color:#fff; padding:8px 10px; border-radius:4px; font-size:12px;
-  line-height:1.4; min-width:160px; z-index:5; box-shadow:0 4px 14px rgba(0,0,0,.25); }
+.eo .tip { position:absolute; pointer-events:none; background:var(--eo-ink); color:var(--eo-bg); padding:8px 10px; border-radius:4px; font-size:12px;
+  line-height:1.4; min-width:160px; z-index:5; box-shadow:0 4px 14px rgba(0,0,0,.4); }
 .eo .tip .r { display:flex; justify-content:space-between; gap:12px; }
 .eo .legend { display:flex; flex-wrap:wrap; gap:6px 16px; color:var(--eo-ink2); font-size:12px; margin-top:8px; }
 .eo .legend i { display:inline-block; width:18px; height:0; border-top:2px solid; vertical-align:middle; margin-right:6px; }
@@ -38,14 +50,15 @@
 .eo .b-bad { background:var(--eo-bad-bg); color:var(--eo-bad); } .eo .b-none { background:var(--eo-grid); color:var(--eo-ink3); }
 .eo .matrix-wrap { overflow-x:auto; }
 .eo table.m { border-collapse:separate; border-spacing:2px; font-variant-numeric:tabular-nums; }
-.eo table.m th { font-weight:400; color:var(--eo-ink3); font-size:11px; padding:2px 4px; text-align:center; white-space:nowrap; }
-.eo table.m th.rowh { text-align:left; color:var(--eo-ink); font-size:13px; padding-right:12px; position:sticky; left:0; background:#fff; }
-.eo table.m td { min-width:44px; height:32px; text-align:center; border-radius:3px; font-size:12px; }
+.eo table.m th { font-weight:400; color:var(--eo-ink3); font-size:11px; padding:2px 4px; text-align:center; white-space:nowrap; background:transparent; }
+.eo table.m th.rowh { text-align:left; color:var(--eo-ink); font-size:13px; padding-right:12px; position:sticky; left:0; background:var(--eo-surface); }
+.eo table.m td { min-width:44px; height:32px; text-align:center; border-radius:3px; font-size:12px; border:0; }
 .eo td.c-good { background:var(--eo-good-bg); color:var(--eo-good); } .eo td.c-warn { background:var(--eo-warn-bg); color:var(--eo-warn); }
-.eo td.c-bad { background:var(--eo-bad-bg); color:var(--eo-bad); } .eo td.c-none { color:var(--eo-ink3); }
-.eo th.we { color:var(--eo-bad); }
+.eo td.c-bad { background:var(--eo-bad-bg); color:var(--eo-bad); } .eo td.c-none { color:var(--eo-ink3); background:transparent; }
+.eo th.we { color:var(--eo-bad) !important; }
 .eo .keys { display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:10px; font-size:12px; color:var(--eo-ink2); }
 .eo .keys .badge2 { min-width:0; margin-right:6px; font-size:11px; }
+.eo h3, .eo h5 { color:var(--eo-ink); }
 @media (max-width:720px) {
   .eo .rrow { grid-template-columns:minmax(0,1fr) 62px 80px; }
   .eo .rrow .track, .eo .rrow .h-track, .eo .rrow .h-tot { display:none; }
@@ -114,6 +127,10 @@
   <h5 class="mb-0">Рейтинг и средняя выработка</h5>
   <div class="text-muted small" id="rankSub"></div>
   <div id="rank" style="margin-top:10px"></div>
+  <details class="mt-2">
+    <summary class="small" style="cursor:pointer;color:var(--eo-accent)">Показать таблицей</summary>
+    <div class="table-responsive"><table class="table table-sm mb-0" id="tbl" style="font-variant-numeric:tabular-nums"></table></div>
+  </details>
 </div>
 
 <div class="card p-3 mb-3">
@@ -148,129 +165,76 @@
 
 <script type="application/json" id="eo-data">{{ payload | tojson }}</script>
 
-<h5 class="mb-2">Планы и таблицы по дням</h5>
-<form method="post" action="{{ url_for('reports.employee_output_save_plans') }}">
-  <input type="hidden" name="date_from" value="{{ date_from.isoformat() }}">
-  <input type="hidden" name="date_to" value="{{ date_to.isoformat() }}">
-  <input type="hidden" name="user_id" value="{{ user_id or '' }}">
-
-  <details class="mb-3">
-    <summary class="fw-semibold mb-2" style="cursor:pointer">Таблицы по дням и план на конкретную дату</summary>
-  {% for section in sections %}
-  <div class="card p-3 mb-4">
-    <div class="d-flex justify-content-between flex-wrap gap-2">
-      <div>
-        <h5 class="mb-0">{{ section.title }}</h5>
-        <div class="text-muted small mb-2">{{ section.hint }}</div>
-      </div>
-    </div>
-
-    {% if section.totals %}
-    <div class="d-flex flex-wrap gap-2 mb-3">
-      {% for t in section.totals %}
-      <div class="border rounded px-3 py-2 small">
-        <b>{{ t.user.display_name() if t.user else '—' }}</b><br>
-        {% if section.kind == 'pack' %}{{ t.qty | round(0) | int }} шт · {% endif %}{{ t.boxes }} кор. · {{ t.days }} дн.
-      </div>
-      {% endfor %}
-    </div>
-    {% endif %}
-
-    <div class="table-responsive">
-    <table class="table table-sm align-middle mb-0">
-      <thead>
-        <tr>
-          <th>Дата</th>
-          <th>Сотрудник</th>
-          {% if section.kind == 'pack' %}<th class="text-end">Товаров, шт</th>{% endif %}
-          <th class="text-end">Коробов</th>
-          {% if section.kind == 'pack' %}<th class="text-end">План, шт</th><th>%</th>{% endif %}
-          <th class="text-end">План, кор.</th>
-          <th>% кор.</th>
-        </tr>
-      </thead>
-      <tbody>
-      {% for r in section.rows %}
-        {% set day = r.day.isoformat() %}
-        <tr>
-          <td>{{ r.day.strftime('%d.%m.%Y') }}</td>
-          <td>{{ r.user.display_name() if r.user else '—' }}</td>
-          {% if section.kind == 'pack' %}<td class="text-end">{{ r.qty | round(0) | int }}</td>{% endif %}
-          <td class="text-end">{{ r.boxes }}</td>
-          {% if section.kind == 'pack' %}
-          <td class="text-end" style="width:120px">
+<h5 class="mb-2">Планы</h5>
+<div class="row g-3 mb-4">
+  <div class="col-lg-7">
+    <form method="post" action="{{ url_for('reports.employee_output_save_plans') }}" class="card p-3 h-100">
+      <input type="hidden" name="date_from" value="{{ date_from.isoformat() }}">
+      <input type="hidden" name="date_to" value="{{ date_to.isoformat() }}">
+      <input type="hidden" name="user_id" value="{{ user_id or '' }}">
+      <div class="fw-semibold">План по умолчанию на рабочий день</div>
+      <div class="text-muted small mb-2">Пусто — плана нет. Действует на все дни, где нет плана на конкретную дату.</div>
+      <div class="table-responsive" style="max-height:320px;overflow:auto">
+      <table class="table table-sm align-middle mb-0">
+        <thead>
+          <tr class="small text-muted"><th>Сотрудник</th>
+            <th class="text-end">Упак., шт</th><th class="text-end">Упак., кор.</th><th class="text-end">Сборка, кор.</th></tr>
+        </thead>
+        <tbody>
+        {% for u in users %}
+          {% set pk = defaults.get(('pack', u.id)) %}
+          {% set pc = defaults.get(('pick', u.id)) %}
+          <tr>
+            <td>{{ u.display_name() }}</td>
             {% if current_user.is_admin %}
-            <input type="number" min="0" step="1" class="form-control form-control-sm text-end"
-                   name="day__{{ section.kind }}__{{ r.user_id }}__{{ day }}__qty"
-                   value="{{ r.override_qty | int if r.override_qty is not none else '' }}"
-                   placeholder="{{ r.plan_qty | int if r.plan_qty is not none else '—' }}">
-            {% else %}{{ r.plan_qty | int if r.plan_qty is not none else '—' }}{% endif %}
-          </td>
-          <td>
-            {% if r.pct_qty is not none %}<span class="badge {{ 'bg-success' if r.pct_qty >= 100 else ('bg-warning text-dark' if r.pct_qty >= 70 else 'bg-danger') }}">{{ r.pct_qty }}%</span>{% else %}<span class="text-muted">—</span>{% endif %}
-          </td>
-          {% endif %}
-          <td class="text-end" style="width:120px">
-            {% if current_user.is_admin %}
-            <input type="number" min="0" step="1" class="form-control form-control-sm text-end"
-                   name="day__{{ section.kind }}__{{ r.user_id }}__{{ day }}__boxes"
-                   value="{{ r.override_boxes if r.override_boxes is not none else '' }}"
-                   placeholder="{{ r.plan_boxes if r.plan_boxes is not none else '—' }}">
-            {% else %}{{ r.plan_boxes if r.plan_boxes is not none else '—' }}{% endif %}
-          </td>
-          <td>
-            {% if r.pct_boxes is not none %}<span class="badge {{ 'bg-success' if r.pct_boxes >= 100 else ('bg-warning text-dark' if r.pct_boxes >= 70 else 'bg-danger') }}">{{ r.pct_boxes }}%</span>{% else %}<span class="text-muted">—</span>{% endif %}
-          </td>
-        </tr>
-      {% else %}
-        <tr><td colspan="8" class="text-muted">Нет данных за выбранный период</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
-    </div>
-    {% if current_user.is_admin and section.rows %}
-    <div class="text-muted small mt-2">В поле «План» серым показан план по умолчанию; впишите число, чтобы задать план именно на этот день.</div>
-    {% endif %}
-  </div>
-  {% endfor %}
-  </details>
-
-  <div class="card p-3 mb-4">
-    <h5 class="mb-1">План по умолчанию (на каждый рабочий день)</h5>
-    <div class="text-muted small mb-2">Пусто — плана нет. Применяется ко всем дням, где нет плана на конкретную дату.</div>
-    <div class="table-responsive">
-    <table class="table table-sm align-middle mb-0">
-      <thead>
-        <tr><th>Сотрудник</th>
-          <th class="text-end">Упаковка: шт</th><th class="text-end">Упаковка: коробов</th>
-          <th class="text-end">Сборка: коробов</th></tr>
-      </thead>
-      <tbody>
-      {% for u in users %}
-        {% set pk = defaults.get(('pack', u.id)) %}
-        {% set pc = defaults.get(('pick', u.id)) %}
-        <tr>
-          <td>{{ u.display_name() }}</td>
-          {% if current_user.is_admin %}
-          <td style="width:140px"><input type="number" min="0" step="1" class="form-control form-control-sm text-end" name="def__pack__{{ u.id }}__qty" value="{{ pk.qty_plan | int if pk and pk.qty_plan is not none else '' }}"></td>
-          <td style="width:140px"><input type="number" min="0" step="1" class="form-control form-control-sm text-end" name="def__pack__{{ u.id }}__boxes" value="{{ pk.boxes_plan if pk and pk.boxes_plan is not none else '' }}"></td>
-          <td style="width:140px"><input type="number" min="0" step="1" class="form-control form-control-sm text-end" name="def__pick__{{ u.id }}__boxes" value="{{ pc.boxes_plan if pc and pc.boxes_plan is not none else '' }}"></td>
-          {% else %}
-          <td class="text-end">{{ pk.qty_plan | int if pk and pk.qty_plan is not none else '—' }}</td>
-          <td class="text-end">{{ pk.boxes_plan if pk and pk.boxes_plan is not none else '—' }}</td>
-          <td class="text-end">{{ pc.boxes_plan if pc and pc.boxes_plan is not none else '—' }}</td>
-          {% endif %}
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-    </div>
+            <td style="width:96px"><input type="number" min="0" step="1" class="form-control form-control-sm text-end" name="def__pack__{{ u.id }}__qty" value="{{ pk.qty_plan | int if pk and pk.qty_plan is not none else '' }}"></td>
+            <td style="width:96px"><input type="number" min="0" step="1" class="form-control form-control-sm text-end" name="def__pack__{{ u.id }}__boxes" value="{{ pk.boxes_plan if pk and pk.boxes_plan is not none else '' }}"></td>
+            <td style="width:96px"><input type="number" min="0" step="1" class="form-control form-control-sm text-end" name="def__pick__{{ u.id }}__boxes" value="{{ pc.boxes_plan if pc and pc.boxes_plan is not none else '' }}"></td>
+            {% else %}
+            <td class="text-end">{{ pk.qty_plan | int if pk and pk.qty_plan is not none else '—' }}</td>
+            <td class="text-end">{{ pk.boxes_plan if pk and pk.boxes_plan is not none else '—' }}</td>
+            <td class="text-end">{{ pc.boxes_plan if pc and pc.boxes_plan is not none else '—' }}</td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% if current_user.is_admin %}
+      <div class="mt-2"><button type="submit" class="btn btn-primary btn-sm">💾 Сохранить план</button></div>
+      {% endif %}
+    </form>
   </div>
 
   {% if current_user.is_admin %}
-  <button type="submit" class="btn btn-primary mb-4">💾 Сохранить план</button>
+  <div class="col-lg-5">
+    <form method="post" action="{{ url_for('reports.employee_output_save_plans') }}" class="card p-3 h-100">
+      <input type="hidden" name="date_from" value="{{ date_from.isoformat() }}">
+      <input type="hidden" name="date_to" value="{{ date_to.isoformat() }}">
+      <input type="hidden" name="user_id" value="{{ user_id or '' }}">
+      <div class="fw-semibold">План на конкретный день</div>
+      <div class="text-muted small mb-2">Перекрывает план по умолчанию. Оба поля пустые — план на этот день снимается.</div>
+      <div class="row g-2">
+        <div class="col-12">
+          <select name="one_user" class="form-select form-select-sm" required>
+            <option value="">Сотрудник…</option>
+            {% for u in users %}<option value="{{ u.id }}">{{ u.display_name() }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-6">
+          <select name="one_kind" class="form-select form-select-sm">
+            <option value="pack">Упаковка</option><option value="pick">Сборка</option>
+          </select>
+        </div>
+        <div class="col-6"><input type="date" name="one_date" class="form-control form-control-sm" value="{{ date_to.isoformat() }}" required></div>
+        <div class="col-6"><input type="number" min="0" step="1" name="one_qty" class="form-control form-control-sm" placeholder="Товаров, шт"></div>
+        <div class="col-6"><input type="number" min="0" step="1" name="one_boxes" class="form-control form-control-sm" placeholder="Коробов"></div>
+        <div class="col-12"><button type="submit" class="btn btn-outline-primary btn-sm">Задать план на день</button></div>
+      </div>
+    </form>
+  </div>
   {% endif %}
-</form>
+</div>
 
 </div>
 {% endblock %}
@@ -345,6 +309,14 @@
     drawChart(perDay, m, workDays ? total / workDays : 0);
     drawRank(perEmp, m, avgPlan);
     drawMatrix(perEmp, m, byUser);
+    drawTable(perEmp, m);
+  }
+
+  function drawTable(perEmp, m) {
+    var rows = perEmp.slice().sort(function (a, b) { return b.avg - a.avg; });
+    $("tbl").innerHTML = '<thead><tr class="small text-muted"><th>Сотрудник</th><th class="text-end">Раб. дней</th><th class="text-end">' + m.mainUnit + ' за период</th><th class="text-end">' + m.secUnit + ' за период</th><th class="text-end">Среднее в день</th><th class="text-end">План в день</th><th class="text-end">% плана</th></tr></thead><tbody>' +
+      rows.map(function (r) { var p = pct(r.avg, r.planDay);
+        return '<tr><td>' + esc(r.name) + '</td><td class="text-end">' + r.work + '</td><td class="text-end">' + fmt(r.sum) + '</td><td class="text-end">' + fmt(r.sec) + '</td><td class="text-end">' + fmt(r.avg) + '</td><td class="text-end">' + (r.planDay ? fmt(r.planDay) : "—") + '</td><td class="text-end">' + (p === null ? "—" : p + "%") + '</td></tr>'; }).join("") + '</tbody>';
   }
 
   function niceMax(v) { if (v <= 0) return 10; var p = Math.pow(10, Math.floor(Math.log10(v))), n = v / p;
@@ -357,20 +329,20 @@
     var n = dates.length, step = iw / n, bw = Math.min(34, step * 0.62), s = "";
     var every = n > 20 ? Math.ceil(n / 14) : 1;
     for (var k = 0; k <= 4; k++) { var v = top / 4 * k, yy = y(v);
-      s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + yy + '" y2="' + yy + '" stroke="#e9edf1" stroke-width="1"/>' +
+      s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + yy + '" y2="' + yy + '" stroke="var(--eo-grid)" stroke-width="1"/>' +
            '<text x="' + (L - 8) + '" y="' + (yy + 4) + '" text-anchor="end">' + fmt(v) + '</text>'; }
     dates.forEach(function (day, i) {
       var cx = L + step * i + step / 2, x = cx - bw / 2, h = perDay[i].sum / top * ih, yTop = y(perDay[i].sum);
       if (h > 0) { var r = Math.min(4, h);
         s += '<path d="M' + x + ' ' + (T + ih) + ' V' + (yTop + r) + ' Q' + x + ' ' + yTop + ' ' + (x + r) + ' ' + yTop + ' H' + (x + bw - r) +
              ' Q' + (x + bw) + ' ' + yTop + ' ' + (x + bw) + ' ' + (yTop + r) + ' V' + (T + ih) + ' Z" fill="var(--eo-accent)" opacity="' + (isWe(day.d) ? .65 : 1) + '"/>'; }
-      if (i % every === 0) s += '<text x="' + cx + '" y="' + (H - 10) + '" text-anchor="middle"' + (isWe(day.d) ? ' style="fill:#b3261e"' : '') + '>' + dd(day.d) + '</text>';
+      if (i % every === 0) s += '<text x="' + cx + '" y="' + (H - 10) + '" text-anchor="middle"' + (isWe(day.d) ? ' style="fill:var(--eo-bad)"' : '') + '>' + dd(day.d) + '</text>';
     });
     perDay.forEach(function (p, i) { if (p.plan) { var yp = y(p.plan);
       s += '<line x1="' + (L + step * i + step * 0.08) + '" x2="' + (L + step * (i + 1) - step * 0.08) + '" y1="' + yp + '" y2="' + yp + '" stroke="var(--eo-plan)" stroke-width="2" stroke-dasharray="5 4"/>'; } });
     var ya = y(avgPerDay);
-    s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + ya + '" y2="' + ya + '" stroke="#4a5866" stroke-width="1.5" stroke-dasharray="1.5 4" stroke-linecap="round"/>' +
-         '<text x="' + (W - R) + '" y="' + (ya - 6) + '" text-anchor="end" style="fill:#4a5866">среднее ' + fmt(avgPerDay) + '</text>';
+    s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + ya + '" y2="' + ya + '" stroke="var(--eo-ink2)" stroke-width="1.5" stroke-dasharray="1.5 4" stroke-linecap="round"/>' +
+         '<text x="' + (W - R) + '" y="' + (ya - 6) + '" text-anchor="end" style="fill:var(--eo-ink2)">среднее ' + fmt(avgPerDay) + '</text>';
     dates.forEach(function (day, i) { s += '<rect data-i="' + i + '" x="' + (L + step * i) + '" y="' + T + '" width="' + step + '" height="' + ih + '" fill="transparent"/>'; });
     var svg = $("chart"); svg.setAttribute("viewBox", "0 0 " + W + " " + H); svg.innerHTML = s;
     $("chartSub").textContent = "Сумма по выбранным сотрудникам, " + m.mainName + " в день";
@@ -395,7 +367,7 @@
     var rows = perEmp.slice().sort(function (a, b) { return b.avg - a.avg; });
     var mx = Math.max.apply(null, rows.map(function (r) { return Math.max(r.avg, r.planDay || 0); }).concat([1])) * 1.05;
     var teamAvg = rows.length ? rows.reduce(function (a, r) { return a + r.avg; }, 0) / rows.length : 0;
-    $("rankSub").textContent = "Среднее в день — по рабочим дням сотрудника. Чёрная метка — план. Среднее по команде: " + fmt(teamAvg) + " " + m.mainUnit;
+    $("rankSub").textContent = "Среднее в день — по рабочим дням сотрудника. Светлая метка — план. Среднее по команде: " + fmt(teamAvg) + " " + m.mainUnit;
     var h = '<div class="rrow head"><span>Сотрудник</span><span class="h-track">Среднее в день, ' + m.mainUnit + '</span><span class="num">Среднее</span><span class="num h-tot">За период</span><span class="num">% плана</span></div>';
     h += rows.map(function (r) { var p = pct(r.avg, r.planDay);
       return '<div class="rrow"><span class="rname" title="' + esc(r.name) + '">' + esc(r.name) + '</span>' +

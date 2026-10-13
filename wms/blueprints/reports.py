@@ -714,6 +714,16 @@ def employee_output_save_plans():
         return redirect(back)
 
     pending = {}
+    one_user = request.form.get("one_user", "")
+    if one_user.isdigit():
+        # форма «План на конкретный день»: сотрудник + вид + дата + значения
+        one_date = _parse_day(request.form.get("one_date"))
+        one_kind = request.form.get("one_kind")
+        if one_date is not None and one_kind in ("pack", "pick"):
+            pending[(int(one_user), one_kind, one_date)] = {
+                "qty": _number_or_none(request.form.get("one_qty")),
+                "boxes": _number_or_none(request.form.get("one_boxes"), as_int=True),
+            }
     for name, raw in request.form.items():
         parts = name.split("__")
         if parts[0] == "def" and len(parts) == 4:
