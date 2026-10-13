@@ -500,16 +500,118 @@ def transport_mark_shipped(doc_id):
 @bp.route("/")
 def list_documents():
     pagination = _movement_pagination()
+    destination_choices = []
+    if current_user.is_admin:
+        destination_choices = (
+            Warehouse.query.filter(Warehouse.is_active.is_(True), Warehouse.marketplace.isnot(None))
+            .order_by(Warehouse.marketplace, Warehouse.name)
+            .all()
+        )
     return render_template(
         "movement/list.html",
         documents=pagination.items,
         pagination=pagination,
+        destination_choices=destination_choices,
         route_box_number="",
         route_box=None,
         route_not_found=False,
         routing=[],
         **_movement_filter_options(),
     )
+
+
+@bp.route("/change-destination", methods=["POST"])
+def change_destination():
+    """Массовая смена склада назначения у выбранных перемещений — только
+    для администратора. Нужна, чтобы переделать перемещения, ошибочно
+    заведенные на WB, на Ozon (и наоборот), не пересобирая документ.
+
+    Правила: принятые на маркетплейсе (received_at) и объединенные
+    документы не трогаем (по ним уже зачтено выполнение плана — сначала
+    «Вернуть в работу»); у завершенных, но еще не принятых короба
+    физически уезжают на новый склад; запомненное сопоставление ГМ Ozon
+    сбрасывается (оно относилось к старой поставке); при смене WB ↔ Ozon
+    сбрасывается номер заявки на МП (он выдан другим маркетплейсом); в
+    Ozon-документе не больше 30 коробов. Документы, уже выгруженные в 1С,
+    там автоматически не поправятся — об этом говорим в сообщении."""
+    if not current_user.is_admin:
+        flash("Менять склад назначения может только администратор", "danger")
+        return redirect(url_for("movement.list_documents"))
+
+    doc_ids = request.form.getlist("doc_ids", type=int)
+    new_warehouse_id = request.form.get("new_to_warehouse_id", type=int)
+    if not doc_ids:
+        flash("Выберите перемещения, у которых нужно сменить склад назначения", "danger")
+        return redirect(url_for("movement.list_documents"))
+    new_warehouse = Warehouse.query.get(new_warehouse_id) if new_warehouse_id else None
+    if new_warehouse is None or not new_warehouse.is_active:
+        flash("Выберите новый склад назначения", "danger")
+        return redirect(url_for("movement.list_documents"))
+
+    changed, skipped, synced_numbers = [], [], []
+    for doc in MovementDocument.query.filter(MovementDocument.id.in_(doc_ids)).order_by(MovementDocument.id):
+        if doc.to_warehouse_id == new_warehouse.id:
+            skipped.append(f"{doc.number} (уже на этот склад)")
+            continue
+        if new_warehouse.id == doc.from_warehouse_id:
+            skipped.append(f"{doc.number} (склад назначения совпал бы с отправителем)")
+            continue
+        if doc.status == "merged":
+            skipped.append(f"{doc.number} (объединен)")
+            continue
+        if doc.received_at is not None:
+            skipped.append(f"{doc.number} (уже принят — сначала «Вернуть в работу»)")
+            continue
+        line_count = doc.lines.count()
+        if new_warehouse.marketplace == "ozon" and line_count > 30:
+            skipped.append(f"{doc.number} ({line_count} коробов — в Ozon не больше 30)")
+            continue
+
+        old_warehouse = doc.to_warehouse
+        if doc.status == "completed":
+            for line in doc.lines:
+                box = line.box
+                if box.warehouse_id == old_warehouse.id:
+                    box.warehouse_id = new_warehouse.id
+                    box.warehouse_arrived_at = datetime.utcnow()
+                    box.cell_id = None
+                    box.zone_id = None
+                    box.status = "open"
+        elif new_warehouse.marketplace == "ozon":
+            if line_count >= 30:
+                doc.status = "collected"
+        elif doc.status == "collected":
+            doc.status = "draft"
+
+        MovementCargoPlace.query.filter_by(document_id=doc.id).delete()
+        if (old_warehouse.marketplace or None) != (new_warehouse.marketplace or None):
+            doc.marketplace_request_number = None
+            doc.marketplace_request_created_at = None
+        if doc.synced_to_1c_at is not None:
+            synced_numbers.append(doc.number)
+        doc.to_warehouse_id = new_warehouse.id
+        changed.append(doc.number)
+        current_app.logger.warning(
+            "Склад назначения перемещения %s: «%s» → «%s» (%s)",
+            doc.number, old_warehouse.name, new_warehouse.name, current_user.username,
+        )
+    db.session.commit()
+
+    if changed:
+        flash(
+            f"Склад назначения изменен на «{new_warehouse.name}»: {', '.join(changed)}. "
+            "Если у перемещения был номер заявки на МП другого маркетплейса — он сброшен, внесите заново.",
+            "success",
+        )
+    if synced_numbers:
+        flash(
+            "Уже выгружены в 1С и там склад автоматически не изменится — поправьте вручную: "
+            + ", ".join(synced_numbers),
+            "warning",
+        )
+    if skipped:
+        flash("Не изменены: " + "; ".join(skipped), "warning")
+    return redirect(url_for("movement.list_documents"))
 
 
 @bp.route("/merge", methods=["POST"])
