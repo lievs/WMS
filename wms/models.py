@@ -239,6 +239,15 @@ class User(UserMixin, db.Model):
             self.movement_receive_allowed is None and self.movement_complete_allowed is True
         )
 
+    def is_main_admin(self):
+        """Именно пользователь «Администратор» (встроенная учетная запись,
+        логин admin), а не любой с правами администратора — для действий,
+        которые владелец оставил только за ним (например, массовая смена
+        склада назначения в перемещениях)."""
+        if not self.is_admin:
+            return False
+        return self.username == "admin" or (self.full_name or "").strip().lower() == "администратор"
+
     def can_view_management_dashboard(self):
         return self.is_admin or self.management_dashboard_allowed is True
 

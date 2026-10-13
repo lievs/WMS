@@ -501,7 +501,7 @@ def transport_mark_shipped(doc_id):
 def list_documents():
     pagination = _movement_pagination()
     destination_choices = []
-    if current_user.is_admin:
+    if current_user.is_main_admin():
         destination_choices = (
             Warehouse.query.filter(Warehouse.is_active.is_(True), Warehouse.marketplace.isnot(None))
             .order_by(Warehouse.marketplace, Warehouse.name)
@@ -523,7 +523,7 @@ def list_documents():
 @bp.route("/change-destination", methods=["POST"])
 def change_destination():
     """Массовая смена склада назначения у выбранных перемещений — только
-    для администратора. Нужна, чтобы переделать перемещения, ошибочно
+    для пользователя «Администратор» (не любого админа). Нужна, чтобы переделать перемещения, ошибочно
     заведенные на WB, на Ozon (и наоборот), не пересобирая документ.
 
     Правила: принятые на маркетплейсе (received_at) и объединенные
@@ -534,8 +534,8 @@ def change_destination():
     сбрасывается номер заявки на МП (он выдан другим маркетплейсом); в
     Ozon-документе не больше 30 коробов. Документы, уже выгруженные в 1С,
     там автоматически не поправятся — об этом говорим в сообщении."""
-    if not current_user.is_admin:
-        flash("Менять склад назначения может только администратор", "danger")
+    if not current_user.is_main_admin():
+        flash("Менять склад назначения может только пользователь «Администратор»", "danger")
         return redirect(url_for("movement.list_documents"))
 
     doc_ids = request.form.getlist("doc_ids", type=int)

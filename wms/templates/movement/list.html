@@ -170,6 +170,7 @@
       </div>
       <div class="d-flex gap-2">
         {% if current_user.is_admin %}
+        {% if current_user.is_main_admin() %}
         <select name="new_to_warehouse_id" class="form-select form-select-sm" style="width:auto;max-width:230px" id="newDestSelect"
                 title="Куда переделать выбранные перемещения (например, с ВБ на Озон)">
           <option value="">Склад назначения…</option>
@@ -177,6 +178,7 @@
         </select>
         <button type="submit" formmethod="post" formaction="{{ url_for('movement.change_destination') }}" class="btn btn-outline-secondary btn-sm" id="changeDestBtn" disabled
                 onclick="var s=document.getElementById('newDestSelect'); return confirm('Сменить склад назначения у выбранных перемещений на «' + s.options[s.selectedIndex].text + '»? Принятые и объединенные документы не изменятся; номер заявки на МП сбросится, если маркетплейс другой.');">↪ Сменить склад получатель (<span id="selectedDocsCount4">0</span>)</button>
+        {% endif %}
         <button type="submit" formmethod="post" formaction="{{ url_for('movement.merge_documents') }}" class="btn btn-outline-secondary btn-sm" id="mergeDocsBtn" disabled
                 onclick="return confirm('Объединить выбранные черновики в один документ? Короба переедут в новый документ, старые останутся в истории со статусом «Объединен».');">🔀 Объединить выбранные (<span id="selectedDocsCount3">0</span>)</button>
         {% endif %}

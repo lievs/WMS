@@ -116,6 +116,20 @@ def test_only_admin_can_change_destination(db, client):
     assert MovementDocument.query.get(doc.id).to_warehouse_id == wb.id
 
 
+def test_other_admin_users_cannot_change_destination(db, client):
+    doc, sender, wb, ozon, boxes = _setup()
+    other = User(username="boss2", full_name="Другой админ", is_admin=True)
+    other.set_password("pw12345")
+    db.session.add(other)
+    db.session.commit()
+    with client.session_transaction() as sess:
+        sess["_user_id"] = str(other.id)
+        sess["_fresh"] = True
+    _change(client, [doc.id], ozon.id)
+    assert MovementDocument.query.get(doc.id).to_warehouse_id == wb.id
+    assert "Сменить склад получатель" not in client.get("/movement/").get_data(as_text=True)
+
+
 def test_list_shows_admin_controls(db, client_logged_in):
     doc, sender, wb, ozon, boxes = _setup()
     html = client_logged_in.get("/movement/").get_data(as_text=True)
