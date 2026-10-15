@@ -77,6 +77,31 @@
         </table>
       </div>
     {% endif %}
+    {% if route_box and routing_explain|default([]) %}
+      <details class="mt-3">
+        <summary class="small" style="cursor:pointer">Почему так: расчёт по каждому городу плана</summary>
+        <div class="table-responsive">
+        <table class="table table-sm small mb-0">
+          <thead><tr><th>Склад-город</th><th>Товар</th><th class="text-end">План</th><th class="text-end">Выполнено</th><th class="text-end">Едет</th><th class="text-end">В черновиках</th><th class="text-end">Цель</th><th class="text-end">Нужно</th><th>Правило</th></tr></thead>
+          <tbody>
+          {% for r in routing_explain %}
+            <tr{% if r.remaining > 0 %} class="table-success"{% endif %}>
+              <td>{{ r.warehouse.name }}</td>
+              <td>{{ r.nomenclature.name if r.nomenclature else '' }}</td>
+              <td class="text-end">{{ r.planned | round(0) | int }}</td>
+              <td class="text-end">{{ r.fulfilled | round(0) | int }}</td>
+              <td class="text-end">{{ r.in_transit | round(0) | int }}</td>
+              <td class="text-end">{{ r.drafts | round(0) | int }}</td>
+              <td class="text-end">{{ r.target | round(1) }}</td>
+              <td class="text-end"><b>{{ r.remaining | round(1) }}</b></td>
+              <td class="text-muted">{{ r.rule }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        </div>
+      </details>
+    {% endif %}
   {% endif %}
 </div>
 

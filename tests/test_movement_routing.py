@@ -489,3 +489,28 @@ def test_routing_stored_target_is_reduced_by_draft_boxes_still_at_sender(db, cli
     routing = _compute_routing(box)
 
     assert routing[0]["items"][0]["remaining"] == 3
+
+
+def test_route_box_page_explains_each_city(db, client_logged_in):
+    sender, city, item = _setup_plan(planned_qty=100, fulfilled_qty=40)
+    _make_box(sender, item, qty=10, box_number="BOX-000030")
+    html = client_logged_in.get("/movement/route-box?box_number=BOX-000030").get_data(as_text=True)
+    assert "Почему так" in html and "план − выполнено − уже едет" in html
+    assert "ОЗОН: Город" in html
+
+
+def test_explanation_shows_draft_boxes_that_cover_the_need(db, client_logged_in):
+    from wms.blueprints.movement import _routing_explanation
+
+    sender, city, item = _setup_plan(planned_qty=100)
+    draft_box = _make_box(sender, item, qty=100, box_number="BOX-000031")
+    doc = MovementDocument(number="PER-RT-3", from_warehouse_id=sender.id, to_warehouse_id=city.id, status="draft")
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add(MovementLine(document_id=doc.id, box_id=draft_box.id, from_warehouse_id=sender.id))
+    db.session.commit()
+    box = _make_box(sender, item, qty=20, box_number="BOX-000032")
+
+    rows = _routing_explanation(box)
+    assert rows[0]["drafts"] == 100 and rows[0]["remaining"] == 0
+    assert _compute_routing(box) == []

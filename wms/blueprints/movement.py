@@ -435,6 +435,64 @@ def _live_overflow_targets(lines):
     return targets
 
 
+def _routing_line_states(box):
+    """Состояние каждой строки плана по товарам короба: сколько осталось
+    (remaining) и по какому правилу посчитано — общая основа для
+    _compute_routing и для блока «Почему так» на экране «Куда везти короб».
+    Возвращает (qty_by_item, [состояния])."""
+    qty_by_item = {}
+    for box_item in box.items:
+        qty_by_item[box_item.nomenclature_id] = (
+            qty_by_item.get(box_item.nomenclature_id, 0) + box_item.qty
+        )
+    if not qty_by_item:
+        return qty_by_item, []
+
+    lines = ShipmentPlanLine.query.filter(
+        ShipmentPlanLine.nomenclature_id.in_(qty_by_item.keys())
+    ).all()
+    committed_by_period = {}
+    drafts_by_period = {}
+    live_targets = _live_overflow_targets(lines)
+
+    states = []
+    for line in lines:
+        period_start = _plan_line_start(line)
+        if period_start not in committed_by_period:
+            committed_by_period[period_start] = _committed_by_warehouse_and_item(period_start)
+            drafts_by_period[period_start] = _committed_by_warehouse_and_item(period_start, drafts_only=True)
+        key = (line.warehouse_id, line.nomenclature_id)
+        already_committed = committed_by_period[period_start].get(key, 0)
+        not_departed = drafts_by_period[period_start].get(key, 0)
+        if line.id in live_targets:
+            # Цель посчитана ПРЯМО СЕЙЧАС от остатка на складах-отправителях
+            # (см. _live_overflow_targets): выполненное и уже уехавшее в
+            # цель не входят, вычитаем только еще не уехавшие короба.
+            target = live_targets[line.id]
+            remaining = max(target - not_departed, 0)
+            rule = "доля остатка на складе (по текущему остатку)"
+        elif line.distributed_target_qty is not None:
+            # Цель из снимка при синхронизации плана — тоже доля остатка на
+            # складе, поэтому ни fulfilled_qty, ни «в пути» не вычитаем (см.
+            # чат: К-тSmile — цель в разы меньше уже отправленного, и короб
+            # с остатком получал «потребности нет»).
+            target = line.effective_planned_qty()
+            remaining = max(target - not_departed, 0)
+            rule = "доля остатка на складе (приоритет/снимок плана)"
+        else:
+            target = line.planned_qty
+            remaining = max(line.planned_qty - line.fulfilled_qty - already_committed, 0)
+            rule = "план − выполнено − уже едет"
+            if line._blocked_by_novelty_marketplace():
+                remaining = 0
+                rule = "новинка другой площадки — сюда не отправляем"
+        states.append({
+            "line": line, "remaining": remaining, "rule": rule, "target": target,
+            "committed": already_committed, "drafts": not_departed,
+        })
+    return qty_by_item, states
+
+
 def _compute_routing(box):
     """Для содержимого короба ищет склады-города, где по актуальному плану
     отгрузок есть невыполненная потребность (remaining_qty > 0, за вычетом
@@ -448,45 +506,10 @@ def _compute_routing(box):
     чат) целью служит не жесткий planned_qty конкретного города, а доля
     текущего "готово к отгрузке" пропорционально доле города в общем плане
     по штрихкоду — план по количеству для них не ограничение."""
-    qty_by_item = {}
-    for box_item in box.items:
-        qty_by_item[box_item.nomenclature_id] = (
-            qty_by_item.get(box_item.nomenclature_id, 0) + box_item.qty
-        )
-    if not qty_by_item:
-        return []
-
-    lines = ShipmentPlanLine.query.filter(
-        ShipmentPlanLine.nomenclature_id.in_(qty_by_item.keys())
-    ).all()
-    committed_by_period = {}
-    drafts_by_period = {}
-    live_targets = _live_overflow_targets(lines)
-
+    qty_by_item, states = _routing_line_states(box)
     by_warehouse = {}
-    for line in lines:
-        period_start = _plan_line_start(line)
-        if period_start not in committed_by_period:
-            committed_by_period[period_start] = _committed_by_warehouse_and_item(period_start)
-            drafts_by_period[period_start] = _committed_by_warehouse_and_item(period_start, drafts_only=True)
-        key = (line.warehouse_id, line.nomenclature_id)
-        already_committed = committed_by_period[period_start].get(key, 0)
-        not_departed = drafts_by_period[period_start].get(key, 0)
-        if line.id in live_targets:
-            # Цель посчитана ПРЯМО СЕЙЧАС от остатка на складах-отправителях
-            # (см. _live_overflow_targets): выполненное и уже уехавшее в
-            # цель не входят, вычитаем только еще не уехавшие короба.
-            remaining = max(live_targets[line.id] - not_departed, 0)
-        elif line.distributed_target_qty is not None:
-            # Цель из снимка при синхронизации плана — тоже доля остатка на
-            # складе, поэтому ни fulfilled_qty, ни «в пути» не вычитаем (см.
-            # чат: К-тSmile — цель в разы меньше уже отправленного, и короб
-            # с остатком получал «потребности нет»).
-            remaining = max(line.effective_planned_qty() - not_departed, 0)
-        else:
-            remaining = max(line.planned_qty - line.fulfilled_qty - already_committed, 0)
-            if line._blocked_by_novelty_marketplace():
-                remaining = 0
+    for state in states:
+        line, remaining = state["line"], state["remaining"]
         box_qty = qty_by_item.get(line.nomenclature_id, 0)
         if remaining <= 0 or box_qty <= 0:
             continue
@@ -499,6 +522,23 @@ def _compute_routing(box):
         entry["items"].append({"nomenclature": line.nomenclature, "box_qty": box_qty, "remaining": remaining})
 
     return sorted(by_warehouse.values(), key=lambda e: -e["matched_qty"])
+
+
+def _routing_explanation(box):
+    """Строки для блока «Почему так»: по каждому городу плана — план,
+    выполнено, едет, в черновиках, цель и итоговая потребность."""
+    _, states = _routing_line_states(box)
+    rows = []
+    for state in states:
+        line = state["line"]
+        rows.append({
+            "warehouse": line.warehouse, "nomenclature": line.nomenclature,
+            "planned": line.planned_qty or 0, "fulfilled": line.fulfilled_qty or 0,
+            "in_transit": max(state["committed"] - state["drafts"], 0), "drafts": state["drafts"],
+            "target": state["target"], "remaining": state["remaining"], "rule": state["rule"],
+        })
+    rows.sort(key=lambda r: (-r["remaining"], r["warehouse"].name))
+    return rows
 
 
 def _transport_waiting_query():
@@ -797,6 +837,7 @@ def route_box():
 
     box = None
     routing = []
+    routing_explain = []
     not_found = False
     if box_number:
         box = Box.find_by_scanned_code(box_number)
@@ -804,6 +845,7 @@ def route_box():
             not_found = True
         else:
             routing = _compute_routing(box)
+            routing_explain = _routing_explanation(box)
 
     return render_template(
         "movement/list.html",
@@ -813,6 +855,7 @@ def route_box():
         route_box=box,
         route_not_found=not_found,
         routing=routing,
+        routing_explain=routing_explain,
     )
 
 
