@@ -389,6 +389,45 @@ def _committed_by_warehouse_and_item(period_start=None):
     return {(wh_id, nom_id): qty or 0 for wh_id, nom_id, qty in rows}
 
 
+def _live_overflow_targets(lines):
+    """{id строки плана: цель}, пересчитанная ПРЯМО СЕЙЧАС для обычных
+    товаров (без приоритета/новинки), у которых план по всем городам уже
+    закрыт, а упакованный остаток на складах-отправителях еще есть:
+    остаток делится пропорционально доле города в плане (тот же принцип,
+    что у shipment_plan._apply_priority_distribution, но по актуальному
+    остатку, а не по снимку на момент синхронизации плана — иначе короб,
+    собранный после синхронизации, получал «потребности нет»)."""
+    by_item = {}
+    for line in lines:
+        by_item.setdefault(line.nomenclature_id, []).append(line)
+    targets = {}
+    sender_ids = None
+    for nomenclature_id, item_lines in by_item.items():
+        if any(l.priority is not None or l.novelty_marketplace for l in item_lines):
+            continue
+        total_planned = sum(l.planned_qty or 0 for l in item_lines)
+        total_open = sum(max((l.planned_qty or 0) - (l.fulfilled_qty or 0), 0) for l in item_lines)
+        if total_planned <= 0 or total_open > 0:
+            continue
+        if sender_ids is None:
+            sender_ids = [
+                wh.id for wh in Warehouse.query.filter_by(marketplace=None, is_active=True).all()
+            ]
+        if not sender_ids:
+            return {}
+        ready = (
+            db.session.query(func.sum(BoxItem.qty))
+            .join(Box, BoxItem.box_id == Box.id)
+            .filter(BoxItem.nomenclature_id == nomenclature_id, Box.warehouse_id.in_(sender_ids))
+            .scalar()
+        ) or 0
+        if ready <= 0:
+            continue
+        for line in item_lines:
+            targets[line.id] = ready * (line.planned_qty or 0) / total_planned
+    return targets
+
+
 def _compute_routing(box):
     """Для содержимого короба ищет склады-города, где по актуальному плану
     отгрузок есть невыполненная потребность (remaining_qty > 0, за вычетом
@@ -414,6 +453,7 @@ def _compute_routing(box):
         ShipmentPlanLine.nomenclature_id.in_(qty_by_item.keys())
     ).all()
     committed_by_period = {}
+    live_targets = _live_overflow_targets(lines)
 
     by_warehouse = {}
     for line in lines:
@@ -422,7 +462,24 @@ def _compute_routing(box):
             committed_by_period[period_start] = _committed_by_warehouse_and_item(period_start)
         committed = committed_by_period[period_start]
         already_committed = committed.get((line.warehouse_id, line.nomenclature_id), 0)
-        remaining = max(line.effective_planned_qty() - line.fulfilled_qty - already_committed, 0)
+        if line.id in live_targets:
+            # Обычный товар с полностью закрытым планом — остаток
+            # распределяем по текущему «готово к отгрузке» прямо сейчас, а
+            # не по цифре, посчитанной при прошлой синхронизации плана.
+            remaining = max(live_targets[line.id] - already_committed, 0)
+        elif line.distributed_target_qty is not None:
+            # Цель — доля ТЕКУЩЕГО «готово к отгрузке» (см.
+            # shipment_plan._apply_priority_distribution), то есть того, что
+            # еще лежит на складе-отправителе. Уже выполненное по плану
+            # (fulfilled_qty) уехало раньше и в эту цель не входит — вычитать
+            # его нельзя: у обычного товара с закрытым планом (fulfilled >=
+            # planned) цель всегда меньше fulfilled, и короб с остатком
+            # получал «потребности нет» (см. чат: К-тSmile 44-48).
+            remaining = max(line.effective_planned_qty() - already_committed, 0)
+        else:
+            remaining = max(line.planned_qty - line.fulfilled_qty - already_committed, 0)
+            if line._blocked_by_novelty_marketplace():
+                remaining = 0
         box_qty = qty_by_item.get(line.nomenclature_id, 0)
         if remaining <= 0 or box_qty <= 0:
             continue
