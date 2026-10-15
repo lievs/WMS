@@ -82,7 +82,7 @@
 <div class="alert alert-secondary py-2 small">
   <b>Не привезли (строки удалены из документа):</b>
   {% for item in doc.removed_zero_items() %}{{ item.name }} — заявлено {{ item.expected_qty | round(3) }}{% if not loop.last %}; {% endif %}{% endfor %}.
-  В 1С по ним уходит нулевое количество.
+  В 1С такие строки не выгружаются и в сверку не попадают.
 </div>
 {% endif %}
 

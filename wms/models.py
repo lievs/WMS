@@ -827,8 +827,7 @@ class ReceivingDocument(db.Model):
     # (см. receiving.send_to_sorting), чтобы не мозолили глаза при сверке
     # расхождений. Что именно убрали — JSON-список
     # [{"barcode", "name", "expected_qty"}]: показывается на странице приемки
-    # и по-прежнему уходит в 1С нулевым количеством (см.
-    # integration_1c._receiving_adjustments_export).
+    # (в 1С такие строки не выгружаются и в сверку не попадают).
     removed_zero_lines = db.Column(db.Text, nullable=True)
 
     warehouse = db.relationship("Warehouse")

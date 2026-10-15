@@ -54,20 +54,46 @@ def test_nothing_removed_when_no_zero_lines(db, client_logged_in):
     assert doc.lines.count() == 3 and doc.removed_zero_lines is None
 
 
-def test_1c_adjustment_still_zeroes_removed_item(db, client_logged_in):
+def test_zero_lines_are_not_sent_to_1c_or_reconciliation(db, client_logged_in):
+    from wms.blueprints.integration_1c import _receiving_reconciliation_payload
+
     doc, items = _doc()
     client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
-    assert [d.id for d, _ in _receiving_adjustments_candidates()] == [doc.id]
     payload = _receiving_adjustments_export()[0]
-    by_barcode = {l["barcode"]: l["qty"] for l in payload["lines"]}
-    assert by_barcode == {"ZL0000": 10, "ZL0002": 7, "ZL0001": 0}
+    assert {l["barcode"]: l["qty"] for l in payload["lines"]} == {"ZL0000": 10, "ZL0002": 7}
+    doc = ReceivingDocument.query.get(doc.id)
+    assert {l["barcode"] for l in _receiving_reconciliation_payload(doc)["lines"]} == {"ZL0000", "ZL0002"}
 
 
-def test_doc_where_only_zero_line_was_removed_still_goes_to_1c_and_is_highlighted(db, client_logged_in):
+def test_legacy_zero_line_is_not_a_1c_discrepancy_even_if_still_in_wms(db):
+    from wms.blueprints.integration_1c import _receiving_reconciliation_payload
+
     doc, items = _doc()
+    doc.status = "sorting"
     ReceivingLine.query.filter_by(document_id=doc.id, nomenclature_id=items[2].id).first().qty = 9
     db.session.commit()
-    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
-    assert [d.id for d, _ in _receiving_adjustments_candidates()] == [doc.id]
-    html = client_logged_in.get("/receiving/").get_data(as_text=True)
-    assert "table-warning" in html and "ZL-0001" in html
+    # единственное расхождение — нулевая строка: в 1С ничего отправлять не нужно
+    assert _receiving_adjustments_candidates() == []
+    assert "ZL0001" not in {l["barcode"] for l in _receiving_reconciliation_payload(doc)["lines"]}
+
+
+def test_startup_cleanup_removes_old_zero_lines_once(db):
+    from wms import _cleanup_zero_receiving_lines
+
+    doc, items = _doc()
+    doc.status = "completed"
+    db.session.commit()
+    _cleanup_zero_receiving_lines()
+    doc = ReceivingDocument.query.get(doc.id)
+    assert sorted(l.qty for l in doc.lines) == [7, 10]
+    assert [i["barcode"] for i in doc.removed_zero_items()] == ["ZL0001"]
+    _cleanup_zero_receiving_lines()   # повтор ничего не меняет
+    assert len(ReceivingDocument.query.get(doc.id).removed_zero_items()) == 1
+
+
+def test_draft_and_recounting_documents_keep_zero_lines_until_sorting(db):
+    from wms import _cleanup_zero_receiving_lines
+
+    doc, items = _doc()   # status = recounting
+    _cleanup_zero_receiving_lines()
+    assert ReceivingDocument.query.get(doc.id).lines.count() == 3

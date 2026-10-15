@@ -269,6 +269,10 @@ def _receiving_reconciliation_payload(doc):
                 "qty": line.qty,
             }
             for line in doc.lines
+            # нулевая строка (товар не привезли) в 1С не создается — если
+            # отдать ее на сверку, получим «расхождение»: строка есть в WMS и
+            # нет в 1С
+            if line.qty and line.qty > 0
         ),
     }
 
@@ -432,9 +436,7 @@ def _receiving_adjustments_export():
                         "qty": line.qty,
                     }
                     for line in lines
-                ] + [
-                    {"barcode": item["barcode"], "name": item["name"], "qty": 0}
-                    for item in doc.removed_zero_items()
+                    if line.qty and line.qty > 0
                 ],
             }
         )
@@ -458,13 +460,13 @@ def _receiving_adjustments_candidates():
     )
     result = []
     for doc in documents:
+        # Строки с нулем (товар совсем не привезли) в 1С не создаются и не
+        # правятся — расхождением для 1С они не считаются.
         diff_lines = [
             line for line in doc.lines.all()
-            if line.expected_qty is not None and line.qty != line.expected_qty
+            if line.expected_qty is not None and line.qty > 0 and line.qty != line.expected_qty
         ]
-        # удаленные строки «не привезли» (см. receiving._remove_zero_lines) —
-        # тоже расхождение: в 1С по ним надо выставить ноль
-        if diff_lines or doc.removed_zero_items():
+        if diff_lines:
             result.append((doc, diff_lines))
     return result
 

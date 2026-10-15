@@ -196,6 +196,47 @@ def _ensure_columns():
                 print(f"[schema] Не удалось добавить {table.name}.{column.name}: {exc}")
 
 
+def _cleanup_zero_receiving_lines():
+    """Однократная чистка старых данных: в приемках по накладной, уже
+    ушедших на разбраковку/завершенных, остались строки с нулем (товар не
+    привезли). В 1С такой строки нет, поэтому сверка показывала расхождение.
+    Теперь такие строки удаляются при переходе на разбраковку (см.
+    receiving._remove_zero_lines); здесь добиваем то, что накопилось раньше.
+    Повторный запуск ничего не меняет."""
+    import json
+
+    from .models import ReceivingDocument, ReceivingLine
+
+    docs = (
+        ReceivingDocument.query.filter(
+            ReceivingDocument.invoice_file_name.isnot(None),
+            ReceivingDocument.status.in_(("sorting", "completed")),
+        ).all()
+    )
+    cleaned = 0
+    for doc in docs:
+        zero_lines = [
+            line for line in doc.lines.all()
+            if (line.qty or 0) <= 0 and not line.box_id and (line.defect_qty or 0) <= 0
+        ]
+        if not zero_lines:
+            continue
+        removed = list(doc.removed_zero_items())
+        for line in zero_lines:
+            if line.expected_qty is not None:
+                removed.append({
+                    "barcode": line.nomenclature.barcode,
+                    "name": line.nomenclature.name,
+                    "expected_qty": line.expected_qty,
+                })
+            db.session.delete(line)
+            cleaned += 1
+        doc.removed_zero_lines = json.dumps(removed, ensure_ascii=False)
+    if cleaned:
+        db.session.commit()
+        print(f"[schema] удалено строк с нулевым количеством в приемках по накладной: {cleaned}")
+
+
 def _ensure_indexes():
     """Аналогично _ensure_columns(), но для индексов: index=True в модели
     заставляет create_all() создать индекс только для НОВОЙ таблицы — для
@@ -587,6 +628,7 @@ def create_app(config_class=Config):
         db.create_all()
         _ensure_columns()
         _ensure_indexes()
+        _cleanup_zero_receiving_lines()
         _ensure_mvb_lines()
         _ensure_mvb_destinations()
         if not app.config.get("TESTING"):
