@@ -52,16 +52,17 @@ SCAN_MODES = {
         "nav": "Скан забора",
         "to": "picked_up",
         "from": {"created"},
-        # Забор у клиента сканирует водитель (в меню — только у него).
-        "roles": {"mvb_driver", "mvb_admin"},
+        # Водитель короба не сканирует — сверяет количество и жмет «Забрал»
+        # (driver_picked). Скан забора оставлен только администратору МВБ.
+        "roles": {"mvb_admin"},
     },
     "receive": {
         "title": "Приемка на складе МВБ",
         "nav": "Приемка",
         "to": "received",
         # Приемка — для самопривоза и вернувшихся с СЦ; короба с забора
-        # водитель сдает кнопкой «Короба сданы в МВБ» (скан забранного
-        # короба тоже примет его, если водитель забыл нажать).
+        # приемщик пересчитывает в «Приемке от водителей» (скан забранного
+        # короба тоже примет его).
         "from": {"created", "picked_up", "not_delivered"},
         "roles": {"mvb_storekeeper", "mvb_admin"},
     },
@@ -168,6 +169,10 @@ def _inject():
         "mvb_pending_clients": (
             MvbClient.query.filter_by(approval="pending").count()
             if current_user.is_authenticated and _is_operator() else 0
+        ),
+        "mvb_handover_count": (
+            MvbBox.query.filter_by(status="picked_up").count()
+            if current_user.is_authenticated and _is_storekeeper() else 0
         ),
         "MVB_TRIP_STATUSES": MVB_TRIP_STATUSES,
         "mvb_destinations": MvbDestination.active() if current_user.is_authenticated else [],
@@ -765,23 +770,84 @@ def driver_pickup_done(order_id):
     return redirect(url_for("mvb.driver"))
 
 
-@bp.route("/driver/handover", methods=["POST"])
-def driver_handover():
-    """«Короба сданы в МВБ»: водитель привез забранные короба на склад —
-    все они переходят в «На складе МВБ» без поштучной приемки."""
+@bp.route("/driver/orders/<int:order_id>/picked", methods=["POST"])
+def driver_picked(order_id):
+    """Водитель без скана сверяет количество коробов у клиента и жмет
+    «Забрал»: указанное число коробов заявки переходит в «Забран». Если
+    в машину влезло меньше, остаток возвращается в ленту забора."""
     if not _is_driver():
         abort(403)
-    boxes = MvbBox.query.filter(MvbBox.status == "picked_up", MvbBox.picked_up_by_id == current_user.id).all()
-    if not boxes:
-        flash("У вас нет забранных коробов", "warning")
+    order = MvbOrder.query.get_or_404(order_id)
+    if order.status != "confirmed" or order.delivery_method != "pickup":
+        abort(400)
+    if order.driver_id not in (None, current_user.id):
+        flash(f"Заявку {order.number} забирает другой водитель", "warning")
+        return redirect(url_for("mvb.driver"))
+    left = sorted((b for b in order.boxes if b.status == "created"), key=lambda b: b.seq)
+    count = request.form.get("count", type=int)
+    if count is None or count <= 0:
+        flash("Укажите, сколько коробов забрали", "danger")
+        return redirect(url_for("mvb.driver"))
+    if count > len(left):
+        flash(f"В заявке {order.number} к забору {len(left)} кор., а указано {count}. Сверьте количество с оператором", "danger")
         return redirect(url_for("mvb.driver"))
     now = datetime.utcnow()
-    for box in boxes:
-        _move_box(box, "received", now)
+    for box in left[:count]:
+        _move_box(box, "picked_up", now)
+        box.picked_up_by_id = current_user.id
+    if count < len(left):
+        order.driver_id = None
+        flash(
+            f"Забрано {count} из {len(left)} кор. у {order.client.name}. "
+            f"Остаток {len(left) - count} кор. вернулся в заявки на забор.", "warning",
+        )
+    else:
+        order.driver_id = current_user.id
+        order.pickup_done_at = order.pickup_done_at or now
+        flash(f"Забрано у {order.client.name}: {count} кор. Сдайте их приемщику на складе МВБ", "success")
     db.session.commit()
-    orders = sorted({box.order.number for box in boxes})
-    flash(f"Сдано на склад МВБ: {len(boxes)} кор. ({', '.join(orders)})", "success")
     return redirect(url_for("mvb.driver"))
+
+
+@bp.route("/handover", methods=["GET", "POST"])
+def handover():
+    """Приемка от водителей: приемщик пересчитывает привезенные водителем
+    короба заявки и подтверждает количество — короба встают на склад МВБ.
+    Если коробов меньше, принимается пересчитанное, остаток ждет."""
+    if not _is_storekeeper():
+        flash("Доступно кладовщику МВБ", "danger")
+        return redirect(url_for("mvb.index"))
+    if request.method == "POST":
+        order = MvbOrder.query.get_or_404(request.form.get("order_id", type=int))
+        boxes = sorted((b for b in order.boxes if b.status == "picked_up"), key=lambda b: b.seq)
+        count = request.form.get("count", type=int)
+        if not boxes:
+            flash(f"По заявке {order.number} нет коробов от водителя", "info")
+        elif count is None or count < 0:
+            flash("Укажите, сколько коробов пересчитали", "danger")
+        elif count > len(boxes):
+            flash(f"Пересчитано {count}, а водитель забрал {len(boxes)} кор. по заявке {order.number}. "
+                  f"Лишние короба примите через «📷 Приемку» или сообщите оператору", "danger")
+        else:
+            now = datetime.utcnow()
+            for box in boxes[:count]:
+                _move_box(box, "received", now)
+            db.session.commit()
+            if count == len(boxes):
+                flash(f"Принято на склад МВБ: {count} кор. по заявке {order.number}", "success")
+            else:
+                flash(f"Заявка {order.number}: принято {count} из {len(boxes)} кор. "
+                      f"Не хватает {len(boxes) - count} кор. — сообщите оператору", "warning")
+        return redirect(url_for("mvb.handover"))
+    boxes = MvbBox.query.filter(MvbBox.status == "picked_up").all()
+    groups = {}
+    for box in boxes:
+        row = groups.setdefault(box.order_id, {"order": box.order, "count": 0, "driver": db.session.get(User, box.picked_up_by_id) if box.picked_up_by_id else None, "last": None})
+        row["count"] += 1
+        if box.picked_up_at and (row["last"] is None or box.picked_up_at > row["last"]):
+            row["last"] = box.picked_up_at
+    rows = sorted(groups.values(), key=lambda r: (r["driver"].display_name() if r["driver"] else "", r["order"].number))
+    return render_template("mvb/handover.html", rows=rows)
 
 
 @bp.route("/driver/orders/<int:order_id>/release", methods=["POST"])

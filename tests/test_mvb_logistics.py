@@ -207,12 +207,11 @@ def test_box_scanned_through_all_stages(db, client):
     staff = _user("staff1", "mvb_admin")
 
     _login(client, driver)
-    data = client.post("/mvb/scan/pickup", data={"barcode": box.barcode}).get_json()
-    assert data["ok"] and not data["already"] and data["done"] == 1
-    # повторный скан того же короба — не ошибка и не двойной учет
-    data = client.post("/mvb/scan/pickup", data={"barcode": box.barcode.lower()}).get_json()
-    assert data["ok"] and data["already"]
-    # водителю приемка на складе недоступна
+    # водитель короба не сканирует: сверил количество и забрал 1 короб
+    client.post(f"/mvb/driver/orders/{order.id}/picked", data={"count": "1"})
+    assert box.status == "picked_up" and box.picked_up_by_id == driver.id
+    # водителю скан забора и приемка на складе недоступны
+    assert client.post("/mvb/scan/pickup", data={"barcode": box.barcode}).status_code == 403
     assert client.post("/mvb/scan/receive", data={"barcode": box.barcode}).status_code == 403
 
     _login(client, staff)
@@ -251,7 +250,7 @@ def test_self_delivery_boxes_cannot_be_picked_up_but_are_received(db, client):
     barcode = order.boxes[0].barcode
 
     _login(client, _user("driver1", "mvb_driver"))
-    assert client.post("/mvb/scan/pickup", data={"barcode": barcode}).status_code == 409
+    assert client.post(f"/mvb/driver/orders/{order.id}/picked", data={"count": "1"}).status_code == 400
 
     _login(client, _user("staff1", "mvb_admin"))
     assert client.post("/mvb/scan/receive", data={"barcode": barcode}).get_json()["ok"]
@@ -551,21 +550,25 @@ def test_driver_feed_shows_free_space_and_take(db, client):
 
     client.post(f"/mvb/driver/orders/{small.id}/take")
     assert db.session.get(MvbOrder, small.id).driver_id == driver.id
-    for box in small.boxes:
-        data = client.post("/mvb/scan/pickup", data={"barcode": box.barcode}).get_json()
-    assert data["warning"] == "В машине 2 из 5 кор."
+    client.post(f"/mvb/driver/orders/{small.id}/picked", data={"count": "2"})
+    assert {b.status for b in small.boxes} == {"picked_up"}
     client.get("/mvb/driver")
     assert "свободно <b>3</b>" in client.get("/mvb/driver").get_data(as_text=True)
     assert big.number in html
 
 
-def test_driver_scan_of_free_order_assigns_it(db, client):
+def test_driver_picks_free_order_by_count_and_it_is_assigned(db, client):
     _login(client, _user("client1", "mvb_client", _mvb_client()))
     order = _confirmed_order(client)
     driver = _user("driver1", "mvb_driver")
     _login(client, driver)
-    client.post("/mvb/scan/pickup", data={"barcode": order.boxes[0].barcode})
-    assert db.session.get(MvbOrder, order.id).driver_id == driver.id
+    # больше, чем в заявке, — отказ; ровно сколько есть — забор завершен
+    client.post(f"/mvb/driver/orders/{order.id}/picked", data={"count": str(len(order.boxes) + 1)})
+    assert {b.status for b in order.boxes} == {"created"}
+    client.post(f"/mvb/driver/orders/{order.id}/picked", data={"count": str(len(order.boxes))})
+    order = db.session.get(MvbOrder, order.id)
+    assert order.driver_id == driver.id and order.pickup_done_at is not None
+    assert {b.status for b in order.boxes} == {"picked_up"}
 
 
 def _wms_movement(number="PER-000777", boxes=2, request_number="WB-1"):
@@ -686,23 +689,28 @@ def test_full_chain_seller_to_sc(db, client):
     client.get("/mvb/driver")
     feed = client.get("/mvb/driver").get_data(as_text=True)
     assert first.number in feed and second.number in feed and too_big.number in feed
-    for box in first.boxes:
-        client.post("/mvb/scan/pickup", data={"barcode": box.barcode})
+    # короба не сканирует — сверяет количество и жмет «Забрал»
+    assert "✓ Забрал" in feed and "Сканировать" not in feed
+    client.post(f"/mvb/driver/orders/{first.id}/picked", data={"count": "3"})
     client.get("/mvb/driver")
     feed = client.get("/mvb/driver").get_data(as_text=True)
     assert "свободно <b>3</b>" in feed  # 3 из 6 заняты
     # вторая заявка (2 кор.) помещается — берет её по дороге
     client.post(f"/mvb/driver/orders/{second.id}/take")
-    for box in second.boxes:
-        data = client.post("/mvb/scan/pickup", data={"barcode": box.barcode}).get_json()
-    assert data["warning"] == "В машине 5 из 6 кор."
-
-    # 4. водитель привез короба на склад — одна кнопка «Короба сданы в МВБ»
-    assert "Короба сданы в МВБ" in client.get("/mvb/driver").get_data(as_text=True)
-    client.post("/mvb/driver/handover")
-    assert {b.status for b in first.boxes + second.boxes} == {"received"}
+    client.post(f"/mvb/driver/orders/{second.id}/picked", data={"count": "2"})
+    feed = client.get("/mvb/driver").get_data(as_text=True)
+    assert "У меня забрано: <b>5</b>" in feed and "приемщику" in feed
     # приемка — у кладовщика, оператору и водителю она не нужна
+    assert client.get("/mvb/handover").status_code == 302
     assert client.post("/mvb/scan/receive", data={"barcode": first.boxes[0].barcode}).status_code == 403
+
+    # 4. приемщик пересчитывает привезенные короба по заявкам и подтверждает
+    _login(client, keeper)
+    page = client.get("/mvb/handover").get_data(as_text=True)
+    assert first.number in page and second.number in page and "Водитель забрал: <b>3</b>" in page
+    client.post("/mvb/handover", data={"order_id": str(first.id), "count": "3"})
+    client.post("/mvb/handover", data={"order_id": str(second.id), "count": "2"})
+    assert {b.status for b in first.boxes + second.boxes} == {"received"}
     _login(client, operator)
     assert client.post("/mvb/scan/receive", data={"barcode": first.boxes[0].barcode}).status_code == 403
 
@@ -1023,10 +1031,9 @@ def test_driver_report_counts_boxes_per_order_per_driver(db, client):
     order_b = _confirmed_order(client, box_count="2")
 
     _login(client, driver1)
-    for box in order_a.boxes[:2]:
-        client.post("/mvb/scan/pickup", data={"barcode": box.barcode})
+    client.post(f"/mvb/driver/orders/{order_a.id}/picked", data={"count": "2"})
     _login(client, driver2)
-    client.post("/mvb/scan/pickup", data={"barcode": order_b.boxes[0].barcode})
+    client.post(f"/mvb/driver/orders/{order_b.id}/picked", data={"count": "1"})
 
     assert client.get("/mvb/reports").status_code == 302  # водителю недоступно
 
@@ -1193,7 +1200,8 @@ def test_one_order_many_directions_with_own_box_counters(db, client):
     feed = client.get("/mvb/driver").get_data(as_text=True)
     assert order.number in feed and "<b>Коробов:</b> 5" in feed and "<b>Телефон:</b> +79990000000" in feed
     # скан короба: номер внутри своего направления
-    data = client.post("/mvb/scan/pickup", data={"barcode": oz.boxes[1].barcode}).get_json()
+    _login(client, _user("keeper", "mvb_storekeeper"))
+    data = client.post("/mvb/scan/receive", data={"barcode": oz.boxes[1].barcode}).get_json()
     assert data["seq"] == 2 and data["total"] == 2 and data["direction"] == "OZON Хоругвино"
 
 
@@ -1242,9 +1250,9 @@ def test_menu_by_role(db, client):
     seller = _user("seller", "mvb_client", _mvb_client())
     roles = {
         "seller": (seller, ["Мои заявки"], ["Заявки в работе", "Приемка", "Скан забора", "Настройки"]),
-        "driver": (_user("driver", "mvb_driver"), ["Заявки на забор", "Скан забора"], ["Заявки в работе", "Приемка", "Паллеты"]),
+        "driver": (_user("driver", "mvb_driver"), ["Заявки на забор"], ["Скан забора", "Заявки в работе", "Приемка", "Паллеты"]),
         "operator": (_user("operator", "mvb_staff"), ["Заявки в работе", "Клиенты", "Настройки", "Прайс", "Машины для СЦ", "Пользователи", "Рейсы"], ["Приемка", "Скан забора", "Заявки на забор", "Паллеты"]),
-        "keeper": (_user("keeper", "mvb_storekeeper"), ["Приемка", "Паллеты", "Погрузка"], ["Заявки в работе", "Скан забора", "Настройки", "Клиенты", "Рейсы"]),
+        "keeper": (_user("keeper", "mvb_storekeeper"), ["Приемка от водителей", "Приемка", "Паллеты", "Погрузка"], ["Заявки в работе", "Скан забора", "Настройки", "Клиенты", "Рейсы"]),
     }
     for name, (user, visible, hidden) in roles.items():
         _login(client, user)
@@ -1433,27 +1441,29 @@ def test_old_cities_and_destination_prices_migrate(db, client):
     assert MvbPriceTier.price_for("sc", 3, kazan.id) == 250 and MvbPriceTier.price_for("sc", 3, moscow.id) == 180
 
 
-def test_pickup_done_button_requires_all_boxes(db, client):
-    """После скана коробов на заборе — «Готово»; пока не все короба
-    отсканированы, завершить нельзя."""
+def test_storekeeper_confirms_counted_boxes_from_driver(db, client):
+    """Приемщик пересчитывает короба от водителя: пересчитал меньше — на
+    склад встает пересчитанное, остаток ждет; больше, чем забрал, — отказ."""
     _login(client, _user("seller", "mvb_client", _mvb_client()))
     order = _confirmed_order(client, box_count="3")
     driver = _user("driver", "mvb_driver")
     _login(client, driver)
     client.post(f"/mvb/driver/orders/{order.id}/take")
-    assert f"/mvb/scan/pickup?order={order.id}" in client.get("/mvb/driver").get_data(as_text=True)
-    data = client.post("/mvb/scan/pickup", data={"barcode": order.boxes[0].barcode}).get_json()
-    assert data["order_id"] == order.id and data["order_done"] == 1 and data["order_total"] == 3
-    response = client.post(f"/mvb/driver/orders/{order.id}/done")
-    assert response.headers["Location"].endswith(f"/mvb/scan/pickup?order={order.id}")
-    page = client.get(response.headers["Location"]).get_data(as_text=True)
-    assert "Не все короба отсканированы: 1 из 3" in page and "Готово" in page
-    assert db.session.get(MvbOrder, order.id).pickup_done_at is None
-    for box in order.boxes[1:]:
-        client.post("/mvb/scan/pickup", data={"barcode": box.barcode})
-    response = client.post(f"/mvb/driver/orders/{order.id}/done")
-    assert response.headers["Location"].endswith("/mvb/driver")
-    assert db.session.get(MvbOrder, order.id).pickup_done_at is not None
+    page = client.get("/mvb/driver").get_data(as_text=True)
+    assert "/mvb/scan/pickup" not in page and f"/mvb/driver/orders/{order.id}/picked" in page
+    client.post(f"/mvb/driver/orders/{order.id}/picked", data={"count": "3"})
+    assert client.post("/mvb/driver/handover").status_code in (404, 405)
+
+    _login(client, _user("keeper", "mvb_storekeeper"))
+    assert "Приемка от водителей <span" in client.get("/mvb/pallets").get_data(as_text=True)
+    client.post("/mvb/handover", data={"order_id": str(order.id), "count": "4"})
+    assert {b.status for b in order.boxes} == {"picked_up"}
+    page = client.post("/mvb/handover", data={"order_id": str(order.id), "count": "2"}, follow_redirects=True).get_data(as_text=True)
+    assert "принято 2 из 3" in page and "Водитель забрал: <b>1</b>" in page
+    assert sorted(b.status for b in order.boxes) == ["picked_up", "received", "received"]
+    client.post("/mvb/handover", data={"order_id": str(order.id), "count": "1"})
+    assert {b.status for b in order.boxes} == {"received"}
+    assert "Нет коробов от водителей" in client.get("/mvb/handover").get_data(as_text=True)
 
 
 def test_sc_addresses_route_and_driver_sees_only_address_and_count(db, client):
@@ -1806,14 +1816,8 @@ def test_partial_pickup_when_boxes_do_not_fit(db, client):
     d1, d2 = _user("driver1", "mvb_driver"), _user("driver2", "mvb_driver")
     _login(client, d1)
     client.post(f"/mvb/driver/orders/{order.id}/take")
-    # без сканов «часть» не закрыть
-    client.post(f"/mvb/driver/orders/{order.id}/done", data={"partial": "1"})
-    assert db.session.get(MvbOrder, order.id).driver_id == d1.id
-    for box in order.boxes[:3]:
-        client.post("/mvb/scan/pickup", data={"barcode": box.barcode})
-    page = client.get(f"/mvb/scan/pickup?order={order.id}").get_data(as_text=True)
-    assert "Не влезает — забрал часть" in page
-    resp = client.post(f"/mvb/driver/orders/{order.id}/done", data={"partial": "1"})
+    # влезло только 3 из 5 — водитель указывает, сколько забрал
+    resp = client.post(f"/mvb/driver/orders/{order.id}/picked", data={"count": "3"})
     assert resp.headers["Location"].endswith("/mvb/driver")
     order = db.session.get(MvbOrder, order.id)
     assert order.driver_id is None and order.pickup_done_at is None
@@ -1824,9 +1828,7 @@ def test_partial_pickup_when_boxes_do_not_fit(db, client):
     assert order.number in feed or order.client.name in feed
     assert "2 (из 5)" in feed
     client.post(f"/mvb/driver/orders/{order.id}/take")
-    for box in order.boxes[3:]:
-        client.post("/mvb/scan/pickup", data={"barcode": box.barcode})
-    client.post(f"/mvb/driver/orders/{order.id}/done")
+    client.post(f"/mvb/driver/orders/{order.id}/picked", data={"count": "2"})
     assert db.session.get(MvbOrder, order.id).pickup_done_at is not None
 
 
@@ -1924,7 +1926,7 @@ def test_operator_receives_all_boxes_if_driver_forgot_to_scan(db, client):
     order = _confirmed_order(client)
     driver = _user("driver", "mvb_driver")
     _login(client, driver)
-    client.post("/mvb/scan/pickup", data={"barcode": order.boxes[0].barcode})
+    client.post(f"/mvb/driver/orders/{order.id}/picked", data={"count": "1"})
 
     _login(client, client_user)
     assert client.post(f"/mvb/orders/{order.id}/receive-all").status_code == 302

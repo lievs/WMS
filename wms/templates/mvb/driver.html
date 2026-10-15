@@ -3,7 +3,6 @@
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
   <h3 class="mb-0">Заявки на забор</h3>
-  <a class="btn btn-success btn-lg" href="{{ url_for('mvb.scan', mode='pickup') }}">📷 Сканировать короба</a>
 </div>
 
 {% if vehicle %}
@@ -21,9 +20,7 @@
 <div class="card p-3 mb-3 border-warning">
   <div class="d-flex justify-content-between flex-wrap gap-2 align-items-center">
     <div class="fs-5">У меня забрано: <b>{{ load }}</b> кор.</div>
-    <form method="post" action="{{ url_for('mvb.driver_handover') }}" onsubmit="return confirm('Подтвердите: все {{ load }} кор. выгружены на склад МВБ')">
-      <button class="btn btn-warning btn-lg">📦 Короба сданы в МВБ</button>
-    </form>
+    <div class="text-muted">Сдайте короба приемщику на складе МВБ — он пересчитает и подтвердит.</div>
   </div>
 </div>
 {% endif %}
@@ -74,7 +71,11 @@
         {% elif r.fits is false %}<div class="text-danger">✗ не помещается</div>{% endif %}
         {% if current_user.role == 'mvb_driver' and not current_user.is_admin %}
           {% if r.mine %}
-          <a class="btn btn-success mt-1" href="{{ url_for('mvb.scan', mode='pickup', order=o.id) }}">📷 Забрать</a>
+          <form method="post" action="{{ url_for('mvb.driver_picked', order_id=o.id) }}" class="d-flex gap-1 mt-1 justify-content-end"
+                onsubmit="return confirm('Сверили количество? Забираю ' + this.count.value + ' кор.')">
+            <input type="number" name="count" class="form-control" style="width:90px" min="1" max="{{ r.remaining }}" value="{{ r.remaining }}" required inputmode="numeric" title="Сколько коробов забрали">
+            <button class="btn btn-success text-nowrap">✓ Забрал</button>
+          </form>
           <form method="post" action="{{ url_for('mvb.driver_release', order_id=o.id) }}" class="mt-1"><button class="btn btn-sm btn-outline-secondary">Отказаться</button></form>
           {% elif not on_trip %}
           <form method="post" action="{{ url_for('mvb.driver_take', order_id=o.id) }}" class="mt-1"><button class="btn {{ 'btn-success' if r.fits is not false else 'btn-outline-success' }}">Заберу</button></form>

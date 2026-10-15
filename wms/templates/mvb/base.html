@@ -30,9 +30,9 @@
         {% endif %}
         {% if mvb_is_driver %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.driver') }}">Заявки на забор</a></li>
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.scan', mode='pickup') }}">📷 Скан забора</a></li>
         {% endif %}
         {% if mvb_is_storekeeper %}
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.handover') }}">Приемка от водителей{% if mvb_handover_count %} <span class="badge bg-warning text-dark">{{ mvb_handover_count }}</span>{% endif %}</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.scan', mode='receive') }}">📷 Приемка</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.pallets') }}">Паллеты</a></li>
         {% endif %}
