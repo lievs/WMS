@@ -432,6 +432,9 @@ def _receiving_adjustments_export():
                         "qty": line.qty,
                     }
                     for line in lines
+                ] + [
+                    {"barcode": item["barcode"], "name": item["name"], "qty": 0}
+                    for item in doc.removed_zero_items()
                 ],
             }
         )
@@ -459,7 +462,9 @@ def _receiving_adjustments_candidates():
             line for line in doc.lines.all()
             if line.expected_qty is not None and line.qty != line.expected_qty
         ]
-        if diff_lines:
+        # удаленные строки «не привезли» (см. receiving._remove_zero_lines) —
+        # тоже расхождение: в 1С по ним надо выставить ноль
+        if diff_lines or doc.removed_zero_items():
             result.append((doc, diff_lines))
     return result
 
