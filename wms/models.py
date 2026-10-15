@@ -822,6 +822,14 @@ class ReceivingDocument(db.Model):
     # (в отличие от accounting_entered_at выше и recount_synced_to_1c_at) —
     # только чтобы видеть в списке приемок, что документ уже сверили с 1С.
     checked_in_1c_at = db.Column(db.DateTime, nullable=True)
+    # Позиции накладной, которые совсем не привезли (на пересчете выставлен
+    # ноль): при переходе на разбраковку такие строки удаляются из документа
+    # (см. receiving.send_to_sorting), чтобы не мозолили глаза при сверке
+    # расхождений. Что именно убрали — JSON-список
+    # [{"barcode", "name", "expected_qty"}]: показывается на странице приемки
+    # и по-прежнему уходит в 1С нулевым количеством (см.
+    # integration_1c._receiving_adjustments_export).
+    removed_zero_lines = db.Column(db.Text, nullable=True)
 
     warehouse = db.relationship("Warehouse")
     created_by = db.relationship("User")
@@ -832,6 +840,14 @@ class ReceivingDocument(db.Model):
 
     def total_qty(self):
         return sum(line.qty for line in self.lines)
+
+    def removed_zero_items(self):
+        import json
+
+        try:
+            return json.loads(self.removed_zero_lines or "[]")
+        except ValueError:
+            return []
 
     def is_from_invoice_import(self):
         """True — number это реальный номер накладной 1С (см.

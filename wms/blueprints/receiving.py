@@ -1,4 +1,5 @@
 import io
+import json
 import secrets
 from datetime import datetime, timedelta
 
@@ -301,6 +302,8 @@ def list_documents():
             .distinct()
             .all()
         }
+        # удаленные строки «не привезли» — тоже расхождение с накладной
+        mismatch_doc_ids |= {d.id for d in documents if d.removed_zero_lines}
         for doc_id, qty_sum in (
             db.session.query(ReceivingLine.document_id, db.func.sum(ReceivingLine.qty))
             .filter(ReceivingLine.document_id.in_(doc_ids))
@@ -1280,6 +1283,36 @@ def send_to_recount(doc_id):
     return _next_redirect(doc.id)
 
 
+def _remove_zero_lines(doc):
+    """Убирает из документа позиции, которых совсем не привезли (qty = 0):
+    пересчет закончен, количество окончательное, а строка с нулем только
+    даёт лишнюю строку при проверке расхождений. Что убрали — запоминаем
+    в doc.removed_zero_lines (для страницы приемки и выгрузки в 1С).
+    Возвращает названия убранных позиций."""
+    removed = list(doc.removed_zero_items())
+    names = []
+    for line in doc.lines.all():
+        if line.qty and line.qty > 0:
+            continue
+        if line.line_completed_at is not None:
+            continue
+        if line.box_id:
+            box_item = BoxItem.query.filter_by(box_id=line.box_id, nomenclature_id=line.nomenclature_id).first()
+            if box_item and box_item.qty <= 0:
+                db.session.delete(box_item)
+        if line.expected_qty is not None:
+            removed.append({
+                "barcode": line.nomenclature.barcode,
+                "name": line.nomenclature.name,
+                "expected_qty": line.expected_qty,
+            })
+        names.append(line.nomenclature.name)
+        db.session.delete(line)
+    if names:
+        doc.removed_zero_lines = json.dumps(removed, ensure_ascii=False)
+    return names
+
+
 @bp.route("/<int:doc_id>/send-to-sorting", methods=["POST"])
 def send_to_sorting(doc_id):
     """recounting -> sorting. Пересчет подтвержден — дальше выделяем брак
@@ -1289,10 +1322,17 @@ def send_to_sorting(doc_id):
         flash("Документ не находится на пересчете", "danger")
         return _next_redirect(doc.id)
 
+    removed_names = _remove_zero_lines(doc)
     doc.status = "sorting"
     doc.sorting_started_at = datetime.utcnow()
     db.session.commit()
     flash(f"Приемка {doc.number} отправлена на разбраковку", "success")
+    if removed_names:
+        flash(
+            f"Удалены строки с нулевым количеством (товар не привезли): {len(removed_names)} — "
+            + ", ".join(removed_names[:5]) + (" и др." if len(removed_names) > 5 else ""),
+            "info",
+        )
     return _next_redirect(doc.id)
 
 
