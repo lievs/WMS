@@ -341,7 +341,7 @@ def _apply_shipment_fulfillment(box, warehouse_id, shipped_at=None):
             plan_line.fulfilled_qty += item.qty
 
 
-def _committed_by_warehouse_and_item(period_start=None):
+def _committed_by_warehouse_and_item(period_start=None, drafts_only=False):
     """{(warehouse_id, nomenclature_id): кол-во}, уже "закрытое" другими
     коробами, которые едут на этот склад, но еще не отмечены "Принято на
     складе" — черновики перемещения (короб отсканирован, но еще не уехал)
@@ -351,6 +351,16 @@ def _committed_by_warehouse_and_item(period_start=None):
     remaining_qty продолжал бы показывать полную потребность склада, даже
     если она уже полностью закрыта едущими туда коробами, и подсказка
     маршрутизации короба слала бы туда больше, чем реально нужно."""
+    in_progress = or_(
+        MovementDocument.status.in_(("draft", "collected")),
+        and_(MovementDocument.status == "completed", MovementDocument.received_at.is_(None)),
+    )
+    if drafts_only:
+        # Для целей, посчитанных от остатка на складе-отправителе («готово к
+        # отгрузке»): короба, уже уехавшие (completed, еще не принятые), в
+        # этот остаток не входят — их повторно вычитать нельзя, учитываем
+        # только еще не уехавшие (черновики и собранные).
+        in_progress = MovementDocument.status.in_(("draft", "collected"))
     query = (
         db.session.query(
             MovementDocument.to_warehouse_id,
@@ -359,12 +369,7 @@ def _committed_by_warehouse_and_item(period_start=None):
         )
         .join(MovementLine, MovementLine.document_id == MovementDocument.id)
         .join(BoxItem, BoxItem.box_id == MovementLine.box_id)
-        .filter(
-            or_(
-                MovementDocument.status.in_(("draft", "collected")),
-                and_(MovementDocument.status == "completed", MovementDocument.received_at.is_(None)),
-            )
-        )
+        .filter(in_progress)
     )
     if period_start:
         window_start = datetime.combine(period_start, datetime.min.time())
@@ -403,8 +408,10 @@ def _live_overflow_targets(lines):
     targets = {}
     sender_ids = None
     for nomenclature_id, item_lines in by_item.items():
-        if any(l.priority is not None or l.novelty_marketplace for l in item_lines):
-            continue
+        if any(l.novelty_marketplace for l in item_lines):
+            continue    # новинки — по снимку плана (нужны средние доли городов)
+        if any(l.priority is not None for l in item_lines):
+            continue    # приоритетные — по снимку плана (distributed_target_qty)
         total_planned = sum(l.planned_qty or 0 for l in item_lines)
         total_open = sum(max((l.planned_qty or 0) - (l.fulfilled_qty or 0), 0) for l in item_lines)
         if total_planned <= 0 or total_open > 0:
@@ -453,6 +460,7 @@ def _compute_routing(box):
         ShipmentPlanLine.nomenclature_id.in_(qty_by_item.keys())
     ).all()
     committed_by_period = {}
+    drafts_by_period = {}
     live_targets = _live_overflow_targets(lines)
 
     by_warehouse = {}
@@ -460,22 +468,21 @@ def _compute_routing(box):
         period_start = _plan_line_start(line)
         if period_start not in committed_by_period:
             committed_by_period[period_start] = _committed_by_warehouse_and_item(period_start)
-        committed = committed_by_period[period_start]
-        already_committed = committed.get((line.warehouse_id, line.nomenclature_id), 0)
+            drafts_by_period[period_start] = _committed_by_warehouse_and_item(period_start, drafts_only=True)
+        key = (line.warehouse_id, line.nomenclature_id)
+        already_committed = committed_by_period[period_start].get(key, 0)
+        not_departed = drafts_by_period[period_start].get(key, 0)
         if line.id in live_targets:
-            # Обычный товар с полностью закрытым планом — остаток
-            # распределяем по текущему «готово к отгрузке» прямо сейчас, а
-            # не по цифре, посчитанной при прошлой синхронизации плана.
-            remaining = max(live_targets[line.id] - already_committed, 0)
+            # Цель посчитана ПРЯМО СЕЙЧАС от остатка на складах-отправителях
+            # (см. _live_overflow_targets): выполненное и уже уехавшее в
+            # цель не входят, вычитаем только еще не уехавшие короба.
+            remaining = max(live_targets[line.id] - not_departed, 0)
         elif line.distributed_target_qty is not None:
-            # Цель — доля ТЕКУЩЕГО «готово к отгрузке» (см.
-            # shipment_plan._apply_priority_distribution), то есть того, что
-            # еще лежит на складе-отправителе. Уже выполненное по плану
-            # (fulfilled_qty) уехало раньше и в эту цель не входит — вычитать
-            # его нельзя: у обычного товара с закрытым планом (fulfilled >=
-            # planned) цель всегда меньше fulfilled, и короб с остатком
-            # получал «потребности нет» (см. чат: К-тSmile 44-48).
-            remaining = max(line.effective_planned_qty() - already_committed, 0)
+            # Цель из снимка при синхронизации плана — тоже доля остатка на
+            # складе, поэтому ни fulfilled_qty, ни «в пути» не вычитаем (см.
+            # чат: К-тSmile — цель в разы меньше уже отправленного, и короб
+            # с остатком получал «потребности нет»).
+            remaining = max(line.effective_planned_qty() - not_departed, 0)
         else:
             remaining = max(line.planned_qty - line.fulfilled_qty - already_committed, 0)
             if line._blocked_by_novelty_marketplace():

@@ -444,3 +444,48 @@ def test_routing_still_empty_when_closed_plan_and_no_stock_left(db, client_logge
     db.session.commit()
 
     assert _compute_routing(box) == []
+
+
+def test_routing_stored_target_is_not_reduced_by_in_transit_boxes(db, client_logged_in):
+    """Цель из снимка плана — доля остатка на складе. Уже едущие (но не
+    принятые) короба из этого остатка ушли, вычитать их из цели второй раз
+    нельзя (К-тSmile: в пути 245 при цели в разы меньше → «потребности нет»)."""
+    sender, city, item = _setup_plan(planned_qty=200)
+    line = ShipmentPlanLine.query.filter_by(warehouse_id=city.id, nomenclature_id=item.id).first()
+    line.priority = 1
+    line.distributed_target_qty = 33
+    db.session.commit()
+
+    # уже едущий туда короб на 245 (документ завершен, но не принят)
+    in_transit_box = _make_box(sender, item, qty=245, box_number="BOX-000020")
+    doc = MovementDocument(number="PER-RT-1", from_warehouse_id=sender.id, to_warehouse_id=city.id,
+                           status="completed", completed_at=datetime.utcnow())
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add(MovementLine(document_id=doc.id, box_id=in_transit_box.id, from_warehouse_id=sender.id))
+    db.session.commit()
+
+    box = _make_box(sender, item, qty=80, box_number="BOX-000021")
+    routing = _compute_routing(box)
+
+    assert len(routing) == 1 and routing[0]["items"][0]["remaining"] == 33
+
+
+def test_routing_stored_target_is_reduced_by_draft_boxes_still_at_sender(db, client_logged_in):
+    sender, city, item = _setup_plan(planned_qty=200)
+    line = ShipmentPlanLine.query.filter_by(warehouse_id=city.id, nomenclature_id=item.id).first()
+    line.priority = 1
+    line.distributed_target_qty = 33
+    db.session.commit()
+
+    draft_box = _make_box(sender, item, qty=30, box_number="BOX-000022")
+    doc = MovementDocument(number="PER-RT-2", from_warehouse_id=sender.id, to_warehouse_id=city.id, status="draft")
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add(MovementLine(document_id=doc.id, box_id=draft_box.id, from_warehouse_id=sender.id))
+    db.session.commit()
+
+    box = _make_box(sender, item, qty=80, box_number="BOX-000023")
+    routing = _compute_routing(box)
+
+    assert routing[0]["items"][0]["remaining"] == 3
