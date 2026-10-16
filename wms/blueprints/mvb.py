@@ -343,6 +343,10 @@ def orders():
     client_id = request.args.get("client_id", type=int)
     if client_id and not _is_client():
         query = query.filter(MvbOrder.client_id == client_id)
+    # Тип забора: самопривоз или забор транспортной компанией.
+    method = request.args.get("method", "")
+    if method in MVB_DELIVERY_METHODS:
+        query = query.filter(MvbOrder.delivery_method == method)
     need_driver_filter = (
         MvbOrder.status == "confirmed", MvbOrder.delivery_method == "pickup", MvbOrder.driver_id.is_(None),
         MvbOrder.boxes.any(MvbBox.status == "created"),
@@ -357,7 +361,7 @@ def orders():
     # страница/пункт меню убраны.
     wms_rows = _wms_candidate_rows() if _is_operator() else []
     return render_template(
-        "mvb/orders.html", orders=items, clients=clients, status=status, client_id=client_id,
+        "mvb/orders.html", orders=items, clients=clients, status=status, client_id=client_id, method=method,
         need_driver=need_driver, drivers=_active_drivers() if _is_staff() else [],
         wms_rows=wms_rows,
     )

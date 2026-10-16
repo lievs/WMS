@@ -2071,3 +2071,17 @@ def test_dispatch_shows_only_palletized_boxes_and_admin_removes_row(db, client):
     assert {b.status for b in order.boxes} == {"received"} and all(b.pallet_id is None for b in order.boxes)
     assert MvbPallet.query.count() == 0
     assert "Нет коробов, ожидающих отправки" in client.get("/mvb/dispatch").get_data(as_text=True)
+
+
+def test_orders_filter_by_delivery_type(db, client):
+    """В заявках фильтр по типу забора: самопривоз или забор ТК."""
+    _login(client, _user("seller", "mvb_client", _mvb_client()))
+    pick = _confirmed_order(client)
+    self_ = _confirmed_order(client, delivery_method="self", pickup_address="")
+    _login(client, _user("operator", "mvb_staff"))
+    page = client.get("/mvb/orders").get_data(as_text=True)
+    assert 'name="method"' in page and pick.number in page and self_.number in page
+    page = client.get("/mvb/orders?method=self").get_data(as_text=True)
+    assert self_.number in page and pick.number not in page
+    page = client.get("/mvb/orders?method=pickup").get_data(as_text=True)
+    assert pick.number in page and self_.number not in page

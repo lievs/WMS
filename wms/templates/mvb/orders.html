@@ -74,6 +74,13 @@
       {% if not mvb_is_client %}<option value="need_driver" {{ 'selected' if status == 'need_driver' }}>Забор без водителя</option>{% endif %}
     </select>
   </div>
+  <div class="col-auto">
+    <select name="method" class="form-select" onchange="this.form.submit()" title="Тип забора">
+      <option value="">Самопривоз и забор ТК</option>
+      <option value="pickup" {{ 'selected' if method == 'pickup' }}>Забор ТК</option>
+      <option value="self" {{ 'selected' if method == 'self' }}>Самопривоз</option>
+    </select>
+  </div>
   {% if clients %}
   <div class="col-auto">
     <select name="client_id" class="form-select" onchange="this.form.submit()">
