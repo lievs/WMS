@@ -62,9 +62,25 @@ def _vehicle(capacity=10, driver=None):
     return v
 
 
+
+def _palletize_loose():
+    """К отправке попадают только короба на паллетах: тест ставит каждый
+    принятый короб без паллеты на свою паллету (как кладовщик)."""
+    loose = MvbBox.query.filter(MvbBox.status == "received", MvbBox.trip_id.is_(None), MvbBox.pallet_id.is_(None)).all()
+    for box in loose:
+        pallet = MvbPallet(
+            number=f"PLT-T{MvbPallet.query.count() + 1:05d}",
+            marketplace=box.line.marketplace, destination=box.line.destination,
+        )
+        db.session.add(pallet)
+        box.pallet = pallet
+        db.session.flush()
+    db.session.commit()
+
 def _new_trip(http, *directions):
     """Рейс-маршрут по направлениям [(маркетплейс, СЦ), ...] — как кнопка
     «Сформировать рейс» на странице «К отправке»."""
+    _palletize_loose()
     http.post("/mvb/trips/new", data={"dir": [f"{m}|{d}" for m, d in directions]})
     return MvbTrip.query.order_by(MvbTrip.id.desc()).first()
 
@@ -441,6 +457,7 @@ def test_dispatch_groups_ready_boxes_by_direction_fifo(db, client):
     staff = _user("staff1", "mvb_admin")
     _received_order(client, client_user, staff)
     _received_order(client, client_user, staff, marketplace="ozon", destination="Хоругвино", box_count="2")
+    _palletize_loose()
     html = client.get("/mvb/dispatch").get_data(as_text=True)
     assert "Коледино" in html and "Хоругвино" in html
     assert html.index("Коледино") < html.index("Хоругвино")  # раньше принятые — выше
@@ -477,6 +494,7 @@ def test_vehicles_page_staff_only(db, client):
 
 
 def test_stage2_pages_render(db, client_logged_in):
+    _palletize_loose()
     for url in ("/mvb/dispatch", "/mvb/trips", "/mvb/trips?status=all", "/mvb/pallets", "/mvb/vehicles"):
         assert client_logged_in.get(url).status_code == 200, url
     trip = _new_trip(client_logged_in, ("wb", "Коледино"), ("ozon", "Хоругвино"))
@@ -716,8 +734,10 @@ def test_full_chain_seller_to_sc(db, client):
 
     # 5. программа считает машины и компонует рейсы по наполненности,
     # не разбивая заявки: 3 + 2 кор. в машины по 4 — две машины
+    _palletize_loose()
     html = client.get("/mvb/dispatch?capacity=4").get_data(as_text=True)
     assert "нужно машин по 4 кор.: <b>2</b>" in html
+    _palletize_loose()
     client.post("/mvb/trips/new", data={
         "dir": ["wb|Коледино", "ozon|Хоругвино"], "mode": "fill", "capacity": "4",
     })
@@ -768,6 +788,7 @@ def test_full_chain_seller_to_sc(db, client):
     box = db.session.get(MvbBox, second.boxes[0].id)
     assert box.status == "received" and box.trip_id is None
     _login(client, operator)
+    _palletize_loose()
     assert "Хоругвино" in client.get("/mvb/dispatch").get_data(as_text=True)
 
 
@@ -827,8 +848,10 @@ def test_fill_mode_packs_whole_orders(db, client):
     a = _received_order(client, client_user, staff, box_count="3")
     b = _received_order(client, client_user, staff, box_count="3")
     c = _received_order(client, client_user, staff, marketplace="ozon", destination="Хоругвино", box_count="2")
+    _palletize_loose()
     html = client.get("/mvb/dispatch?capacity=5").get_data(as_text=True)
     assert "нужно машин по 5 кор.: <b>2</b>" in html and "Предложение по рейсам" in html
+    _palletize_loose()
     client.post("/mvb/trips/new", data={"dir": ["wb|Коледино", "ozon|Хоругвино"], "mode": "fill", "capacity": "5"})
     trips = MvbTrip.query.order_by(MvbTrip.id).all()
     assert [t.planned_boxes for t in trips] == [5, 3]
@@ -857,9 +880,11 @@ def test_slot_date_required_and_separates_trips(db, client):
     late = _received_order(client, client_user, staff, box_count="2", slot_date="2026-10-09")
     early = _received_order(client, client_user, staff, box_count="1", slot_date="2026-10-07")
     assert early.slot_date.isoformat() == "2026-10-07"
+    _palletize_loose()
     html = client.get("/mvb/dispatch?capacity=10").get_data(as_text=True)
     assert html.index("07.10.2026") < html.index("09.10.2026")
     assert "нужно машин по 10 кор.: <b>2</b>" in html  # 3 кор. влезли бы в одну, но слоты разные
+    _palletize_loose()
     client.post("/mvb/trips/new", data={"dir": ["wb|Коледино"], "mode": "fill", "capacity": "10"})
     trips = MvbTrip.query.order_by(MvbTrip.id).all()
     assert [(t.slot_date.isoformat(), t.planned_boxes) for t in trips] == [("2026-10-07", 1), ("2026-10-09", 2)]
@@ -879,6 +904,7 @@ def test_order_bigger_than_truck_goes_whole(db, client):
     client_user = _user("client1", "mvb_client", _mvb_client())
     staff = _user("staff1", "mvb_admin")
     _received_order(client, client_user, staff, box_count="7")
+    _palletize_loose()
     client.post("/mvb/trips/new", data={"dir": ["wb|Коледино"], "mode": "fill", "capacity": "3"})
     trips = MvbTrip.query.order_by(MvbTrip.id).all()
     assert [t.planned_boxes for t in trips] == [7]
@@ -1276,6 +1302,7 @@ def test_storekeeper_cannot_do_operator_work(db, client):
     _login(client, _user("keeper", "mvb_storekeeper"))
     assert client.get("/mvb/prices").status_code == 302
     assert client.get("/mvb/admin/clients").status_code == 302
+    _palletize_loose()
     client.post("/mvb/trips/new", data={"dir": ["wb|Коледино"]})
     assert MvbTrip.query.count() == 0
 
@@ -1354,6 +1381,7 @@ def test_fulfillment_as_destination_for_orders_pallets_and_trips(db, client):
     pallet = MvbPallet.query.one()
     for box in order.boxes:
         assert client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode}).get_json()["ok"]
+    _palletize_loose()
     assert "Фулфилмент" in client.get("/mvb/dispatch").get_data(as_text=True)
     trip = _trip(client, marketplace="ff", destination="Север")
     data = _load_scan(client, trip, pallet.number).get_json()
@@ -1483,7 +1511,7 @@ def test_sc_addresses_route_and_driver_sees_only_address_and_count(db, client):
     driver = _user("driver", "mvb_driver")
     trip = _trip(client, driver=driver)
     client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
-    pallet = MvbPallet.query.one()
+    pallet = MvbPallet.query.order_by(MvbPallet.id.desc()).first()
     for box in a.boxes + b.boxes:
         client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
     assert _load_scan(client, trip, pallet.number).get_json()["ok"]
@@ -1761,15 +1789,20 @@ def test_direction_cannot_be_planned_into_two_trips(db, client):
     order = _received_order(client, _user("c1", "mvb_client", _mvb_client()), staff,
                             marketplace="ozon", destination="Волгоград", box_count="1")
     key = f"ozon|Волгоград|{order.lines[0].slot_date.isoformat()}"
+    _palletize_loose()
     client.post("/mvb/trips/new", data={"dir": [key]})
+    _palletize_loose()
     client.post("/mvb/trips/new", data={"dir": [key]})
     assert MvbTrip.query.count() == 1
+    _palletize_loose()
     client.get("/mvb/dispatch")
+    _palletize_loose()
     page = client.get("/mvb/dispatch").get_data(as_text=True)
     assert "Волгоград" not in page and order.number not in page
     # рейс отменен — направление снова можно отправить
     trip = MvbTrip.query.one()
     client.post(f"/mvb/trips/{trip.id}/cancel")
+    _palletize_loose()
     client.post("/mvb/trips/new", data={"dir": [key]})
     assert MvbTrip.query.count() == 2
 
@@ -1887,13 +1920,16 @@ def test_loading_only_by_pallets(db, client):
     admin = _user("staff1", "mvb_admin")
     order = _received_order(client, _user("c1", "mvb_client", _mvb_client()), admin, box_count="3")
     trip = _trip(client)
+    for box in order.boxes:  # тестовые паллеты рейса убираем — короба снова без паллеты
+        box.pallet_id = None
+    db.session.commit()
     loose = order.boxes[2]
     response = client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": loose.barcode})
     assert response.status_code == 409 and "не на паллете" in response.get_json()["message"]
     assert loose.trip_id is None and loose.status == "received"
 
     client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
-    pallet = MvbPallet.query.one()
+    pallet = MvbPallet.query.order_by(MvbPallet.id.desc()).first()
     for box in order.boxes[:2]:
         client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
     data = client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": order.boxes[0].barcode}).get_json()
@@ -2007,3 +2043,31 @@ def test_driver_filters_pickup_orders_by_zone(db, client):
     assert f"/mvb/driver?zone={town.id}" in page and f"/mvb/driver?zone={region.id}" in page
     page = client.get(f"/mvb/driver?zone={region.id}").get_data(as_text=True)
     assert b.number in page and a.number not in page and "<b>Тип забора:</b> Регионы" in page
+
+
+def test_dispatch_shows_only_palletized_boxes_and_admin_removes_row(db, client):
+    """В «К отправке» — только короба на паллетах; администратор убирает
+    строку: короба снимаются с паллет и остаются на складе."""
+    admin = _user("admin1", "mvb_admin")
+    order = _received_order(client, _user("c1", "mvb_client", _mvb_client()), admin, box_count="2")
+    page = client.get("/mvb/dispatch").get_data(as_text=True)
+    assert "Нет коробов, ожидающих отправки" in page and "<b>2</b> кор. без паллеты" in page
+
+    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    pallet = MvbPallet.query.one()
+    for box in order.boxes:
+        client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
+    page = client.get("/mvb/dispatch").get_data(as_text=True)
+    assert pallet.number in page and "/mvb/dispatch/remove" in page
+
+    key = f"wb|Коледино|{order.lines[0].slot_date.isoformat() if order.lines[0].slot_date else ''}"
+    _login(client, _user("operator", "mvb_staff"))
+    client.post("/mvb/dispatch/remove", data={"key": key})
+    assert MvbPallet.query.count() == 1  # оператору удалять нельзя
+    assert "/mvb/dispatch/remove" not in client.get("/mvb/dispatch").get_data(as_text=True)
+
+    _login(client, admin)
+    client.post("/mvb/dispatch/remove", data={"key": key})
+    assert {b.status for b in order.boxes} == {"received"} and all(b.pallet_id is None for b in order.boxes)
+    assert MvbPallet.query.count() == 0
+    assert "Нет коробов, ожидающих отправки" in client.get("/mvb/dispatch").get_data(as_text=True)

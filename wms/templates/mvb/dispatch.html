@@ -2,8 +2,11 @@
 {% block title %}К отправке{% endblock %}
 {% block content %}
 <h3 class="mb-1">Готово к отправке на СЦ</h3>
-<p class="text-muted">Принятые на складе и еще не погруженные короба по направлениям, самые давние сверху (FIFO). Программа предлагает, как скомпоновать рейсы по наполненности авто, <b>не разбивая заявки</b>: каждая заявка едет целиком в одной машине, заявки с разными датами слота в одну машину не попадают; сверху — ближайшие слоты. Каждый рейс сразу получает статус «Поиск авто».</p>
+<p class="text-muted">Короба на сформированных паллетах, еще не погруженные, по направлениям, самые давние сверху (FIFO). Программа предлагает, как скомпоновать рейсы по наполненности авто, <b>не разбивая заявки</b>: каждая заявка едет целиком в одной машине, заявки с разными датами слота в одну машину не попадают; сверху — ближайшие слоты. Каждый рейс сразу получает статус «Поиск авто».</p>
 
+{% if unpalletized %}
+<div class="alert alert-warning">На складе <b>{{ unpalletized }}</b> кор. без паллеты — сюда они не попадают. Соберите их в <a href="{{ url_for('mvb.pallets') }}">паллеты</a>: в машину грузим только паллетами.</div>
+{% endif %}
 <form method="get" class="d-flex flex-wrap align-items-center gap-2 mb-3">
   <label class="form-label mb-0">Вместимость машины, коробов:</label>
   <input type="number" min="1" name="capacity" value="{{ capacity or '' }}" class="form-control w-auto" style="max-width:110px" list="capList">
@@ -23,7 +26,7 @@
 <input type="hidden" name="capacity" value="{{ capacity or '' }}">
 <div class="table-responsive">
 <table class="table align-middle">
-  <thead><tr><th><input type="checkbox" class="form-check-input" id="dirAll" title="Отметить все"></th><th>Направление</th><th>Слот на СЦ</th><th class="text-end">Коробов</th><th class="text-end">Заявок</th><th class="text-end">Машин</th><th>Паллеты</th><th>Клиенты</th><th>Ждет с</th><th>Рейсы</th></tr></thead>
+  <thead><tr><th><input type="checkbox" class="form-check-input" id="dirAll" title="Отметить все"></th><th>Направление</th><th>Слот на СЦ</th><th class="text-end">Коробов</th><th class="text-end">Заявок</th><th class="text-end">Машин</th><th>Паллеты</th><th>Клиенты</th><th>Ждет с</th><th>Рейсы</th>{% if mvb_can_manage %}<th></th>{% endif %}</tr></thead>
   <tbody>
   {% for r in rows %}
     <tr>
@@ -37,9 +40,12 @@
       <td>{{ r.clients|sort|join(', ') }}</td>
       <td>{{ (r.oldest|msk).strftime('%d.%m %H:%M') if r.oldest else '' }}</td>
       <td>{% for t in r.trips %}<a href="{{ url_for('mvb.trip_detail', trip_id=t.id) }}">{{ t.number }}</a> ({{ t.status_label }}){% if not loop.last %}<br>{% endif %}{% else %}—{% endfor %}</td>
+      {% if mvb_can_manage %}<td><button class="btn btn-sm btn-outline-danger" formaction="{{ url_for('mvb.dispatch_remove') }}" name="key" value="{{ r.key }}" formnovalidate
+        title="Убрать из «К отправке»: короба снимаются с паллет и остаются на складе"
+        onclick="return confirm('Убрать строку «{{ MVB_MARKETPLACES[r.marketplace] }}{% if r.destination %} · {{ r.destination }}{% endif %}» ({{ r.boxes }} кор.) из «К отправке»? Короба снимутся с паллет и останутся на складе.')">🗑</button></td>{% endif %}
     </tr>
   {% else %}
-    <tr><td colspan="10" class="text-muted">Нет коробов, ожидающих отправки</td></tr>
+    <tr><td colspan="11" class="text-muted">Нет коробов, ожидающих отправки</td></tr>
   {% endfor %}
   </tbody>
 </table>

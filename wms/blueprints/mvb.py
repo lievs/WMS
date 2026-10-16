@@ -1654,6 +1654,12 @@ def _ready_boxes_query():
     )
 
 
+def _dispatch_boxes_query():
+    """К отправке — только короба на сформированных паллетах (в машину
+    грузим только паллетами); короба без паллеты ждут палетирования."""
+    return _ready_boxes_query().filter(MvbBox.pallet_id.isnot(None))
+
+
 ACTIVE_TRIP_STATUSES = ("searching", "assigned", "arrived", "loading")
 
 
@@ -1687,7 +1693,7 @@ def _ready_groups():
     """Принятые и еще не погруженные короба по направлениям и датам слота;
     сверху ближайшие слоты, внутри — самые давние (FIFO)."""
     groups = {}
-    for box in _ready_boxes_query().all():
+    for box in _dispatch_boxes_query().all():
         line = box.line
         if _line_in_active_trip(line):
             continue
@@ -1710,7 +1716,7 @@ def _ready_order_items(selected=None):
     заявки едет целиком, поэтому компонуем рейсы ими. Порядок: ближайший
     слот, затем FIFO."""
     items = {}
-    for box in _ready_boxes_query().all():
+    for box in _dispatch_boxes_query().all():
         line = box.line
         if _line_in_active_trip(line):
             continue
@@ -1782,8 +1788,38 @@ def dispatch():
     proposal = _pack_orders(items, capacity) if capacity else []
     return render_template(
         "mvb/dispatch.html", rows=rows, capacity=capacity, capacities=capacities, total=total,
+        unpalletized=_unpalletized_query().count(),
         total_vehicles=len(proposal) if capacity else None, proposal=proposal,
     )
+
+
+@bp.route("/dispatch/remove", methods=["POST"])
+def dispatch_remove():
+    """Администратор убирает строку из «К отправке»: короба этого
+    направления и слота снимаются с паллет и остаются на складе (их снова
+    видно в «Паллеты → Короба без паллеты»). Опустевшие паллеты удаляются."""
+    if not _require_manage():
+        return redirect(url_for("mvb.dispatch"))
+    key = request.form.get("key", "")
+    boxes = [
+        b for b in _dispatch_boxes_query().all()
+        if b.line is not None and _group_key(b.line) == key and not _line_in_active_trip(b.line)
+    ]
+    if not boxes:
+        flash("Строка уже убрана", "info")
+        return redirect(url_for("mvb.dispatch"))
+    pallets = {b.pallet for b in boxes if b.pallet is not None}
+    orders = {b.order for b in boxes}
+    for box in boxes:
+        box.pallet = None
+    db.session.flush()
+    for pallet in pallets:
+        if not pallet.boxes:
+            db.session.delete(pallet)
+    _recalc_pallet_costs(orders)
+    db.session.commit()
+    flash(f"Убрано из «К отправке»: {len(boxes)} кор. Короба на складе без паллеты", "success")
+    return redirect(url_for("mvb.dispatch"))
 
 
 @bp.route("/trips")
@@ -1842,7 +1878,7 @@ def trip_new():
     capacity = request.form.get("capacity", type=int) or 0
     created = []
     if not _ready_order_items(selected) and any(
-        _line_in_active_trip(box.line) and _selected_match(selected, box.line) for box in _ready_boxes_query().all()
+        _line_in_active_trip(box.line) and _selected_match(selected, box.line) for box in _dispatch_boxes_query().all()
     ):
         # Повторное нажатие / второй рейс на те же заявки — не дублируем.
         flash("Эти направления уже в рейсе — второй рейс не создан", "warning")
