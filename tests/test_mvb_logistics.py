@@ -1985,3 +1985,25 @@ def test_received_boxes_without_pallet_are_flagged_for_palletizing(db, client):
         client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
     assert client.get("/mvb/badges").get_json()["unpalletized"] == 0
     assert "Короба без паллеты" not in client.get("/mvb/pallets").get_data(as_text=True)
+
+
+def test_driver_filters_pickup_orders_by_zone(db, client):
+    """В «Заявках на забор» фильтр по типу забора (зоне)."""
+    from wms.models import MvbPickupZone
+
+    _login(client, _user("seller", "mvb_client", _mvb_client()))
+    a = _confirmed_order(client)
+    b = _confirmed_order(client)
+    town = MvbPickupZone.query.filter_by(name="Черкесск").first() or MvbPickupZone(name="Черкесск", price=1000)
+    region = MvbPickupZone.query.filter_by(name="Регионы").first() or MvbPickupZone(name="Регионы", price=1500)
+    db.session.add_all([town, region])
+    db.session.commit()
+    a.pickup_zone_id, b.pickup_zone_id = town.id, region.id
+    db.session.commit()
+
+    _login(client, _user("driver", "mvb_driver"))
+    page = client.get("/mvb/driver").get_data(as_text=True)
+    assert "Тип забора:" in page and a.number in page and b.number in page
+    assert f"/mvb/driver?zone={town.id}" in page and f"/mvb/driver?zone={region.id}" in page
+    page = client.get(f"/mvb/driver?zone={region.id}").get_data(as_text=True)
+    assert b.number in page and a.number not in page and "<b>Тип забора:</b> Регионы" in page

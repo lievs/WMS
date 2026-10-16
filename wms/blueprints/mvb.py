@@ -732,6 +732,18 @@ def driver():
         allowed = (current_user.id,) if trips else (None, current_user.id)
         candidates = [o for o in candidates if o.driver_id in allowed]
     free = (vehicle.capacity_boxes - load) if vehicle and vehicle.capacity_boxes else None
+    # Фильтр по типу забора (зона: Черкесск, Регионы, ...); «none» — без зоны.
+    zone_filter = request.args.get("zone", "")
+    zone_counts = {}
+    for order in candidates:
+        if any(b.status == "created" for b in order.boxes):
+            key = str(order.pickup_zone_id) if order.pickup_zone_id else "none"
+            zone_counts[key] = zone_counts.get(key, 0) + 1
+    if zone_filter:
+        candidates = [
+            o for o in candidates
+            if (str(o.pickup_zone_id) if o.pickup_zone_id else "none") == zone_filter
+        ]
     now = datetime.utcnow()
     rows = []
     for order in candidates:
@@ -749,6 +761,8 @@ def driver():
     rows.sort(key=lambda r: (not r["mine"], not r["is_new"], r["order"].planned_date or date.max))
     return render_template(
         "mvb/driver.html", rows=rows, trips=trips, on_trip=bool(trips), vehicle=vehicle, load=load, free=free,
+        zone_filter=zone_filter, zone_counts=zone_counts,
+        zones=MvbPickupZone.query.order_by(MvbPickupZone.price, MvbPickupZone.name).all(),
         max_order_id=max((r["order"].id for r in rows), default=0),
     )
 
