@@ -164,6 +164,41 @@ def _pickup_badge_count():
     return query.count()
 
 
+def _badge_counts():
+    """Числа для значков меню (по роли текущего пользователя)."""
+    operator, keeper = _is_operator(), _is_storekeeper()
+    return {
+        "mvb_pending_clients": MvbClient.query.filter_by(approval="pending").count() if operator else 0,
+        "mvb_need_driver_count": (
+            MvbOrder.query.filter(
+                MvbOrder.status == "confirmed", MvbOrder.delivery_method == "pickup", MvbOrder.driver_id.is_(None),
+                MvbOrder.boxes.any(MvbBox.status == "created"),
+            ).count() if operator else 0
+        ),
+        "mvb_pickup_count": _pickup_badge_count() if _is_driver() else 0,
+        "mvb_handover_count": MvbBox.query.filter_by(status="picked_up").count() if keeper else 0,
+        "mvb_unpalletized_count": _unpalletized_query().count() if keeper else 0,
+    }
+
+
+def _unpalletized_query():
+    """Принятые на складе короба без паллеты: их надо собрать в паллеты —
+    в машину грузим только паллетами."""
+    return MvbBox.query.filter(MvbBox.status == "received", MvbBox.trip_id.is_(None), MvbBox.pallet_id.is_(None))
+
+
+@bp.route("/badges")
+def badges():
+    if not current_user.is_authenticated:
+        return jsonify({}), 401
+    counts = _badge_counts()
+    return jsonify(
+        clients=counts["mvb_pending_clients"], need_driver=counts["mvb_need_driver_count"],
+        pickup=counts["mvb_pickup_count"], handover=counts["mvb_handover_count"],
+        unpalletized=counts["mvb_unpalletized_count"],
+    )
+
+
 @bp.context_processor
 def _inject():
     return {
@@ -181,22 +216,10 @@ def _inject():
         "mvb_is_storekeeper": current_user.is_authenticated and _is_storekeeper(),
         "mvb_is_driver": current_user.is_authenticated and _is_driver(),
         "mvb_can_manage": current_user.is_authenticated and current_user.can_manage_mvb(),
-        "mvb_pending_clients": (
-            MvbClient.query.filter_by(approval="pending").count()
-            if current_user.is_authenticated and _is_operator() else 0
-        ),
-        "mvb_pickup_count": _pickup_badge_count() if current_user.is_authenticated and _is_driver() else 0,
-        "mvb_need_driver_count": (
-            MvbOrder.query.filter(
-                MvbOrder.status == "confirmed", MvbOrder.delivery_method == "pickup", MvbOrder.driver_id.is_(None),
-                MvbOrder.boxes.any(MvbBox.status == "created"),
-            ).count()
-            if current_user.is_authenticated and _is_operator() else 0
-        ),
-        "mvb_handover_count": (
-            MvbBox.query.filter_by(status="picked_up").count()
-            if current_user.is_authenticated and _is_storekeeper() else 0
-        ),
+        **(_badge_counts() if current_user.is_authenticated else {
+            "mvb_pending_clients": 0, "mvb_need_driver_count": 0, "mvb_pickup_count": 0,
+            "mvb_handover_count": 0, "mvb_unpalletized_count": 0,
+        }),
         "MVB_TRIP_STATUSES": MVB_TRIP_STATUSES,
         "mvb_destinations": MvbDestination.active() if current_user.is_authenticated else [],
         "mvb_pickup_zones": MvbPickupZone.active() if current_user.is_authenticated else [],
@@ -857,7 +880,7 @@ def handover():
                 _move_box(box, "received", now)
             db.session.commit()
             if count == len(boxes):
-                flash(f"Принято на склад МВБ: {count} кор. по заявке {order.number}", "success")
+                flash(f"Принято на склад МВБ: {count} кор. по заявке {order.number}. Соберите их в паллеты — в машину грузим только паллетами", "success")
             else:
                 flash(f"Заявка {order.number}: принято {count} из {len(boxes)} кор. "
                       f"Не хватает {len(boxes) - count} кор. — сообщите оператору", "warning")
@@ -1450,7 +1473,16 @@ def pallets():
         db.session.commit()
         return redirect(url_for("mvb.pallet_detail", pallet_id=pallet.id))
     items = MvbPallet.query.order_by(MvbPallet.created_at.desc()).limit(200).all()
-    return render_template("mvb/pallets.html", pallets=items)
+    # Короба на складе без паллеты по направлениям — их надо собрать в
+    # паллеты: в машину грузим только паллетами.
+    loose = {}
+    for box in _unpalletized_query().all():
+        if box.line is None:
+            continue
+        key = (box.line.marketplace, box.line.destination or "")
+        row = loose.setdefault(key, {"marketplace": key[0], "destination": key[1], "label": box.line.label(), "count": 0})
+        row["count"] += 1
+    return render_template("mvb/pallets.html", pallets=items, loose=sorted(loose.values(), key=lambda r: r["label"]))
 
 
 @bp.route("/pallets/<int:pallet_id>")

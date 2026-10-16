@@ -25,16 +25,16 @@
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.orders') }}">Мои заявки</a></li>
         {% endif %}
         {% if mvb_is_operator %}
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.admin_clients') }}">Клиенты{% if mvb_pending_clients %} <span class="badge bg-warning text-dark" title="Новые регистрации">{{ mvb_pending_clients }}</span>{% endif %}</a></li>
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.orders') }}">Заявки в работе{% if mvb_need_driver_count %} <span class="badge bg-warning text-dark" title="Заявки на забор без водителя">{{ mvb_need_driver_count }}</span>{% endif %}</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.admin_clients') }}">Клиенты <span class="badge bg-warning text-dark{{ '' if mvb_pending_clients else ' d-none' }}" data-mvb-badge="clients" title="Новые регистрации">{{ mvb_pending_clients }}</span></a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.orders') }}">Заявки в работе <span class="badge bg-warning text-dark{{ '' if mvb_need_driver_count else ' d-none' }}" data-mvb-badge="need_driver" title="Забор без водителя">{{ mvb_need_driver_count }}</span></a></li>
         {% endif %}
         {% if mvb_is_driver %}
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.driver') }}">Заявки на забор{% if mvb_pickup_count %} <span class="badge bg-warning text-dark" title="Заявок ждут забора">{{ mvb_pickup_count }}</span>{% endif %}</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.driver') }}">Заявки на забор <span class="badge bg-warning text-dark{{ '' if mvb_pickup_count else ' d-none' }}" data-mvb-badge="pickup" title="Заявок ждут забора">{{ mvb_pickup_count }}</span></a></li>
         {% endif %}
         {% if mvb_is_storekeeper %}
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.handover') }}">Приемка от водителей{% if mvb_handover_count %} <span class="badge bg-warning text-dark">{{ mvb_handover_count }}</span>{% endif %}</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.handover') }}">Приемка от водителей <span class="badge bg-warning text-dark{{ '' if mvb_handover_count else ' d-none' }}" data-mvb-badge="handover" title="Коробов ждут приемки">{{ mvb_handover_count }}</span></a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.scan', mode='receive') }}">📷 Приемка</a></li>
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.pallets') }}">Паллеты</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.pallets') }}">Паллеты <span class="badge bg-danger{{ '' if mvb_unpalletized_count else ' d-none' }}" data-mvb-badge="unpalletized" title="Короба на складе без паллеты">{{ mvb_unpalletized_count }}</span></a></li>
         {% endif %}
         {% if mvb_is_operator %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.dispatch') }}">К отправке</a></li>
@@ -100,6 +100,29 @@
 <script src="{{ url_for('static', filename='vendor/html5-qrcode/html5-qrcode.min.js') }}"></script>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 <script src="{{ url_for('static', filename='js/scanner.js') }}"></script>
+{% if current_user.is_authenticated %}
+<script>
+// Значки меню обновляются сами, без перезагрузки страницы.
+(function () {
+  async function refresh() {
+    if (document.hidden) return;
+    try {
+      const resp = await fetch("{{ url_for('mvb.badges') }}", {headers: {"Accept": "application/json"}});
+      if (!resp.ok) return;
+      const data = await resp.json();
+      document.querySelectorAll("[data-mvb-badge]").forEach((el) => {
+        const n = data[el.dataset.mvbBadge];
+        if (n === undefined) return;
+        el.textContent = n;
+        el.classList.toggle("d-none", !n);
+      });
+    } catch (e) {}
+  }
+  setInterval(refresh, 20000);
+  document.addEventListener("visibilitychange", refresh);
+})();
+</script>
+{% endif %}
 {% block scripts %}{% endblock %}
 </body>
 </html>

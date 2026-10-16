@@ -2,6 +2,20 @@
 {% block title %}Паллеты{% endblock %}
 {% block content %}
 <h3 class="mb-3">Паллеты</h3>
+{% if loose %}
+<div class="card p-3 mb-3 border-danger">
+  <h5 class="mb-1">Короба без паллеты</h5>
+  <p class="text-muted small mb-2">После приемки короба обязательно собираются в паллеты — в машину грузим только паллетами.</p>
+  {% for r in loose %}
+  <form method="post" class="d-flex flex-wrap justify-content-between align-items-center gap-2 border-top py-2">
+    <input type="hidden" name="marketplace" value="{{ r.marketplace }}">
+    <input type="hidden" name="destination" value="{{ r.destination }}">
+    <span>{{ r.label }}: <b>{{ r.count }}</b> кор.</span>
+    <button class="btn btn-sm btn-success">Новая паллета на это направление</button>
+  </form>
+  {% endfor %}
+</div>
+{% endif %}
 <form method="post" class="card p-3 mb-4 d-flex flex-row flex-wrap gap-2 align-items-end">
   <div>
     <label class="form-label">Маркетплейс</label>

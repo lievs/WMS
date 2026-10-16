@@ -1455,7 +1455,7 @@ def test_storekeeper_confirms_counted_boxes_from_driver(db, client):
     assert client.post("/mvb/driver/handover").status_code in (404, 405)
 
     _login(client, _user("keeper", "mvb_storekeeper"))
-    assert "Приемка от водителей <span" in client.get("/mvb/pallets").get_data(as_text=True)
+    assert 'data-mvb-badge="handover" title="Коробов ждут приемки">3</span>' in client.get("/mvb/pallets").get_data(as_text=True)
     client.post("/mvb/handover", data={"order_id": str(order.id), "count": "4"})
     assert {b.status for b in order.boxes} == {"picked_up"}
     page = client.post("/mvb/handover", data={"order_id": str(order.id), "count": "2"}, follow_redirects=True).get_data(as_text=True)
@@ -1949,7 +1949,7 @@ def test_badge_near_pickup_section_when_new_pickup_order_appears(db, client):
     operator = _user("operator", "mvb_staff")
     _login(client, driver)
     nav = client.get("/mvb/driver").get_data(as_text=True).split("</nav>")[0]
-    assert "Заявки на забор</a>" in nav
+    assert 'data-mvb-badge="pickup" title="Заявок ждут забора">0</span>' in nav
 
     _login(client, _user("seller", "mvb_client", _mvb_client()))
     order = _confirmed_order(client)
@@ -1957,13 +1957,31 @@ def test_badge_near_pickup_section_when_new_pickup_order_appears(db, client):
 
     _login(client, driver)
     nav = client.get("/mvb/driver").get_data(as_text=True).split("</nav>")[0]
-    assert 'Заявки на забор <span class="badge bg-warning text-dark" title="Заявок ждут забора">1</span>' in nav
+    assert 'Заявки на забор <span class="badge bg-warning text-dark" data-mvb-badge="pickup" title="Заявок ждут забора">1</span>' in nav
+    # значок обновляется без перезагрузки страницы — по запросу /mvb/badges
+    assert client.get("/mvb/badges").get_json()["pickup"] == 1 and "mvb/badges" in nav + client.get("/mvb/driver").get_data(as_text=True)
     _login(client, operator)
     nav = client.get("/mvb/orders").get_data(as_text=True).split("</nav>")[0]
-    assert 'title="Заявки на забор без водителя">1</span>' in nav
+    assert 'title="Забор без водителя">1</span>' in nav
+    assert client.get("/mvb/badges").get_json()["need_driver"] == 1
 
     # забрал — значок пропал
     _login(client, driver)
     client.post(f"/mvb/driver/orders/{order.id}/picked", data={"count": str(len(order.boxes))})
-    nav = client.get("/mvb/driver").get_data(as_text=True).split("</nav>")[0]
-    assert "Заявки на забор</a>" in nav
+    assert client.get("/mvb/badges").get_json()["pickup"] == 0
+
+
+def test_received_boxes_without_pallet_are_flagged_for_palletizing(db, client):
+    """Принятые короба обязательно собираются в паллеты: значок у «Паллет»
+    и список направлений с коробами без паллеты."""
+    keeper = _user("keeper", "mvb_storekeeper")
+    order = _received_order(client, _user("c1", "mvb_client", _mvb_client()), keeper, box_count="2")
+    page = client.get("/mvb/pallets").get_data(as_text=True)
+    assert 'data-mvb-badge="unpalletized" title="Короба на складе без паллеты">2</span>' in page
+    assert "Короба без паллеты" in page and "<b>2</b> кор." in page
+    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    pallet = MvbPallet.query.one()
+    for box in order.boxes:
+        client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
+    assert client.get("/mvb/badges").get_json()["unpalletized"] == 0
+    assert "Короба без паллеты" not in client.get("/mvb/pallets").get_data(as_text=True)
