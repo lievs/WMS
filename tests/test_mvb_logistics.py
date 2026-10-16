@@ -1940,3 +1940,30 @@ def test_operator_receives_all_boxes_if_driver_forgot_to_scan(db, client):
     assert {b.status for b in order.boxes} == {"received"}
     assert all(b.received_at for b in order.boxes) and order.pickup_done_at is not None
     assert "Принять все короба на склад" not in client.get(f"/mvb/orders/{order.id}").get_data(as_text=True)
+
+
+def test_badge_near_pickup_section_when_new_pickup_order_appears(db, client):
+    """Появилась заявка на забор — значок с количеством у «Заявок на забор»
+    водителя и у «Заявок в работе» оператора (без водителя)."""
+    driver = _user("driver", "mvb_driver")
+    operator = _user("operator", "mvb_staff")
+    _login(client, driver)
+    nav = client.get("/mvb/driver").get_data(as_text=True).split("</nav>")[0]
+    assert "Заявки на забор</a>" in nav
+
+    _login(client, _user("seller", "mvb_client", _mvb_client()))
+    order = _confirmed_order(client)
+    _confirmed_order(client, delivery_method="self", pickup_address="")  # самопривоз не считается
+
+    _login(client, driver)
+    nav = client.get("/mvb/driver").get_data(as_text=True).split("</nav>")[0]
+    assert 'Заявки на забор <span class="badge bg-warning text-dark" title="Заявок ждут забора">1</span>' in nav
+    _login(client, operator)
+    nav = client.get("/mvb/orders").get_data(as_text=True).split("</nav>")[0]
+    assert 'title="Заявки на забор без водителя">1</span>' in nav
+
+    # забрал — значок пропал
+    _login(client, driver)
+    client.post(f"/mvb/driver/orders/{order.id}/picked", data={"count": str(len(order.boxes))})
+    nav = client.get("/mvb/driver").get_data(as_text=True).split("</nav>")[0]
+    assert "Заявки на забор</a>" in nav

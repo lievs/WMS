@@ -149,6 +149,21 @@ def _restrict_to_mvb_users():
     return None
 
 
+def _pickup_badge_count():
+    """Значок у «Заявок на забор»: сколько заявок ждут забора в ленте
+    водителя (назначенные ему и свободные; в рейсе на СЦ — только свои)."""
+    query = MvbOrder.query.filter(
+        MvbOrder.status == "confirmed", MvbOrder.delivery_method == "pickup",
+        MvbOrder.boxes.any(MvbBox.status == "created"),
+    )
+    if current_user.role == "mvb_driver" and not current_user.is_admin:
+        if _driver_active_trips():
+            query = query.filter(MvbOrder.driver_id == current_user.id)
+        else:
+            query = query.filter(db.or_(MvbOrder.driver_id.is_(None), MvbOrder.driver_id == current_user.id))
+    return query.count()
+
+
 @bp.context_processor
 def _inject():
     return {
@@ -168,6 +183,14 @@ def _inject():
         "mvb_can_manage": current_user.is_authenticated and current_user.can_manage_mvb(),
         "mvb_pending_clients": (
             MvbClient.query.filter_by(approval="pending").count()
+            if current_user.is_authenticated and _is_operator() else 0
+        ),
+        "mvb_pickup_count": _pickup_badge_count() if current_user.is_authenticated and _is_driver() else 0,
+        "mvb_need_driver_count": (
+            MvbOrder.query.filter(
+                MvbOrder.status == "confirmed", MvbOrder.delivery_method == "pickup", MvbOrder.driver_id.is_(None),
+                MvbOrder.boxes.any(MvbBox.status == "created"),
+            ).count()
             if current_user.is_authenticated and _is_operator() else 0
         ),
         "mvb_handover_count": (

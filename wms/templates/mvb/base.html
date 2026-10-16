@@ -26,10 +26,10 @@
         {% endif %}
         {% if mvb_is_operator %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.admin_clients') }}">Клиенты{% if mvb_pending_clients %} <span class="badge bg-warning text-dark" title="Новые регистрации">{{ mvb_pending_clients }}</span>{% endif %}</a></li>
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.orders') }}">Заявки в работе</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.orders') }}">Заявки в работе{% if mvb_need_driver_count %} <span class="badge bg-warning text-dark" title="Заявки на забор без водителя">{{ mvb_need_driver_count }}</span>{% endif %}</a></li>
         {% endif %}
         {% if mvb_is_driver %}
-        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.driver') }}">Заявки на забор</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.driver') }}">Заявки на забор{% if mvb_pickup_count %} <span class="badge bg-warning text-dark" title="Заявок ждут забора">{{ mvb_pickup_count }}</span>{% endif %}</a></li>
         {% endif %}
         {% if mvb_is_storekeeper %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.handover') }}">Приемка от водителей{% if mvb_handover_count %} <span class="badge bg-warning text-dark">{{ mvb_handover_count }}</span>{% endif %}</a></li>
