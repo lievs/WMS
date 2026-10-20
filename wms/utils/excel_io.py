@@ -456,11 +456,11 @@ def export_movement_summary_to_excel(documents) -> bytes:
     return buffer.getvalue()
 
 
-def _shipped_qty_by_category(documents):
-    """{вид товара: {"ozon": шт, "wb": шт, "other": шт}} по отгруженным
-    документам выборки (с отметкой «транспорт забрал» — тот же критерий, что
-    у листов по дням). Количество — отправленное: текущее содержимое коробов,
-    а у принятых с недовозом восстановлено исходное из расхождения (как в
+def _shipped_rows(documents):
+    """[(вид товара, документ, кол-во)] по отгруженным документам выборки
+    (с отметкой «транспорт забрал» — тот же критерий, что у листов по
+    дням). Количество — отправленное: текущее содержимое коробов, а у
+    принятых с недовозом восстановлено исходное из расхождения (как в
     «Отгружено» плана отгрузок, см. google_sheets.movement_wms_totals)."""
     from sqlalchemy import func
 
@@ -471,7 +471,7 @@ def _shipped_qty_by_category(documents):
 
     shipped = {doc.id: doc for doc in documents if doc.shipped_at}
     if not shipped:
-        return {}
+        return []
     ids = list(shipped)
     expected = {}   # (doc_id, nomenclature_id) -> qty
     chunk = 400
@@ -503,39 +503,65 @@ def _shipped_qty_by_category(documents):
         .outerjoin(ProductCategory, ProductCategory.id == Nomenclature.category_id)
         .all()
     }
-    result = {}
-    for (doc_id, nomenclature_id), qty in expected.items():
-        marketplace = shipped[doc_id].to_warehouse.marketplace if shipped[doc_id].to_warehouse else None
-        column = marketplace if marketplace in ("ozon", "wb") else "other"
-        category = category_by_item.get(nomenclature_id, "Без вида")
-        row = result.setdefault(category, {"ozon": 0, "wb": 0, "other": 0})
-        row[column] += qty
-    return result
+    return [
+        (category_by_item.get(nomenclature_id, "Без вида"), shipped[doc_id], qty)
+        for (doc_id, nomenclature_id), qty in expected.items()
+    ]
+
+
+def _write_pivot_sheet(wb, title, rows, column_of, first_header="Вид товара", order_columns=None):
+    """Сводная «вид товара × колонки»: column_of(doc) -> название колонки.
+    Строки — виды (от большего количества к меньшему), последняя колонка и
+    строка — итоги."""
+    pivot = {}
+    columns = []
+    for category, doc, qty in rows:
+        column = column_of(doc)
+        if column not in columns:
+            columns.append(column)
+        row = pivot.setdefault(category, {})
+        row[column] = row.get(column, 0) + qty
+    columns = order_columns(columns) if order_columns else sorted(columns)
+    ws = wb.create_sheet(title[:31])
+    _style_header(ws, [first_header] + [f"{c}, шт" for c in columns] + ["Всего, шт"])
+    col_totals = [0] * len(columns)
+    items = sorted(pivot.items(), key=lambda item: (-sum(item[1].values()), item[0]))
+    for category, row in items:
+        values = [row.get(c, 0) for c in columns]
+        for i, v in enumerate(values):
+            col_totals[i] += v
+        ws.append([category] + values + [sum(values)])
+    if items:
+        ws.append(["Итого"] + col_totals + [sum(col_totals)])
+        for cell in ws[ws.max_row]:
+            cell.font = Font(bold=True)
+    ws.column_dimensions["A"].width = 28
+    for i in range(len(columns) + 1):
+        ws.column_dimensions[get_column_letter(i + 2)].width = 18
+    return ws
 
 
 def _append_shipped_by_category_sheet(wb, documents):
-    by_category = _shipped_qty_by_category(documents)
-    has_other = any(row["other"] for row in by_category.values())
-    headers = ["Вид товара", "ОЗОН, шт", "ВБ, шт"] + (["Прочие склады, шт"] if has_other else []) + ["Всего, шт"]
-    ws = wb.create_sheet("Отгружено по видам")
-    _style_header(ws, headers)
-    totals = [0, 0, 0, 0]
-    rows = sorted(by_category.items(), key=lambda item: (-sum(item[1].values()), item[0]))
-    for category, row in rows:
-        values = [row["ozon"], row["wb"]] + ([row["other"]] if has_other else [])
-        total = sum(row.values())
-        ws.append([category] + values + [total])
-        totals[0] += row["ozon"]
-        totals[1] += row["wb"]
-        totals[2] += row["other"]
-        totals[3] += total
-    if rows:
-        footer = [totals[0], totals[1]] + ([totals[2]] if has_other else []) + [totals[3]]
-        ws.append(["Итого"] + footer)
-        for cell in ws[ws.max_row]:
-            cell.font = Font(bold=True)
-    for column, width in zip("ABCDE", (28, 14, 14, 18, 14)):
-        ws.column_dimensions[column].width = width
+    rows = _shipped_rows(documents)
+
+    def marketplace_column(doc):
+        marketplace = doc.to_warehouse.marketplace if doc.to_warehouse else None
+        return {"ozon": "ОЗОН", "wb": "ВБ"}.get(marketplace, "Прочие склады")
+
+    # Всего по площадкам: ОЗОН, ВБ (и «Прочие склады», если были).
+    _write_pivot_sheet(
+        wb, "Отгружено по видам", rows, marketplace_column,
+        order_columns=lambda cols: [c for c in ("ОЗОН", "ВБ", "Прочие склады") if c in cols] or ["ОЗОН", "ВБ"],
+    )
+    # Разделение по складам: откуда уехало и куда.
+    _write_pivot_sheet(
+        wb, "Отгружено по видам (откуда)", rows,
+        lambda doc: doc.from_warehouse.name if doc.from_warehouse else "—",
+    )
+    _write_pivot_sheet(
+        wb, "Отгружено по видам (куда)", rows,
+        lambda doc: doc.to_warehouse.name if doc.to_warehouse else "—",
+    )
 
 
 PRODUCTION_HEADERS = [

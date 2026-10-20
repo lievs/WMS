@@ -186,6 +186,7 @@ def test_summary_export_has_daily_shipments_sheet(db, client_logged_in):
 
     assert wb.sheetnames == [
         "Перемещения (сводно)", "Отгрузки по дням", "Куда и когда (короба)", "Отгружено по видам",
+        "Отгружено по видам (откуда)", "Отгружено по видам (куда)",
     ]
     ws2 = wb["Отгрузки по дням"]
     header = [c.value for c in ws2[1]]
@@ -371,3 +372,39 @@ def test_shipped_by_category_restores_qty_after_shortage_receipt(db, client_logg
     ws = openpyxl.load_workbook(io.BytesIO(resp.data))["Отгружено по видам"]
     rows = {r[0]: r[1:] for r in ws.iter_rows(min_row=2, values_only=True)}
     assert rows["Итого"][-1] == 8
+
+
+def test_shipped_by_category_is_split_by_sender_and_destination_warehouses(db, client_logged_in):
+    from wms.models import ProductCategory
+
+    hats = ProductCategory(name="Шапки-разбивка")
+    db.session.add(hats)
+    db.session.commit()
+    now = datetime.utcnow()
+    a = _make_movement_with_boxes("MSUM-D1", [10], sender_code="WH-MSUM-S1", receiver_code="WH-MSUM-D1",
+                                  receiver_marketplace="ozon", shipped_at=now)
+    b = _make_movement_with_boxes("MSUM-D2", [7], sender_code="WH-MSUM-S2", receiver_code="WH-MSUM-D2",
+                                  receiver_marketplace="wb", shipped_at=now)
+    for doc in (a, b):
+        doc.lines.first().box.items.first().nomenclature.category_id = hats.id
+    from wms.models import Warehouse
+    Warehouse.query.filter_by(code="WH-MSUM-S1").first().name = "Основной склад"
+    Warehouse.query.filter_by(code="WH-MSUM-S2").first().name = "Склад №2"
+    Warehouse.query.filter_by(code="WH-MSUM-D1").first().name = "ОЗОН: Москва"
+    Warehouse.query.filter_by(code="WH-MSUM-D2").first().name = "ВБ: Коледино"
+    db.session.commit()
+
+    resp = client_logged_in.get("/movement/export-summary.xlsx")
+    wb = openpyxl.load_workbook(io.BytesIO(resp.data))
+
+    def table(sheet):
+        ws = wb[sheet]
+        header = [c.value for c in ws[1]]
+        return header, {r[0]: dict(zip(header[1:], r[1:])) for r in ws.iter_rows(min_row=2, values_only=True)}
+
+    header, rows = table("Отгружено по видам (откуда)")
+    assert header == ["Вид товара", "Основной склад, шт", "Склад №2, шт", "Всего, шт"]
+    assert rows["Шапки-разбивка"] == {"Основной склад, шт": 10, "Склад №2, шт": 7, "Всего, шт": 17}
+    header, rows = table("Отгружено по видам (куда)")
+    assert header == ["Вид товара", "ВБ: Коледино, шт", "ОЗОН: Москва, шт", "Всего, шт"]
+    assert rows["Шапки-разбивка"]["ОЗОН: Москва, шт"] == 10 and rows["Итого"]["Всего, шт"] == 17
