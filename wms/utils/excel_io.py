@@ -449,9 +449,93 @@ def export_movement_summary_to_excel(documents) -> bytes:
         for cell in ws3[last_row]:
             cell.font = Font(bold=True)
 
+    _append_shipped_by_category_sheet(wb, documents)
+
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
+
+
+def _shipped_qty_by_category(documents):
+    """{вид товара: {"ozon": шт, "wb": шт, "other": шт}} по отгруженным
+    документам выборки (с отметкой «транспорт забрал» — тот же критерий, что
+    у листов по дням). Количество — отправленное: текущее содержимое коробов,
+    а у принятых с недовозом восстановлено исходное из расхождения (как в
+    «Отгружено» плана отгрузок, см. google_sheets.movement_wms_totals)."""
+    from sqlalchemy import func
+
+    from ..extensions import db
+    from ..models import (
+        BoxItem, MovementLine, MovementReceiptDiscrepancy, Nomenclature, ProductCategory,
+    )
+
+    shipped = {doc.id: doc for doc in documents if doc.shipped_at}
+    if not shipped:
+        return {}
+    ids = list(shipped)
+    expected = {}   # (doc_id, nomenclature_id) -> qty
+    chunk = 400
+    for i in range(0, len(ids), chunk):
+        part = ids[i:i + chunk]
+        for doc_id, nomenclature_id, qty in (
+            db.session.query(MovementLine.document_id, BoxItem.nomenclature_id, func.sum(BoxItem.qty))
+            .join(BoxItem, BoxItem.box_id == MovementLine.box_id)
+            .filter(MovementLine.document_id.in_(part))
+            .group_by(MovementLine.document_id, BoxItem.nomenclature_id)
+            .all()
+        ):
+            expected[(doc_id, nomenclature_id)] = qty or 0
+        for doc_id, nomenclature_id, expected_qty in (
+            db.session.query(
+                MovementReceiptDiscrepancy.document_id,
+                MovementReceiptDiscrepancy.nomenclature_id,
+                MovementReceiptDiscrepancy.expected_qty,
+            )
+            .filter(MovementReceiptDiscrepancy.document_id.in_(part))
+            .all()
+        ):
+            if shipped[doc_id].received_at is not None:
+                expected[(doc_id, nomenclature_id)] = expected_qty
+
+    category_by_item = {
+        nid: (name or "Без вида")
+        for nid, name in db.session.query(Nomenclature.id, ProductCategory.name)
+        .outerjoin(ProductCategory, ProductCategory.id == Nomenclature.category_id)
+        .all()
+    }
+    result = {}
+    for (doc_id, nomenclature_id), qty in expected.items():
+        marketplace = shipped[doc_id].to_warehouse.marketplace if shipped[doc_id].to_warehouse else None
+        column = marketplace if marketplace in ("ozon", "wb") else "other"
+        category = category_by_item.get(nomenclature_id, "Без вида")
+        row = result.setdefault(category, {"ozon": 0, "wb": 0, "other": 0})
+        row[column] += qty
+    return result
+
+
+def _append_shipped_by_category_sheet(wb, documents):
+    by_category = _shipped_qty_by_category(documents)
+    has_other = any(row["other"] for row in by_category.values())
+    headers = ["Вид товара", "ОЗОН, шт", "ВБ, шт"] + (["Прочие склады, шт"] if has_other else []) + ["Всего, шт"]
+    ws = wb.create_sheet("Отгружено по видам")
+    _style_header(ws, headers)
+    totals = [0, 0, 0, 0]
+    rows = sorted(by_category.items(), key=lambda item: (-sum(item[1].values()), item[0]))
+    for category, row in rows:
+        values = [row["ozon"], row["wb"]] + ([row["other"]] if has_other else [])
+        total = sum(row.values())
+        ws.append([category] + values + [total])
+        totals[0] += row["ozon"]
+        totals[1] += row["wb"]
+        totals[2] += row["other"]
+        totals[3] += total
+    if rows:
+        footer = [totals[0], totals[1]] + ([totals[2]] if has_other else []) + [totals[3]]
+        ws.append(["Итого"] + footer)
+        for cell in ws[ws.max_row]:
+            cell.font = Font(bold=True)
+    for column, width in zip("ABCDE", (28, 14, 14, 18, 14)):
+        ws.column_dimensions[column].width = width
 
 
 PRODUCTION_HEADERS = [

@@ -184,7 +184,9 @@ def test_summary_export_has_daily_shipments_sheet(db, client_logged_in):
     resp = client_logged_in.get("/movement/export-summary.xlsx")
     wb = openpyxl.load_workbook(io.BytesIO(resp.data))
 
-    assert wb.sheetnames == ["Перемещения (сводно)", "Отгрузки по дням", "Куда и когда (короба)"]
+    assert wb.sheetnames == [
+        "Перемещения (сводно)", "Отгрузки по дням", "Куда и когда (короба)", "Отгружено по видам",
+    ]
     ws2 = wb["Отгрузки по дням"]
     header = [c.value for c in ws2[1]]
     assert header == ["Дата отгрузки", "Кол-во коробов", "Кол-во товара, шт"]
@@ -313,3 +315,59 @@ def test_summary_export_kolvo_v_korobah_shows_live_qty_not_stale_snapshot(db, cl
     row = next(r for r in rows if r[0] == doc.number)
 
     assert row[11] == 73  # "Кол-во в коробах" — актуальное количество, не старый снимок 10
+
+
+def test_summary_export_has_shipped_by_category_sheet(db, client_logged_in):
+    """Лист «Отгружено по видам»: количество отгруженного (транспорт забрал)
+    по виду товара с разбивкой ОЗОН / ВБ; неотгруженное не считается."""
+    from wms.models import ProductCategory
+
+    hats = ProductCategory(name="Шапки-тест")
+    sweaters = ProductCategory(name="Свитеры-тест")
+    db.session.add_all([hats, sweaters])
+    db.session.commit()
+
+    now = datetime.utcnow()
+    ozon = _make_movement_with_boxes("MSUM-C1", [10, 4], receiver_code="WH-MSUM-CO", receiver_marketplace="ozon", shipped_at=now)
+    wb = _make_movement_with_boxes("MSUM-C2", [6], receiver_code="WH-MSUM-CW", receiver_marketplace="wb", shipped_at=now)
+    not_shipped = _make_movement_with_boxes("MSUM-C3", [99], receiver_code="WH-MSUM-CN", receiver_marketplace="ozon")
+    # виды: первый товар ozon-документа и товар wb-документа — шапки, второй товар ozon — свитеры
+    items = {}
+    for doc in (ozon, wb, not_shipped):
+        for line in doc.lines:
+            for bi in line.box.items:
+                items.setdefault(doc.number, []).append(bi.nomenclature)
+    items["MSUM-C1"][0].category_id = hats.id
+    items["MSUM-C1"][1].category_id = sweaters.id
+    items["MSUM-C2"][0].category_id = hats.id
+    items["MSUM-C3"][0].category_id = hats.id
+    db.session.commit()
+
+    resp = client_logged_in.get("/movement/export-summary.xlsx")
+    wb_xlsx = openpyxl.load_workbook(io.BytesIO(resp.data))
+    assert "Отгружено по видам" in wb_xlsx.sheetnames
+    ws = wb_xlsx["Отгружено по видам"]
+    assert [c.value for c in ws[1]] == ["Вид товара", "ОЗОН, шт", "ВБ, шт", "Всего, шт"]
+    rows = {r[0]: r[1:] for r in ws.iter_rows(min_row=2, values_only=True)}
+    assert rows["Шапки-тест"] == (10, 6, 16)
+    assert rows["Свитеры-тест"] == (4, 0, 4)
+    assert rows["Итого"] == (14, 6, 20)
+
+
+def test_shipped_by_category_restores_qty_after_shortage_receipt(db, client_logged_in):
+    from wms.models import MovementReceiptDiscrepancy
+
+    now = datetime.utcnow()
+    doc = _make_movement_with_boxes("MSUM-C4", [8], receiver_code="WH-MSUM-C4", receiver_marketplace="ozon",
+                                    shipped_at=now, received_at=now)
+    item = doc.lines.first().box.items.first()
+    # принято 5 из 8: короб уменьшен до 5, исходные 8 хранятся в расхождении
+    item.qty = 5
+    db.session.add(MovementReceiptDiscrepancy(document_id=doc.id, nomenclature_id=item.nomenclature_id,
+                                              expected_qty=8, received_qty=5))
+    db.session.commit()
+
+    resp = client_logged_in.get("/movement/export-summary.xlsx")
+    ws = openpyxl.load_workbook(io.BytesIO(resp.data))["Отгружено по видам"]
+    rows = {r[0]: r[1:] for r in ws.iter_rows(min_row=2, values_only=True)}
+    assert rows["Итого"][-1] == 8
