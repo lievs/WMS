@@ -78,6 +78,10 @@ GOOGLE_SYNC_SHEETS_KEY = "google_sheets_last_names"
 # при каждом заходе на дашборд, а не только сразу после нажатия кнопки.
 GOOGLE_SYNC_MISSING_KEY = "google_sheets_last_missing_marketplaces"
 GOOGLE_SYNC_TOKEN_KEY = "google_sheets_trigger_token"
+# Фоновая синхронизация кнопкой на дашборде: когда запущена и чем закончилась.
+GOOGLE_SYNC_RUNNING_KEY = "google_sheets_sync_running_since"
+GOOGLE_SYNC_RESULT_KEY = "google_sheets_sync_last_result"
+GOOGLE_SYNC_STALE_MINUTES = 15
 _google_sync_lock = threading.Lock()
 
 # Этот endpoint вызывается серверами Google Apps Script и поэтому не имеет
@@ -438,6 +442,11 @@ def _apply_priority_distribution():
                 line.distributed_target_qty = 0.0
 
 
+def _get_setting_value(key):
+    setting = AppSetting.query.get(key)
+    return setting.value if setting else None
+
+
 def _set_sync_setting(key, value):
     setting = AppSetting.query.get(key)
     if setting is None:
@@ -446,13 +455,26 @@ def _set_sync_setting(key, value):
     setting.value = (value or "")[:200]
 
 
+def _google_sync_running(since_text):
+    """Фоновая синхронизация идет, если отметка о запуске свежая (старше
+    GOOGLE_SYNC_STALE_MINUTES считаем зависшей/оставшейся после перезапуска
+    сервера — иначе кнопка заблокировалась бы навсегда)."""
+    if not since_text:
+        return False
+    try:
+        started = datetime.strptime(since_text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return False
+    return datetime.utcnow() - started < timedelta(minutes=GOOGLE_SYNC_STALE_MINUTES)
+
+
 def _google_sync_status():
     values = {
         row.key: row.value
         for row in AppSetting.query.filter(
             AppSetting.key.in_((
                 GOOGLE_SYNC_AT_KEY, GOOGLE_SYNC_ERROR_KEY, GOOGLE_SYNC_SHEETS_KEY,
-                GOOGLE_SYNC_MISSING_KEY,
+                GOOGLE_SYNC_MISSING_KEY, GOOGLE_SYNC_RUNNING_KEY, GOOGLE_SYNC_RESULT_KEY,
             ))
         ).all()
     }
@@ -462,6 +484,8 @@ def _google_sync_status():
         "last_error": values.get(GOOGLE_SYNC_ERROR_KEY),
         "sheet_names": values.get(GOOGLE_SYNC_SHEETS_KEY),
         "missing_marketplaces": values.get(GOOGLE_SYNC_MISSING_KEY),
+        "running": _google_sync_running(values.get(GOOGLE_SYNC_RUNNING_KEY)),
+        "last_result": values.get(GOOGLE_SYNC_RESULT_KEY),
     }
 
 
@@ -643,35 +667,88 @@ def upload():
     return redirect(url_for("shipment_plan.dashboard"))
 
 
+def _sync_result_text(summary, sheet_names, exported, updated_cells):
+    return (
+        "Google Таблица синхронизирована: "
+        + "; ".join(summary)
+        + f"; выгружено строк на лист «WMS — перемещения»: {exported}; "
+        + f"обновлено ячеек факта: {updated_cells}; "
+        + f"листов: {len(sheet_names)}"
+    )
+
+
+def _run_google_sync_background(app, user_id):
+    """Синхронизация в отдельном потоке: запрос кнопки возвращается сразу, а
+    не ждет чтения/записи Google Таблицы — иначе веб-сервер (nginx) обрывал
+    долгий запрос с 504 Gateway Time-out."""
+    with app.app_context():
+        try:
+            summary, sheet_names, exported, updated_cells = sync_google_plans_and_movements(
+                uploaded_by_id=user_id
+            )
+            result = _sync_result_text(summary, sheet_names, exported, updated_cells)
+        except Exception as exc:  # noqa: BLE001
+            db.session.rollback()
+            app.logger.exception("Фоновая синхронизация Google Таблицы не удалась")
+            _set_sync_setting(GOOGLE_SYNC_ERROR_KEY, str(exc))
+            result = f"Не удалось синхронизировать Google Таблицу: {exc}"
+        _set_sync_setting(GOOGLE_SYNC_RESULT_KEY, result)
+        _set_sync_setting(GOOGLE_SYNC_RUNNING_KEY, "")
+        db.session.commit()
+        db.session.remove()
+        _google_sync_lock.release()
+
+
 @bp.route("/sync-google", methods=["POST"])
 def sync_google():
     if not current_user.is_admin:
         flash("Синхронизировать Google Таблицу может только администратор", "danger")
         return redirect(url_for("shipment_plan.dashboard"))
-    if not _google_sync_lock.acquire(False):
+    if _google_sync_running(_get_setting_value(GOOGLE_SYNC_RUNNING_KEY)) or not _google_sync_lock.acquire(False):
         flash("Синхронизация уже выполняется. Дождитесь ее завершения.", "warning")
         return redirect(url_for("shipment_plan.dashboard"))
-    try:
-        summary, sheet_names, exported, updated_cells = sync_google_plans_and_movements(
-            uploaded_by_id=current_user.id
-        )
-    except Exception as exc:  # noqa: BLE001
-        db.session.rollback()
-        _set_sync_setting(GOOGLE_SYNC_ERROR_KEY, str(exc))
-        db.session.commit()
-        flash(f"Не удалось синхронизировать Google Таблицу: {exc}", "danger")
-    else:
-        flash(
-            "Google Таблица синхронизирована: "
-            + "; ".join(summary)
-            + f"; выгружено строк на лист «WMS — перемещения»: {exported}; "
-            + f"обновлено ячеек факта: {updated_cells}; "
-            + f"листов: {len(sheet_names)}",
-            "success",
-        )
-    finally:
-        _google_sync_lock.release()
+
+    if current_app.config.get("SYNC_GOOGLE_INLINE", current_app.config.get("TESTING")):
+        # В тестах выполняем сразу, без потока (SYNC_GOOGLE_INLINE=False
+        # включает фоновый режим принудительно).
+        try:
+            summary, sheet_names, exported, updated_cells = sync_google_plans_and_movements(
+                uploaded_by_id=current_user.id
+            )
+        except Exception as exc:  # noqa: BLE001
+            db.session.rollback()
+            _set_sync_setting(GOOGLE_SYNC_ERROR_KEY, str(exc))
+            db.session.commit()
+            flash(f"Не удалось синхронизировать Google Таблицу: {exc}", "danger")
+        else:
+            flash(_sync_result_text(summary, sheet_names, exported, updated_cells), "success")
+        finally:
+            _google_sync_lock.release()
+        return redirect(url_for("shipment_plan.dashboard"))
+
+    _set_sync_setting(GOOGLE_SYNC_RUNNING_KEY, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+    _set_sync_setting(GOOGLE_SYNC_RESULT_KEY, "")
+    db.session.commit()
+    threading.Thread(
+        target=_run_google_sync_background,
+        args=(current_app._get_current_object(), current_user.id),
+        daemon=True,
+    ).start()
+    flash(
+        "Синхронизация запущена в фоне — обычно занимает до минуты. Страница сама обновится, "
+        "когда закончится; результат будет в блоке «Google Таблица» ниже.",
+        "info",
+    )
     return redirect(url_for("shipment_plan.dashboard"))
+
+
+@bp.route("/sync-google/status")
+def sync_google_status():
+    """Для автообновления страницы, пока синхронизация идет в фоне."""
+    if not current_user.is_admin:
+        return jsonify(running=False), 403
+    status = _google_sync_status()
+    return jsonify(running=status["running"], result=status["last_result"] or "")
 
 
 @bp.route("/google-trigger", methods=["POST"])
