@@ -99,7 +99,7 @@
 <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/html5-qrcode/html5-qrcode.min.js') }}"></script>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
-<script src="{{ url_for('static', filename='js/scanner.js') }}"></script>
+<script src="{{ url_for('static', filename='js/scanner.js', v=3) }}"></script>
 {% if current_user.is_authenticated %}
 <script>
 // Значки меню обновляются сами, без перезагрузки страницы.
