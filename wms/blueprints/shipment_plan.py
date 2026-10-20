@@ -127,24 +127,52 @@ def _received_since_by_warehouse_and_item(window_start):
     в Google Таблицу (local_received). Приемка за пределами интервала (до
     начала периода или после дедлайна +PERIOD_DAYS) к текущему плану
     отношения не имеет и не учитывается."""
-    totals = {}
-    documents = MovementDocument.query.filter(
+    from ..models import BoxItem, MovementLine, MovementReceiptDiscrepancy
+
+    # Несколько запросов с группировкой в БД вместо обхода документ → строка
+    # → короб → позиция через ORM (на большой базе тот обход занимал десятки
+    # секунд и приводил к 504 при синхронизации плана).
+    in_window = [
         MovementDocument.received_at.isnot(None),
         func.coalesce(
             MovementDocument.shipped_at,
             MovementDocument.received_at,
             MovementDocument.created_at,
         ) >= window_start,
-    ).all()
-    for document in documents:
-        actual = {}
-        for movement_line in document.lines:
-            for item in movement_line.box.items:
-                actual[item.nomenclature_id] = actual.get(item.nomenclature_id, 0) + item.qty
-        for discrepancy in document.discrepancies:
-            actual[discrepancy.nomenclature_id] = discrepancy.received_qty
-        for nomenclature_id, qty in actual.items():
-            key = (document.to_warehouse_id, nomenclature_id)
+    ]
+    to_warehouse = {
+        doc_id: wh_id
+        for doc_id, wh_id in db.session.query(MovementDocument.id, MovementDocument.to_warehouse_id)
+        .filter(*in_window).all()
+    }
+    if not to_warehouse:
+        return {}
+    actual = {}
+    for doc_id, nomenclature_id, qty in (
+        db.session.query(MovementLine.document_id, BoxItem.nomenclature_id, func.sum(BoxItem.qty))
+        .join(MovementDocument, MovementDocument.id == MovementLine.document_id)
+        .join(BoxItem, BoxItem.box_id == MovementLine.box_id)
+        .filter(*in_window)
+        .group_by(MovementLine.document_id, BoxItem.nomenclature_id)
+        .all()
+    ):
+        actual.setdefault(doc_id, {})[nomenclature_id] = qty or 0
+    for doc_id, nomenclature_id, received_qty in (
+        db.session.query(
+            MovementReceiptDiscrepancy.document_id,
+            MovementReceiptDiscrepancy.nomenclature_id,
+            MovementReceiptDiscrepancy.received_qty,
+        )
+        .join(MovementDocument, MovementDocument.id == MovementReceiptDiscrepancy.document_id)
+        .filter(*in_window)
+        .all()
+    ):
+        actual.setdefault(doc_id, {})[nomenclature_id] = received_qty
+
+    totals = {}
+    for doc_id, items in actual.items():
+        for nomenclature_id, qty in items.items():
+            key = (to_warehouse[doc_id], nomenclature_id)
             totals[key] = totals.get(key, 0) + qty
     return totals
 
