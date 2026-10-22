@@ -2078,6 +2078,10 @@ class MvbVehicle(db.Model):
     carrier = db.Column(db.String(200))
     capacity_boxes = db.Column(db.Integer, nullable=False, default=0)
     driver_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    # Водитель наемной машины для СЦ (без учетной записи): ФИО и телефон
+    # подставляются в рейс при выборе машины.
+    driver_name = db.Column(db.String(200))
+    driver_phone = db.Column(db.String(50))
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 

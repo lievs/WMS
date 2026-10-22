@@ -487,10 +487,32 @@ def test_driver_sees_assigned_and_unassigned_pickups_only(db, client):
 
 def test_vehicles_page_staff_only(db, client):
     _login(client, _user("staff1", "mvb_admin"))
+    # без телефона водителя машину не сохранить
     client.post("/mvb/vehicles", data={"plate": "а001аа77", "capacity_boxes": "40"})
-    assert MvbVehicle.query.one().plate == "А001АА77"
+    assert MvbVehicle.query.count() == 0
+    client.post("/mvb/vehicles", data={
+        "plate": "а001аа77", "capacity_boxes": "40",
+        "driver_name": "Петров П.П.", "driver_phone": "+79990000001",
+    })
+    v = MvbVehicle.query.one()
+    assert v.plate == "А001АА77" and v.driver_phone == "+79990000001" and v.driver_name == "Петров П.П."
     _login(client, _user("client1", "mvb_client", _mvb_client()))
     assert client.get("/mvb/vehicles").status_code == 302
+
+
+def test_trip_takes_driver_from_vehicle(db, client_logged_in):
+    """ФИО и телефон водителя машины для СЦ подтягиваются в рейс."""
+    _new_trip(client_logged_in, ("wb", "Коледино"))
+    trip = MvbTrip.query.order_by(MvbTrip.id.desc()).first()
+    v = MvbVehicle(plate="В777ВВ09", capacity_boxes=30, driver_name="Сидоров С.С.", driver_phone="+79281112233")
+    db.session.add(v)
+    db.session.commit()
+    html = client_logged_in.get(f"/mvb/trips/{trip.id}").get_data(as_text=True)
+    assert 'data-phone="+79281112233"' in html
+    client_logged_in.post(f"/mvb/trips/{trip.id}/plan", data={"vehicle_id": str(v.id)})
+    db.session.refresh(trip)
+    assert trip.driver_name == "Сидоров С.С." and trip.driver_phone == "+79281112233"
+    assert trip.car_plate == "В777ВВ09"
 
 
 def test_stage2_pages_render(db, client_logged_in):

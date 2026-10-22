@@ -93,15 +93,15 @@
           <select name="vehicle_id" id="tripVehicle" class="form-select">
             <option value="">— выберите из «Машин для СЦ» или впишите вручную —</option>
             {% for v in vehicles %}
-            <option value="{{ v.id }}" data-plate="{{ v.plate }}" data-model="{{ v.model or '' }}" data-capacity="{{ v.capacity_boxes or '' }}" {{ 'selected' if trip.vehicle_id == v.id }}>{{ v.plate }}{% if v.model %} · {{ v.model }}{% endif %}{% if v.capacity_boxes %} · {{ v.capacity_boxes }} кор.{% endif %}{% if v.carrier %} · {{ v.carrier }}{% endif %}</option>
+            <option value="{{ v.id }}" data-plate="{{ v.plate }}" data-model="{{ v.model or '' }}" data-capacity="{{ v.capacity_boxes or '' }}" data-driver="{{ v.driver_name or '' }}" data-phone="{{ v.driver_phone or '' }}" {{ 'selected' if trip.vehicle_id == v.id }}>{{ v.plate }}{% if v.model %} · {{ v.model }}{% endif %}{% if v.capacity_boxes %} · {{ v.capacity_boxes }} кор.{% endif %}{% if v.driver_name %} · {{ v.driver_name }}{% endif %}{% if v.driver_phone %} · {{ v.driver_phone }}{% endif %}</option>
             {% endfor %}
           </select>
           {% if not vehicles %}<div class="form-text">Список пуст — добавьте машины в «Настройки → Машины для СЦ».</div>{% endif %}
         </div>
         <div class="col-md-3"><label class="form-label small">Госномер *</label><input name="car_plate" id="tripPlate" class="form-control" value="{{ trip.car_plate or '' }}" placeholder="А123ВС77" required></div>
         <div class="col-md-3"><label class="form-label small">Модель авто</label><input name="car_model" id="tripModel" class="form-control" value="{{ trip.car_model or '' }}" placeholder="ГАЗель Next"></div>
-        <div class="col-md-3"><label class="form-label small">ФИО водителя</label><input name="driver_name" class="form-control" value="{{ trip.driver_name or '' }}"></div>
-        <div class="col-md-3"><label class="form-label small">Телефон</label><input name="driver_phone" class="form-control" value="{{ trip.driver_phone or '' }}" placeholder="+7"></div>
+        <div class="col-md-3"><label class="form-label small">ФИО водителя</label><input name="driver_name" id="tripDriver" class="form-control" value="{{ trip.driver_name or '' }}"></div>
+        <div class="col-md-3"><label class="form-label small">Телефон</label><input name="driver_phone" id="tripPhone" class="form-control" value="{{ trip.driver_phone or '' }}" placeholder="+7"></div>
         <div class="col-md-4"><label class="form-label small">Подача (план)</label><input type="datetime-local" name="planned_arrival_at" class="form-control" value="{{ dtl(trip.planned_arrival_at) }}"></div>
         <div class="col-md-4"><label class="form-label small">Начало погрузки (план)</label><input type="datetime-local" name="planned_load_start_at" class="form-control" value="{{ dtl(trip.planned_load_start_at) }}"></div>
         <div class="col-md-4"><label class="form-label small">Конец погрузки (план)</label><input type="datetime-local" name="planned_load_end_at" class="form-control" value="{{ dtl(trip.planned_load_end_at) }}"></div>
@@ -116,6 +116,8 @@
         document.getElementById("tripPlate").value = opt.dataset.plate;
         document.getElementById("tripModel").value = opt.dataset.model;
         document.getElementById("tripCapacity").value = opt.dataset.capacity;
+        document.getElementById("tripDriver").value = opt.dataset.driver;
+        document.getElementById("tripPhone").value = opt.dataset.phone;
       });
       </script>
       {% else %}

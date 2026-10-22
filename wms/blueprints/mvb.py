@@ -1347,10 +1347,13 @@ def vehicles():
             capacity = int(request.form.get("capacity_boxes") or 0)
         except ValueError:
             capacity = -1
-        if not plate or capacity < 0:
-            flash("Укажите госномер и вместимость (число коробов)", "danger")
+        driver_phone = request.form.get("driver_phone", "").strip()
+        if not plate or capacity < 0 or not driver_phone:
+            flash("Укажите госномер, вместимость (число коробов) и телефон водителя", "danger")
             return redirect(url_for("mvb.vehicles"))
         vehicle.plate = plate
+        vehicle.driver_name = request.form.get("driver_name", "").strip() or None
+        vehicle.driver_phone = driver_phone
         vehicle.model = request.form.get("model", "").strip() or None
         vehicle.carrier = request.form.get("carrier", "").strip() or None
         vehicle.capacity_boxes = capacity
@@ -2179,8 +2182,8 @@ def trip_plan(trip_id):
     trip.planned_load_end_at = _local_to_utc(request.form.get("planned_load_end_at"))
     trip.comment = request.form.get("comment", "").strip() or None
     # Наемный водитель (обычно случайный) — без учетной записи.
-    trip.driver_name = request.form.get("driver_name", "").strip() or None
-    trip.driver_phone = request.form.get("driver_phone", "").strip() or None
+    trip.driver_name = request.form.get("driver_name", "").strip() or (vehicle.driver_name if vehicle else None)
+    trip.driver_phone = request.form.get("driver_phone", "").strip() or (vehicle.driver_phone if vehicle else None)
     trip.car_plate = request.form.get("car_plate", "").strip().upper() or (vehicle.plate.upper() if vehicle else None)
     trip.car_model = request.form.get("car_model", "").strip() or (vehicle.model if vehicle else None)
     trip.capacity_boxes = request.form.get("capacity_boxes", type=int) or (vehicle.capacity_boxes if vehicle else None) or None
