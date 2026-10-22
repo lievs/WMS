@@ -237,6 +237,7 @@ def badges():
 @bp.context_processor
 def _inject():
     return {
+        "mvb_trip_can_deliver": _trip_can_deliver,
         "MVB_BOX_STATUSES": MVB_BOX_STATUSES,
         "MVB_BOX_STATUS_LABELS": MVB_BOX_STATUS_LABELS,
         "MVB_MARKETPLACES": MVB_MARKETPLACES,
@@ -2265,16 +2266,43 @@ def trip_add_stop(trip_id):
     return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
 
 
+def _depart_trip(trip, now):
+    """Рейс уходит в путь: погруженные короба — «В пути на СЦ», точки без
+    коробов убираются из маршрута."""
+    trip.status = "departed"
+    trip.load_finished_at = trip.load_finished_at or now
+    trip.departed_at = now
+    for stop in list(trip.stops):
+        if not stop.boxes:
+            trip.stops.remove(stop)
+            db.session.delete(stop)
+    for box in trip.boxes:
+        if box.status == "loaded":
+            _move_box(box, "shipped", now)
+    _sync_wms_shipped({box.order for box in trip.boxes}, now)
+
+
+def _trip_can_deliver(trip):
+    """Можно отмечать «Сдан на СЦ»: рейс в пути или погрузка идет и в
+    машине уже есть короба (кладовщик забыл «Завершить погрузку» — первая
+    отметка водителя сама отправит рейс)."""
+    return trip.status == "departed" or (trip.status in ("arrived", "loading") and bool(trip.boxes))
+
+
 def _apply_stop_result(trip, stop, action, comment):
     """Итог на точке: «Сдано на СЦ» (deliver) или «Не сдано» с причиной
     (reject — короба возвращаются на склад МВБ). Возвращает (категория,
     сообщение) для flash."""
-    if trip.status != "departed" or stop.result:
+    if not _trip_can_deliver(trip) or stop.result:
         return "warning", "Эта точка уже отмечена или рейс еще не в пути"
     comment = (comment or "").strip()
     if action == "reject" and not comment:
         return "danger", "Укажите причину, почему не сдано"
     now = datetime.utcnow()
+    if trip.status != "departed":
+        if not stop.boxes:
+            return "warning", "На эту точку в машине нет коробов"
+        _depart_trip(trip, now)
     stop.result = "delivered" if action == "deliver" else "rejected"
     stop.delivered_at = now
     stop.delivered_by_id = current_user.id if current_user.is_authenticated else None
@@ -2420,16 +2448,7 @@ def trip_action(trip_id, action):
             if request.form.get("back") == "loading":
                 return redirect(url_for("mvb.loading_trip", trip_id=trip.id))
             return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
-        trip.status = "departed"
-        trip.load_finished_at = now
-        trip.departed_at = now
-        for stop in list(trip.stops):
-            if not stop.boxes:
-                db.session.delete(stop)
-        for box in trip.boxes:
-            if box.status == "loaded":
-                _move_box(box, "shipped", now)
-        _sync_wms_shipped({box.order for box in trip.boxes}, now)
+        _depart_trip(trip, now)
     elif action == "cancel" and trip.status in TRIP_EDITABLE_STATUSES:
         if not _is_operator():
             abort(403)

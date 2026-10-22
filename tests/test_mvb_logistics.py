@@ -2181,6 +2181,18 @@ def test_dispatch_pallets_to_trip_and_loading_list(db, client):
     data = client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": p1.number}).get_json()
     assert data["ok"] and data["pallet"] == p1.number and data["loaded"] == 2
     assert "погружено <span id=\"palLoaded\">1</span> из 1" in client.get(f"/mvb/loading/{trip.id}").get_data(as_text=True)
+    # кладовщик не нажал «Завершить погрузку» — у водителя по ссылке уже
+    # есть «Сдан на СЦ», и первая отметка сама отправляет рейс
+    assert trip.status == "loading"
+    g.pop("_login_user", None)
+    client.post("/mvb/logout")
+    page = client.get(f"/mvb/t/{trip.access_token}").get_data(as_text=True)
+    assert "Сдан на СЦ" in page
+    stop = trip.stops[0]
+    client.post(f"/mvb/t/{trip.access_token}/stops/{stop.id}/deliver")
+    db.session.refresh(trip)
+    assert trip.departed_at is not None and stop.result == "delivered"
+    assert all(b.status == "delivered" for b in p1.boxes)
 
 
 def test_client_legal_entities_under_one_login(db, client):
