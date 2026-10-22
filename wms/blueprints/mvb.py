@@ -37,7 +37,7 @@ bp = Blueprint("mvb", __name__)
 # Эндпоинты, доступные без входа (проверяется в require_login приложения).
 # Ссылка для наемного водителя на СЦ (без учетной записи) — по токену рейса.
 MVB_PUBLIC_ENDPOINTS = {
-    "mvb.login", "mvb.register", "mvb.trip_public", "mvb.trip_public_arrive", "mvb.trip_public_stop",
+    "mvb.login", "mvb.register", "mvb.forgot_password", "mvb.trip_public", "mvb.trip_public_arrive", "mvb.trip_public_stop",
 }
 
 MAX_BOXES_PER_ORDER = 500
@@ -192,7 +192,15 @@ def _badge_counts():
         "mvb_pickup_count": _pickup_badge_count() if _is_driver() else 0,
         "mvb_handover_count": _awaiting_receipt_query().count() if keeper else 0,
         "mvb_unpalletized_count": _unpalletized_query().count() if keeper else 0,
+        "mvb_pwreset_count": _pwreset_query().count() if operator else 0,
     }
+
+
+def _pwreset_query():
+    """Пользователи МВБ, которые просят восстановить пароль."""
+    return User.query.filter(
+        User.password_reset_requested_at.isnot(None), User.role.in_(list(MVB_ROLES)),
+    ).order_by(User.password_reset_requested_at)
 
 
 def _awaiting_receipt_query():
@@ -222,7 +230,7 @@ def badges():
     return jsonify(
         clients=counts["mvb_pending_clients"], need_driver=counts["mvb_need_driver_count"],
         pickup=counts["mvb_pickup_count"], handover=counts["mvb_handover_count"],
-        unpalletized=counts["mvb_unpalletized_count"],
+        unpalletized=counts["mvb_unpalletized_count"], pwreset=counts["mvb_pwreset_count"],
     )
 
 
@@ -245,7 +253,7 @@ def _inject():
         "mvb_can_manage": current_user.is_authenticated and current_user.can_manage_mvb(),
         **(_badge_counts() if current_user.is_authenticated else {
             "mvb_pending_clients": 0, "mvb_need_driver_count": 0, "mvb_pickup_count": 0,
-            "mvb_handover_count": 0, "mvb_unpalletized_count": 0,
+            "mvb_handover_count": 0, "mvb_unpalletized_count": 0, "mvb_pwreset_count": 0,
         }),
         "MVB_TRIP_STATUSES": MVB_TRIP_STATUSES,
         "mvb_destinations": MvbDestination.active() if current_user.is_authenticated else [],
@@ -387,6 +395,63 @@ def register():
     db.session.commit()
     flash("Заявка на регистрацию отправлена. Оператор МВБ проверит данные и подтвердит — после этого войдите со своим логином.", "success")
     return redirect(url_for("mvb.login"))
+
+
+@bp.route("/forgot", methods=["GET", "POST"])
+def forgot_password():
+    """«Забыли пароль?»: по логину или телефону создается запрос, оператор
+    видит его в «Пользователях», задает новый пароль и сообщает его.
+    Ответ всегда одинаковый — по нему нельзя узнать, есть ли такой логин."""
+    if request.method == "GET":
+        return render_template("mvb/forgot.html")
+    value = request.form.get("login", "").strip()
+    users = []
+    if value:
+        user = User.query.filter(db.func.lower(User.username) == value.lower()).first()
+        if user is not None:
+            users = [user]
+        elif sum(ch.isdigit() for ch in value) >= 10:
+            want = _phone_digits(value)
+            users = [
+                u for u in User.query.filter(User.role == "mvb_client", User.mvb_client_id.isnot(None)).all()
+                if u.mvb_client and _phone_digits(u.mvb_client.phone) == want
+            ]
+    for user in users:
+        if user.role in MVB_ROLES and user.is_active_user and not user.password_reset_requested_at:
+            user.password_reset_requested_at = datetime.utcnow()
+    db.session.commit()
+    if not value:
+        flash("Укажите логин или телефон", "danger")
+        return render_template("mvb/forgot.html")
+    flash(
+        "Запрос отправлен оператору МВБ. Если такой пользователь есть, оператор задаст новый пароль "
+        "и сообщит его вам (по телефону из регистрации).", "success",
+    )
+    return redirect(url_for("mvb.login"))
+
+
+@bp.route("/password", methods=["GET", "POST"])
+def change_password():
+    """Смена своего пароля (любой пользователь МВБ). Остальные входы с
+    этим логином завершаются."""
+    if request.method == "POST":
+        current = request.form.get("current_password", "")
+        new = request.form.get("new_password", "")
+        if not current_user.check_password(current):
+            flash("Текущий пароль указан неверно", "danger")
+        elif len(new) < 6:
+            flash("Новый пароль — не короче 6 символов", "danger")
+        elif new != request.form.get("new_password2", ""):
+            flash("Новые пароли не совпадают", "danger")
+        else:
+            current_user.set_password(new)
+            current_user.session_version = (current_user.session_version or 0) + 1
+            current_user.password_reset_requested_at = None
+            db.session.commit()
+            session["session_version"] = current_user.session_version
+            flash("Пароль изменен", "success")
+            return redirect(url_for("mvb.index"))
+    return render_template("mvb/password.html")
 
 
 @bp.route("/logout", methods=["POST"])
@@ -1197,6 +1262,7 @@ def admin_users():
     clients = MvbClient.query.filter_by(is_active=True).order_by(MvbClient.name).all()
     return render_template(
         "mvb/admin_users.html", users=users, clients=clients, roles=_assignable_roles(),
+        reset_requests=_pwreset_query().all(),
         test_accounts=session.pop("mvb_test_accounts", None),
     )
 
@@ -1291,8 +1357,9 @@ def admin_user_password(user_id):
         return redirect(url_for("mvb.admin_users"))
     user.set_password(password)
     user.session_version = (user.session_version or 0) + 1
+    user.password_reset_requested_at = None
     db.session.commit()
-    flash(f"Пароль для «{user.username}» изменен", "success")
+    flash(f"Пароль для «{user.username}» изменен — сообщите его пользователю", "success")
     return redirect(url_for("mvb.admin_users"))
 
 
@@ -1424,11 +1491,12 @@ def vehicles():
         except ValueError:
             capacity = -1
         driver_phone = request.form.get("driver_phone", "").strip()
-        if not plate or capacity < 0 or not driver_phone:
-            flash("Укажите госномер, вместимость (число коробов) и телефон водителя", "danger")
+        driver_name = request.form.get("driver_name", "").strip()
+        if not plate or capacity < 0 or not driver_phone or not driver_name:
+            flash("Укажите госномер, вместимость (число коробов), ФИО и телефон водителя", "danger")
             return redirect(url_for("mvb.vehicles"))
         vehicle.plate = plate
-        vehicle.driver_name = request.form.get("driver_name", "").strip() or None
+        vehicle.driver_name = driver_name
         vehicle.driver_phone = driver_phone
         vehicle.model = request.form.get("model", "").strip() or None
         vehicle.carrier = request.form.get("carrier", "").strip() or None
@@ -1568,15 +1636,43 @@ def pallets():
     # Короба на складе без паллеты по направлениям — их надо собрать в
     # паллеты: в машину грузим только паллетами.
     per_pallet = int(_pallet_setting(MVB_PALLET_MAX_KEY, MVB_PALLET_MAX_DEFAULT) or 1)
-    loose = []
+    loose = _loose_rows(per_pallet)
+    return render_template("mvb/pallets.html", pallets=items, loose=loose, per_pallet=per_pallet)
+
+
+def _open_pallets():
+    """Паллеты на складе, куда еще можно добавлять короба: ни один их короб
+    не погружен (пустые — тоже)."""
+    return [
+        p for p in MvbPallet.query.order_by(MvbPallet.id).all()
+        if not any(b.status in ("loaded", "shipped", "delivered") or b.trip_id for b in p.boxes)
+    ]
+
+
+def _loose_rows(per_pallet):
+    """Строки «Короба без паллеты»: сколько коробов, какие паллеты этого
+    направления уже созданы и ждут скана, и сколько паллет еще создать."""
+    rows = []
     for key, boxes in _loose_groups().items():
         line = boxes[0].line
-        loose.append({
-            "key": key, "label": line.label(), "slot_date": line.slot_date, "count": len(boxes),
-            "pallets": -(-len(boxes) // per_pallet),
-        })
-    loose.sort(key=lambda r: (_slot_sort(r["slot_date"]), r["label"]))
-    return render_template("mvb/pallets.html", pallets=items, loose=loose, per_pallet=per_pallet)
+        rows.append({"key": key, "line": line, "label": line.label(), "slot_date": line.slot_date, "count": len(boxes)})
+    rows.sort(key=lambda r: (_slot_sort(r["slot_date"]), r["label"]))
+    free = {p.id: max(0, per_pallet - len(p.boxes)) for p in _open_pallets()}
+    open_pallets = [p for p in _open_pallets()]
+    for r in rows:
+        mine = [p for p in open_pallets if free[p.id] > 0 and _same_direction(r["line"], p.marketplace, p.destination)]
+        left = r["count"]
+        used = []
+        for p in mine:
+            if left <= 0:
+                break
+            take = min(left, free[p.id])
+            free[p.id] -= take
+            left -= take
+            used.append(p)
+        r["open_pallets"] = used
+        r["pallets"] = -(-left // per_pallet)
+    return rows
 
 
 def _loose_groups():
@@ -1591,30 +1687,29 @@ def _loose_groups():
 
 def _create_pallets_for_group(key):
     """«Создать N паллет»: на группу (направление + слот) создается столько
-    паллет, сколько нужно по максимуму коробов на паллете, и короба
-    раскладываются по ним по порядку заявок (заявка по возможности не
-    делится между паллетами)."""
-    boxes = _loose_groups().get(key)
-    if not boxes:
+    пустых паллет, сколько не хватает по максимуму коробов на паллете.
+    Короба на паллету добавляет кладовщик сканом."""
+    per_pallet = int(_pallet_setting(MVB_PALLET_MAX_KEY, MVB_PALLET_MAX_DEFAULT) or 1)
+    row = next((r for r in _loose_rows(per_pallet) if r["key"] == key), None)
+    if row is None:
         flash("Коробов без паллеты по этому направлению уже нет", "info")
         return redirect(url_for("mvb.pallets"))
-    per_pallet = int(_pallet_setting(MVB_PALLET_MAX_KEY, MVB_PALLET_MAX_DEFAULT) or 1)
-    line = boxes[0].line
+    if row["pallets"] <= 0:
+        flash(f"{row['label']}: паллеты уже созданы — отсканируйте на них короба", "info")
+        return redirect(url_for("mvb.pallets"))
+    line = row["line"]
     created = []
-    for start in range(0, len(boxes), per_pallet):
+    for _ in range(row["pallets"]):
         pallet = MvbPallet(
             number=next_number("mvb_pallet", "PLT-", 6), marketplace=line.marketplace,
             destination=(line.destination or "").strip() or None, created_by_id=current_user.id,
         )
         db.session.add(pallet)
-        for box in boxes[start:start + per_pallet]:
-            box.pallet = pallet
         created.append(pallet)
-    _recalc_pallet_costs({b.order for b in boxes})
     db.session.commit()
     flash(
-        f"{line.label()}: создано паллет — {len(created)} ({', '.join(p.number for p in created)}), "
-        f"разложено {len(boxes)} кор. Распечатайте этикетки паллет", "success",
+        f"{line.label()}: создано паллет — {len(created)} ({', '.join(p.number for p in created)}). "
+        "Распечатайте этикетки и отсканируйте короба на паллеты", "success",
     )
     return redirect(url_for("mvb.pallets"))
 

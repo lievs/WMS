@@ -1,3 +1,4 @@
+import contextlib
 import os
 import secrets
 
@@ -14,6 +15,26 @@ from .utils.timezone import to_moscow
 
 
 _sqlite_functions_registered = False
+
+
+@contextlib.contextmanager
+def _startup_lock(app):
+    """На сервере gunicorn запускает несколько процессов, и каждый при старте
+    обновляет схему базы и заносит справочники. Без блокировки они делают это
+    одновременно: второй процесс падает (повторная колонка, дубль города), и
+    сервер не поднимается (502). Файловая блокировка пускает их по очереди."""
+    try:
+        import fcntl
+    except ImportError:  # Windows (сборка .exe) — там один процесс
+        yield
+        return
+    os.makedirs(app.instance_path, exist_ok=True)
+    with open(os.path.join(app.instance_path, ".startup.lock"), "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _ensure_columns():
@@ -621,7 +642,7 @@ def create_app(config_class=Config):
     app.register_blueprint(management_bp, url_prefix="/management")
     app.register_blueprint(mvb_bp, url_prefix="/mvb")
 
-    with app.app_context():
+    with app.app_context(), _startup_lock(app):
         from . import models  # noqa: F401
         from .utils.categorize import bootstrap_categories
 

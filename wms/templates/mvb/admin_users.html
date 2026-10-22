@@ -20,6 +20,20 @@
   </table>
 </div>
 {% endif %}
+{% if reset_requests %}
+<div class="card p-3 mb-3 border-warning">
+  <h5 class="mb-1">Просят восстановить пароль <span class="badge bg-warning text-dark">{{ reset_requests|length }}</span></h5>
+  <p class="small text-muted mb-2">Пользователь нажал «Забыли пароль?» на странице входа. Задайте новый пароль и сообщите его по телефону — пользователь потом сменит его сам (👤 → 🔑).</p>
+  {% for u in reset_requests %}
+  <form method="post" action="{{ url_for('mvb.admin_user_password', user_id=u.id) }}" class="d-flex flex-wrap align-items-center gap-2 border-top py-2">
+    <span class="me-auto"><b>{{ u.username }}</b> · {{ u.full_name or '' }} · {{ MVB_ROLES.get(u.role, u.role) }}{% if u.mvb_client %} · {{ u.mvb_client.name }}{% if u.mvb_client.phone %} · <a href="tel:{{ u.mvb_client.phone }}">{{ u.mvb_client.phone }}</a>{% endif %}{% endif %} <span class="text-muted small">{{ (u.password_reset_requested_at|msk).strftime('%d.%m %H:%M') }}</span></span>
+    {% if u.role == 'mvb_admin' and not mvb_can_manage %}<span class="small text-muted">пароль администратора меняет главный администратор</span>
+    {% else %}<input name="password" class="form-control form-control-sm" style="max-width:180px" placeholder="новый пароль, от 6" required>
+    <button class="btn btn-sm btn-success">Задать</button>{% endif %}
+  </form>
+  {% endfor %}
+</div>
+{% endif %}
 <form method="post" class="card p-3 mb-4">
   <h6>Новый пользователь</h6>
   <div class="small text-muted mb-2">Водителей на забор заводят вместе с авто в <a href="{{ url_for('mvb.drivers') }}">«Водители»</a>.</div>

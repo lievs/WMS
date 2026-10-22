@@ -2129,14 +2129,26 @@ def test_create_n_pallets_for_direction(db, client):
         db.session.commit()
     order = _received_order(client, _user("c1", "mvb_client", _mvb_client()), keeper, box_count="7")
     page = client.get("/mvb/pallets").get_data(as_text=True)
-    assert "нужно паллет: <b>3</b>" in page and "Создать 3 паллет" in page
+    assert "Нужно еще паллет: <b>3</b>" in page and "Создать 3 паллет" in page
     assert "Новая паллета на это направление" not in page
     group = page.split('name="group" value="')[1].split('"')[0]
     client.post("/mvb/pallets", data={"action": "create_n", "group": group})
+    # паллеты создаются пустыми — короба кладовщик добавляет сканом
     pallets = MvbPallet.query.order_by(MvbPallet.id).all()
-    assert [len(p.boxes) for p in pallets] == [3, 3, 1]
-    assert all(b.pallet_id for b in order.boxes)
-    assert "Короба без паллеты" not in client.get("/mvb/pallets").get_data(as_text=True)
+    assert len(pallets) == 3 and all(not p.boxes for p in pallets)
+    assert not any(b.pallet_id for b in order.boxes)
+    page = client.get("/mvb/pallets").get_data(as_text=True)
+    assert "Ждут скана" in page and "Нужно еще паллет" not in page and "Создать 3 паллет" not in page
+    # повторное нажатие лишних паллет не создает
+    client.post("/mvb/pallets", data={"action": "create_n", "group": group})
+    assert MvbPallet.query.count() == 3
+    for box in order.boxes[:3]:
+        client.post(f"/mvb/pallets/{pallets[0].id}/scan", data={"barcode": box.barcode})
+    db.session.refresh(pallets[0])
+    assert len(pallets[0].boxes) == 3
+    # «К отправке» — только паллеты с коробами
+    page = client.get("/mvb/dispatch").get_data(as_text=True)
+    assert pallets[0].number in page and pallets[1].number not in page
 
 
 def test_dispatch_pallets_to_trip_and_loading_list(db, client):
@@ -2222,3 +2234,44 @@ def test_client_legal_entities_under_one_login(db, client):
     })
     assert "Мои юрлица" in resp.get_data(as_text=True)
     assert User.query.filter_by(username="ivanov2").first() is None
+
+
+def test_change_and_recover_password(db, client):
+    """Смена своего пароля и восстановление через оператора."""
+    c = _mvb_client("ИП Пароль")
+    c.phone = "+7 928 555-66-77"
+    db.session.commit()
+    me = _user("pwuser", "mvb_client", c)
+    _login(client, me)
+    assert client.get("/mvb/password").status_code == 200
+    client.post("/mvb/password", data={"current_password": "wrong", "new_password": "newpass1", "new_password2": "newpass1"})
+    assert db.session.get(User, me.id).check_password("password123")
+    client.post("/mvb/password", data={"current_password": "password123", "new_password": "newpass1", "new_password2": "newpass2"})
+    assert db.session.get(User, me.id).check_password("password123")
+    client.post("/mvb/password", data={"current_password": "password123", "new_password": "newpass1", "new_password2": "newpass1"})
+    assert db.session.get(User, me.id).check_password("newpass1")
+    assert client.get("/mvb/orders").status_code == 200  # текущий вход не сброшен
+
+    # восстановление: по телефону (8 вместо +7), без входа
+    g.pop("_login_user", None)
+    client.post("/mvb/logout")
+    login_page = client.get("/mvb/login").get_data(as_text=True)
+    assert "Забыли пароль?" in login_page
+    resp = client.post("/mvb/forgot", data={"login": "8 (928) 555-66-77"}, follow_redirects=True)
+    assert "Запрос отправлен" in resp.get_data(as_text=True)
+    assert db.session.get(User, me.id).password_reset_requested_at is not None
+    # неизвестный логин — тот же ответ
+    resp = client.post("/mvb/forgot", data={"login": "nobody"}, follow_redirects=True)
+    assert "Запрос отправлен" in resp.get_data(as_text=True)
+
+    op = _user("op_pw", "mvb_admin")
+    _login(client, op)
+    with client.session_transaction() as sess:
+        sess.pop("session_version", None)  # версия сессии осталась от прошлого пользователя
+    page = client.get("/mvb/admin/users").get_data(as_text=True)
+    assert "Просят восстановить пароль" in page and "pwuser" in page
+    assert client.get("/mvb/badges").get_json()["pwreset"] == 1
+    client.post(f"/mvb/admin/users/{me.id}/password", data={"password": "fresh12"})
+    user = db.session.get(User, me.id)
+    assert user.check_password("fresh12") and user.password_reset_requested_at is None
+    assert "Задать</button>" not in client.get("/mvb/admin/users").get_data(as_text=True)

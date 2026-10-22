@@ -5,13 +5,16 @@
 {% if loose %}
 <div class="card p-3 mb-3 border-danger">
   <h5 class="mb-1">Короба без паллеты</h5>
-  <p class="text-muted small mb-2">После приемки короба обязательно собираются в паллеты — в машину грузим только паллетами.</p>
+  <p class="text-muted small mb-2">После приемки короба обязательно собираются в паллеты — в машину грузим только паллетами. «Создать N паллет» создает пустые паллеты, короба на них кладовщик добавляет сканом на странице паллеты.</p>
   {% for r in loose %}
   <form method="post" class="d-flex flex-wrap justify-content-between align-items-center gap-2 border-top py-2">
     <input type="hidden" name="action" value="create_n">
     <input type="hidden" name="group" value="{{ r.key }}">
-    <span>{{ r.label }}{% if r.slot_date %} · слот {{ r.slot_date.strftime('%d.%m') }}{% endif %}: <b>{{ r.count }}</b> кор. — нужно паллет: <b>{{ r.pallets }}</b> <span class="text-muted small">(до {{ per_pallet }} кор. на паллете)</span></span>
-    <button class="btn btn-sm btn-success" onclick="return confirm('Создать {{ r.pallets }} паллет и разложить по ним {{ r.count }} кор.?')">Создать {{ r.pallets }} паллет</button>
+    <span>{{ r.label }}{% if r.slot_date %} · слот {{ r.slot_date.strftime('%d.%m') }}{% endif %}: <b>{{ r.count }}</b> кор. без паллеты
+      {% if r.open_pallets %}<br><span class="small">Ждут скана: {% for p in r.open_pallets %}<a href="{{ url_for('mvb.pallet_detail', pallet_id=p.id) }}">{{ p.number }}</a> ({{ p.boxes|length }}/{{ per_pallet }}){{ ', ' if not loop.last }}{% endfor %}</span>{% endif %}
+      {% if r.pallets %}<br><span class="small">Нужно еще паллет: <b>{{ r.pallets }}</b> <span class="text-muted">(до {{ per_pallet }} кор. на паллете)</span></span>{% endif %}
+    </span>
+    {% if r.pallets %}<button class="btn btn-sm btn-success">Создать {{ r.pallets }} паллет</button>{% endif %}
   </form>
   {% endfor %}
 </div>

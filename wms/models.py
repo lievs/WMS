@@ -168,6 +168,8 @@ class User(UserMixin, db.Model):
     # Она записывается в cookie при авторизации; увеличение значения делает
     # все ранее выданные cookie пользователя недействительными.
     session_version = db.Column(db.Integer, nullable=False, default=0)
+    # МВБ: пользователь нажал «Забыли пароль?» — оператор задает новый пароль.
+    password_reset_requested_at = db.Column(db.DateTime)
 
     # Клиент МВБ Логистики, от имени которого работает пользователь с ролью
     # "mvb_client" (видит только заявки и короба своего клиента).
@@ -1820,7 +1822,7 @@ class MvbClient(db.Model):
 
     # Дополнительное юрлицо клиента: заведено из кабинета под тем же
     # входом (телефоном). Основное юрлицо — User.mvb_client.
-    account_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), index=True)
+    account_user_id = db.Column(db.Integer, db.ForeignKey("users.id", use_alter=True, name="fk_mvb_clients_account_user"), index=True)
 
     approved_by = db.relationship("User", foreign_keys=[approved_by_id])
     account_user = db.relationship("User", foreign_keys=[account_user_id])

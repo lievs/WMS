@@ -46,12 +46,12 @@
         {% if mvb_is_operator %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.reports') }}">Отчет</a></li>
         <li class="nav-item dropdown">
-          <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">⚙ Настройки</a>
+          <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">⚙ Настройки <span class="badge bg-warning text-dark{{ '' if mvb_pwreset_count else ' d-none' }}" data-mvb-badge="pwreset" title="Просят восстановить пароль">{{ mvb_pwreset_count }}</span></a>
           <ul class="dropdown-menu">
             <li><a class="dropdown-item" href="{{ url_for('mvb.prices') }}">Прайс</a></li>
             <li><a class="dropdown-item" href="{{ url_for('mvb.drivers') }}">Водители</a></li>
             <li><a class="dropdown-item" href="{{ url_for('mvb.vehicles') }}">Машины для СЦ</a></li>
-            <li><a class="dropdown-item" href="{{ url_for('mvb.admin_users') }}">Пользователи</a></li>
+            <li><a class="dropdown-item" href="{{ url_for('mvb.admin_users') }}">Пользователи <span class="badge bg-warning text-dark{{ '' if mvb_pwreset_count else ' d-none' }}" data-mvb-badge="pwreset">{{ mvb_pwreset_count }}</span></a></li>
           </ul>
         </li>
         {% endif %}
@@ -61,7 +61,7 @@
       </ul>
       <ul class="navbar-nav">
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.guide') }}">🎓 Обучение</a></li>
-        <li class="nav-item"><span class="nav-link">👤 {{ current_user.display_name() }}{% if current_user.mvb_client %} · {{ current_user.mvb_client.name }}{% endif %}</span></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.change_password') }}" title="Сменить пароль">👤 {{ current_user.display_name() }}{% if current_user.mvb_client %} · {{ current_user.mvb_client.name }}{% endif %} · 🔑</a></li>
         <li class="nav-item">
           <form method="post" action="{{ url_for('mvb.logout') }}" data-no-ajax><button class="btn btn-sm btn-outline-light mt-1">Выйти</button></form>
         </li>
