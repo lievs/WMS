@@ -2092,3 +2092,26 @@ def test_orders_filter_by_delivery_type(db, client):
     assert data["ok"] and data["assigned"] and db.session.get(MvbOrder, pick.id).driver_id == driver.id
     assert "js-assign" in client.get("/mvb/orders").get_data(as_text=True)
     assert "mvb-ajax.js" in page
+
+
+def test_create_n_pallets_for_direction(db, client):
+    """«Паллеты»: по направлению видно, сколько паллет нужно, и кнопка
+    «Создать N паллет» раскладывает короба по паллетам."""
+    keeper = _user("keeper", "mvb_admin")
+    _login(client, keeper)
+    client.post("/mvb/prices", data={"action": "pallet", "pallet_price": "500", "pallet_min": "10", "pallet_max": "3"})
+    from wms.blueprints.mvb import _pallet_setting, MVB_PALLET_MAX_KEY
+    if _pallet_setting(MVB_PALLET_MAX_KEY, 20) != 3:
+        from wms.models import AppSetting
+        db.session.merge(AppSetting(key=MVB_PALLET_MAX_KEY, value="3"))
+        db.session.commit()
+    order = _received_order(client, _user("c1", "mvb_client", _mvb_client()), keeper, box_count="7")
+    page = client.get("/mvb/pallets").get_data(as_text=True)
+    assert "нужно паллет: <b>3</b>" in page and "Создать 3 паллет" in page
+    assert "Новая паллета на это направление" not in page
+    group = page.split('name="group" value="')[1].split('"')[0]
+    client.post("/mvb/pallets", data={"action": "create_n", "group": group})
+    pallets = MvbPallet.query.order_by(MvbPallet.id).all()
+    assert [len(p.boxes) for p in pallets] == [3, 3, 1]
+    assert all(b.pallet_id for b in order.boxes)
+    assert "Короба без паллеты" not in client.get("/mvb/pallets").get_data(as_text=True)

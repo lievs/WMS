@@ -8,10 +8,10 @@
   <p class="text-muted small mb-2">После приемки короба обязательно собираются в паллеты — в машину грузим только паллетами.</p>
   {% for r in loose %}
   <form method="post" class="d-flex flex-wrap justify-content-between align-items-center gap-2 border-top py-2">
-    <input type="hidden" name="marketplace" value="{{ r.marketplace }}">
-    <input type="hidden" name="destination" value="{{ r.destination }}">
-    <span>{{ r.label }}: <b>{{ r.count }}</b> кор.</span>
-    <button class="btn btn-sm btn-success">Новая паллета на это направление</button>
+    <input type="hidden" name="action" value="create_n">
+    <input type="hidden" name="group" value="{{ r.key }}">
+    <span>{{ r.label }}{% if r.slot_date %} · слот {{ r.slot_date.strftime('%d.%m') }}{% endif %}: <b>{{ r.count }}</b> кор. — нужно паллет: <b>{{ r.pallets }}</b> <span class="text-muted small">(до {{ per_pallet }} кор. на паллете)</span></span>
+    <button class="btn btn-sm btn-success" onclick="return confirm('Создать {{ r.pallets }} паллет и разложить по ним {{ r.count }} кор.?')">Создать {{ r.pallets }} паллет</button>
   </form>
   {% endfor %}
 </div>
@@ -31,7 +31,7 @@
 </form>
 <div class="table-responsive">
 <table class="table table-hover align-middle">
-  <thead><tr><th>Паллета</th><th>Направление</th><th class="text-end">Коробов</th><th>Где</th><th>Создана</th></tr></thead>
+  <thead><tr><th>Паллета</th><th>Направление</th><th class="text-end">Коробов</th><th>Где</th><th>Создана</th><th></th></tr></thead>
   <tbody>
   {% for p in pallets %}
     {% set trip_box = p.boxes|selectattr('trip')|first %}
@@ -41,9 +41,10 @@
       <td class="text-end">{{ p.boxes|length }}</td>
       <td>{% if trip_box %}Рейс {{ trip_box.trip.number }}{% else %}На складе{% endif %}</td>
       <td>{{ (p.created_at|msk).strftime('%d.%m %H:%M') }}</td>
+      <td><a class="btn btn-sm btn-outline-success" target="_blank" href="{{ url_for('mvb.pallet_label_pdf', pallet_id=p.id) }}" title="Этикетка паллеты">🖨</a></td>
     </tr>
   {% else %}
-    <tr><td colspan="5" class="text-muted">Паллет пока нет</td></tr>
+    <tr><td colspan="6" class="text-muted">Паллет пока нет</td></tr>
   {% endfor %}
   </tbody>
 </table>

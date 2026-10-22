@@ -1469,6 +1469,8 @@ def drivers():
 def pallets():
     if not _require_staff():
         return redirect(url_for("mvb.index"))
+    if request.method == "POST" and request.form.get("action") == "create_n":
+        return _create_pallets_for_group(request.form.get("group", ""))
     if request.method == "POST":
         marketplace = request.form.get("marketplace", "")
         if marketplace not in MVB_MARKETPLACES:
@@ -1486,14 +1488,56 @@ def pallets():
     items = MvbPallet.query.order_by(MvbPallet.created_at.desc()).limit(200).all()
     # Короба на складе без паллеты по направлениям — их надо собрать в
     # паллеты: в машину грузим только паллетами.
-    loose = {}
-    for box in _unpalletized_query().all():
+    per_pallet = int(_pallet_setting(MVB_PALLET_MAX_KEY, MVB_PALLET_MAX_DEFAULT) or 1)
+    loose = []
+    for key, boxes in _loose_groups().items():
+        line = boxes[0].line
+        loose.append({
+            "key": key, "label": line.label(), "slot_date": line.slot_date, "count": len(boxes),
+            "pallets": -(-len(boxes) // per_pallet),
+        })
+    loose.sort(key=lambda r: (_slot_sort(r["slot_date"]), r["label"]))
+    return render_template("mvb/pallets.html", pallets=items, loose=loose, per_pallet=per_pallet)
+
+
+def _loose_groups():
+    """Короба без паллеты по группам отгрузки (направление + дата слота)."""
+    groups = {}
+    for box in _unpalletized_query().order_by(MvbBox.order_id, MvbBox.id).all():
         if box.line is None:
             continue
-        key = (box.line.marketplace, box.line.destination or "")
-        row = loose.setdefault(key, {"marketplace": key[0], "destination": key[1], "label": box.line.label(), "count": 0})
-        row["count"] += 1
-    return render_template("mvb/pallets.html", pallets=items, loose=sorted(loose.values(), key=lambda r: r["label"]))
+        groups.setdefault(_group_key(box.line), []).append(box)
+    return groups
+
+
+def _create_pallets_for_group(key):
+    """«Создать N паллет»: на группу (направление + слот) создается столько
+    паллет, сколько нужно по максимуму коробов на паллете, и короба
+    раскладываются по ним по порядку заявок (заявка по возможности не
+    делится между паллетами)."""
+    boxes = _loose_groups().get(key)
+    if not boxes:
+        flash("Коробов без паллеты по этому направлению уже нет", "info")
+        return redirect(url_for("mvb.pallets"))
+    per_pallet = int(_pallet_setting(MVB_PALLET_MAX_KEY, MVB_PALLET_MAX_DEFAULT) or 1)
+    line = boxes[0].line
+    created = []
+    for start in range(0, len(boxes), per_pallet):
+        pallet = MvbPallet(
+            number=next_number("mvb_pallet", "PLT-", 6), marketplace=line.marketplace,
+            destination=(line.destination or "").strip() or None, created_by_id=current_user.id,
+        )
+        db.session.add(pallet)
+        for box in boxes[start:start + per_pallet]:
+            box.pallet = pallet
+        created.append(pallet)
+    _recalc_pallet_costs({b.order for b in boxes})
+    db.session.commit()
+    flash(
+        f"{line.label()}: создано паллет — {len(created)} ({', '.join(p.number for p in created)}), "
+        f"разложено {len(boxes)} кор. Распечатайте этикетки паллет", "success",
+    )
+    return redirect(url_for("mvb.pallets"))
 
 
 @bp.route("/pallets/<int:pallet_id>")
