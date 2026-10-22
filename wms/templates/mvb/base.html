@@ -63,7 +63,7 @@
         <li class="nav-item"><a class="nav-link" href="{{ url_for('mvb.guide') }}">🎓 Обучение</a></li>
         <li class="nav-item"><span class="nav-link">👤 {{ current_user.display_name() }}{% if current_user.mvb_client %} · {{ current_user.mvb_client.name }}{% endif %}</span></li>
         <li class="nav-item">
-          <form method="post" action="{{ url_for('mvb.logout') }}"><button class="btn btn-sm btn-outline-light mt-1">Выйти</button></form>
+          <form method="post" action="{{ url_for('mvb.logout') }}" data-no-ajax><button class="btn btn-sm btn-outline-light mt-1">Выйти</button></form>
         </li>
       </ul>
     </div>
@@ -123,6 +123,7 @@
 })();
 </script>
 {% endif %}
-{% block scripts %}{% endblock %}
+<script src="{{ url_for('static', filename='js/mvb-ajax.js') }}"></script>
+<div id="mvbPageScripts">{% block scripts %}{% endblock %}</div>
 </body>
 </html>

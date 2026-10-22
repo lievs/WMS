@@ -343,8 +343,14 @@ def orders():
     client_id = request.args.get("client_id", type=int)
     if client_id and not _is_client():
         query = query.filter(MvbOrder.client_id == client_id)
-    # Тип забора: самопривоз или забор транспортной компанией.
+    # Тип забора — вкладки «Забор ТК» и «Самопривоз» (у сотрудников; по
+    # умолчанию «Забор ТК»), клиент видит все свои заявки.
     method = request.args.get("method", "")
+    if not _is_client() and method not in MVB_DELIVERY_METHODS:
+        method = "pickup"
+    method_counts = {
+        m: query.filter(MvbOrder.delivery_method == m).count() for m in MVB_DELIVERY_METHODS
+    } if not _is_client() else {}
     if method in MVB_DELIVERY_METHODS:
         query = query.filter(MvbOrder.delivery_method == method)
     need_driver_filter = (
@@ -362,6 +368,7 @@ def orders():
     wms_rows = _wms_candidate_rows() if _is_operator() else []
     return render_template(
         "mvb/orders.html", orders=items, clients=clients, status=status, client_id=client_id, method=method,
+        method_counts=method_counts,
         need_driver=need_driver, drivers=_active_drivers() if _is_staff() else [],
         wms_rows=wms_rows,
     )
@@ -1327,11 +1334,15 @@ def order_assign_driver(order_id):
         if driver is None or driver.role != "mvb_driver":
             abort(400)
         order.driver_id = driver.id
-        flash(f"На забор назначен водитель {driver.display_name()}", "success")
+        message = f"На забор {order.number} назначен водитель {driver.display_name()}"
     else:
         order.driver_id = None
-        flash("Водитель снят с заявки", "success")
+        message = f"Водитель снят с заявки {order.number}"
     db.session.commit()
+    if request.headers.get("X-Requested-With") == "fetch":
+        # Назначение из списка без перезагрузки страницы.
+        return jsonify(ok=True, message=message, assigned=bool(order.driver_id))
+    flash(message, "success")
     if request.form.get("back") == "orders":
         return redirect(url_for("mvb.orders", status=request.form.get("status", "")))
     return redirect(url_for("mvb.order_detail", order_id=order.id))

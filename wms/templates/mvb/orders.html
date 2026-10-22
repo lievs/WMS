@@ -64,6 +64,13 @@
   </div>
 </div>
 {% endif %}
+{% if method_counts %}
+<ul class="nav nav-tabs mb-3">
+  {% for m, label in [('pickup', 'Забор ТК'), ('self', 'Самопривоз')] %}
+  <li class="nav-item"><a class="nav-link {{ 'active' if method == m }}" href="{{ url_for('mvb.orders', method=m, status=status if status != 'need_driver' or m == 'pickup' else '', client_id=client_id or None) }}">{{ label }} <span class="badge bg-secondary">{{ method_counts[m] }}</span></a></li>
+  {% endfor %}
+</ul>
+{% endif %}
 <form class="row g-2 mb-3" method="get">
   <div class="col-auto">
     <select name="status" class="form-select" onchange="this.form.submit()">
@@ -74,13 +81,7 @@
       {% if not mvb_is_client %}<option value="need_driver" {{ 'selected' if status == 'need_driver' }}>Забор без водителя</option>{% endif %}
     </select>
   </div>
-  <div class="col-auto">
-    <select name="method" class="form-select" onchange="this.form.submit()" title="Тип забора">
-      <option value="">Самопривоз и забор ТК</option>
-      <option value="pickup" {{ 'selected' if method == 'pickup' }}>Забор ТК</option>
-      <option value="self" {{ 'selected' if method == 'self' }}>Самопривоз</option>
-    </select>
-  </div>
+  {% if method %}<input type="hidden" name="method" value="{{ method }}">{% endif %}
   {% if clients %}
   <div class="col-auto">
     <select name="client_id" class="form-select" onchange="this.form.submit()">
@@ -110,13 +111,13 @@
       </div>
     </a>
     {% if drivers and o.status == 'confirmed' and o.delivery_method == 'pickup' %}
-    <form method="post" action="{{ url_for('mvb.order_assign_driver', order_id=o.id) }}" class="d-flex gap-1 px-3 pb-3">
+    <form method="post" action="{{ url_for('mvb.order_assign_driver', order_id=o.id) }}" class="d-flex gap-1 px-3 pb-3 js-assign">
       <input type="hidden" name="back" value="orders"><input type="hidden" name="status" value="{{ status }}">
       <select name="driver_id" class="form-select form-select-sm {{ 'border-warning' if not o.driver_id }}">
         <option value="">— водитель не назначен —</option>
         {% for d in drivers %}<option value="{{ d.id }}" {{ 'selected' if o.driver_id == d.id }}>{{ d.display_name() }}</option>{% endfor %}
       </select>
-      <button class="btn btn-sm btn-outline-success">OK</button>
+      <button class="btn btn-sm btn-outline-success js-assign-ok">OK</button>
     </form>
     {% endif %}
   </div>
@@ -145,13 +146,13 @@
       {% if drivers %}
       <td>
         {% if o.status == 'confirmed' and o.delivery_method == 'pickup' %}
-        <form method="post" action="{{ url_for('mvb.order_assign_driver', order_id=o.id) }}" class="d-flex gap-1">
+        <form method="post" action="{{ url_for('mvb.order_assign_driver', order_id=o.id) }}" class="d-flex gap-1 js-assign">
           <input type="hidden" name="back" value="orders"><input type="hidden" name="status" value="{{ status }}">
           <select name="driver_id" class="form-select form-select-sm {{ 'border-warning' if not o.driver_id }}" style="min-width:140px">
             <option value="">— не назначен —</option>
             {% for d in drivers %}<option value="{{ d.id }}" {{ 'selected' if o.driver_id == d.id }}>{{ d.display_name() }}</option>{% endfor %}
           </select>
-          <button class="btn btn-sm btn-outline-success">OK</button>
+          <button class="btn btn-sm btn-outline-success js-assign-ok">OK</button>
         </form>
         {% else %}<span class="text-muted">—</span>{% endif %}
       </td>
@@ -167,6 +168,26 @@
 {% endblock %}
 {% block scripts %}
 <script>
+// Водитель назначается сразу при выборе в списке — без перезагрузки страницы.
+document.querySelectorAll("form.js-assign").forEach((form) => {
+  const select = form.querySelector("select[name=driver_id]");
+  const ok = form.querySelector(".js-assign-ok");
+  if (ok) ok.classList.add("d-none");
+  select.addEventListener("change", async () => {
+    select.disabled = true;
+    try {
+      const resp = await fetch(form.action, {method: "POST", body: new URLSearchParams({driver_id: select.value}), headers: {"X-Requested-With": "fetch"}});
+      const data = await resp.json();
+      select.classList.toggle("border-warning", !data.assigned);
+      select.classList.add(data.ok ? "border-success" : "border-danger");
+      select.title = data.message || "";
+    } catch (e) {
+      select.classList.add("border-danger");
+      select.title = "Нет связи с сервером — водитель не назначен";
+    }
+    select.disabled = false;
+  });
+});
   const wmsBoxes = [...document.querySelectorAll("input[name=doc_id]")];
   const wmsWarn = document.querySelector(".wms-warn");
   wmsBoxes.forEach(b => b.addEventListener("change", () => {

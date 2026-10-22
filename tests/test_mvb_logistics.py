@@ -2080,8 +2080,14 @@ def test_orders_filter_by_delivery_type(db, client):
     self_ = _confirmed_order(client, delivery_method="self", pickup_address="")
     _login(client, _user("operator", "mvb_staff"))
     page = client.get("/mvb/orders").get_data(as_text=True)
-    assert 'name="method"' in page and pick.number in page and self_.number in page
+    # вкладки «Забор ТК» (по умолчанию) и «Самопривоз»
+    assert "nav-tabs" in page and "Забор ТК" in page and f'>{pick.number}</a>' in page and f'>{self_.number}</a>' not in page
     page = client.get("/mvb/orders?method=self").get_data(as_text=True)
-    assert self_.number in page and pick.number not in page
-    page = client.get("/mvb/orders?method=pickup").get_data(as_text=True)
-    assert pick.number in page and self_.number not in page
+    assert f'>{self_.number}</a>' in page and f'>{pick.number}</a>' not in page
+    # назначение водителя без перезагрузки — JSON-ответ
+    driver = _user("drv", "mvb_driver")
+    data = client.post(f"/mvb/orders/{pick.id}/driver", data={"driver_id": str(driver.id)},
+                       headers={"X-Requested-With": "fetch"}).get_json()
+    assert data["ok"] and data["assigned"] and db.session.get(MvbOrder, pick.id).driver_id == driver.id
+    assert "js-assign" in client.get("/mvb/orders").get_data(as_text=True)
+    assert "mvb-ajax.js" in page
