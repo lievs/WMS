@@ -2115,3 +2115,35 @@ def test_create_n_pallets_for_direction(db, client):
     assert [len(p.boxes) for p in pallets] == [3, 3, 1]
     assert all(b.pallet_id for b in order.boxes)
     assert "Короба без паллеты" not in client.get("/mvb/pallets").get_data(as_text=True)
+
+
+def test_dispatch_pallets_to_trip_and_loading_list(db, client):
+    """«К отправке» — список паллет: отмечаем и «Создать рейс»; на погрузке
+    кладовщик видит паллеты своего авто и сканирует их."""
+    admin = _user("admin1", "mvb_admin")
+    order = _received_order(client, _user("c1", "mvb_client", _mvb_client()), admin, box_count="2")
+    other = _received_order(client, _user("c2", "mvb_client", _mvb_client("ИП Б")), admin, box_count="1")
+    for o in (order, other):
+        client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+        pallet = MvbPallet.query.order_by(MvbPallet.id.desc()).first()
+        for box in o.boxes:
+            client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
+    p1, p2 = MvbPallet.query.order_by(MvbPallet.id).all()
+    page = client.get("/mvb/dispatch").get_data(as_text=True)
+    assert "Паллеты к отправке: 2" in page and p1.number in page and p2.number in page
+    client.post("/mvb/trips/new", data={"pallet_id": [str(p1.id)]})
+    trip = MvbTrip.query.one()
+    assert trip.planned_boxes == 2 and p1.planned_trip_id == trip.id and p2.planned_trip_id is None
+    page = client.get("/mvb/dispatch").get_data(as_text=True)
+    assert "Паллеты к отправке: 1" in page
+    # повторно ту же паллету в рейс не взять
+    client.post("/mvb/trips/new", data={"pallet_id": [str(p1.id)]})
+    assert MvbTrip.query.count() == 1
+
+    vehicle = _vehicle(10)
+    client.post(f"/mvb/trips/{trip.id}/plan", data={"vehicle_id": str(vehicle.id)})
+    page = client.get(f"/mvb/loading/{trip.id}").get_data(as_text=True)
+    assert f'data-pallet="{p1.number}"' in page and "погружено <span id=\"palLoaded\">0</span> из 1" in page
+    data = client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": p1.number}).get_json()
+    assert data["ok"] and data["pallet"] == p1.number and data["loaded"] == 2
+    assert "погружено <span id=\"palLoaded\">1</span> из 1" in client.get(f"/mvb/loading/{trip.id}").get_data(as_text=True)

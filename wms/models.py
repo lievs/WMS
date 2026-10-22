@@ -2104,8 +2104,12 @@ class MvbPallet(db.Model):
     destination = db.Column(db.String(200))
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    # Рейс, в который паллета запланирована из «К отправке» (на погрузке
+    # кладовщик видит список паллет своего авто).
+    planned_trip_id = db.Column(db.Integer, db.ForeignKey("mvb_trips.id"), index=True)
 
     boxes = db.relationship("MvbBox", back_populates="pallet", order_by="MvbBox.id")
+    planned_trip = db.relationship("MvbTrip", foreign_keys=[planned_trip_id])
 
     @property
     def marketplace_label(self):

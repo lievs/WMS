@@ -1695,6 +1695,34 @@ def _ready_boxes_query():
     )
 
 
+def _pallet_in_active_trip(pallet):
+    trip = pallet.planned_trip
+    return trip is not None and trip.status in ACTIVE_TRIP_STATUSES
+
+
+def _dispatch_pallets():
+    """«К отправке»: сформированные паллеты на складе (с непогруженными
+    коробами), еще не запланированные в действующий рейс. Сверху ближайший
+    слот, затем самые давние."""
+    rows = {}
+    for box in _dispatch_boxes_query().all():
+        pallet = box.pallet
+        if _pallet_in_active_trip(pallet) or _line_in_active_trip(box.line):
+            continue
+        row = rows.setdefault(pallet.id, {
+            "pallet": pallet, "boxes": 0, "clients": set(), "orders": set(), "slot_date": box.line.slot_date,
+            "oldest": box.received_at, "label": box.line.label(),
+        })
+        row["boxes"] += 1
+        row["clients"].add(box.order.client.name)
+        row["orders"].add(box.order.number)
+        if box.line.slot_date and (row["slot_date"] is None or box.line.slot_date < row["slot_date"]):
+            row["slot_date"] = box.line.slot_date
+        if box.received_at and (row["oldest"] is None or box.received_at < row["oldest"]):
+            row["oldest"] = box.received_at
+    return sorted(rows.values(), key=lambda r: (_slot_sort(r["slot_date"]), r["oldest"] or datetime.min, r["pallet"].id))
+
+
 def _dispatch_boxes_query():
     """К отправке — только короба на сформированных паллетах (в машину
     грузим только паллетами); короба без паллеты ждут палетирования."""
@@ -1829,6 +1857,7 @@ def dispatch():
     proposal = _pack_orders(items, capacity) if capacity else []
     return render_template(
         "mvb/dispatch.html", rows=rows, capacity=capacity, capacities=capacities, total=total,
+        pallet_rows=_dispatch_pallets(),
         unpalletized=_unpalletized_query().count(),
         total_vehicles=len(proposal) if capacity else None, proposal=proposal,
     )
@@ -1901,6 +1930,8 @@ def trip_new():
     запоминаются как запланированные в него (planned_trip)."""
     if not _require_operator():
         return redirect(url_for("mvb.index"))
+    if request.form.getlist("pallet_id"):
+        return _trip_from_pallets(request.form.getlist("pallet_id", type=int))
     selected = set(request.form.getlist("dir"))
     groups = [g for g in _ready_groups() if g["key"] in selected or g["direction"] in selected]
     # Направление, для которого коробов уже нет (успели погрузить), все
@@ -1975,6 +2006,41 @@ def trip_new():
         "заявки не разбиты — все в статусе «Поиск авто»", "success",
     )
     return redirect(url_for("mvb.trips", status="searching"))
+
+
+def _trip_from_pallets(pallet_ids):
+    """«Создать рейс» по отмеченным в «К отправке» паллетам: точки маршрута —
+    направления паллет, паллеты и их заявки запоминаются в рейсе (кладовщик
+    на погрузке видит этот список паллет). Статус — «Поиск авто»."""
+    rows = {r["pallet"].id: r for r in _dispatch_pallets()}
+    chosen = [rows[pid] for pid in pallet_ids if pid in rows]
+    if not chosen:
+        flash("Эти паллеты уже в рейсе или погружены — рейс не создан", "warning")
+        return redirect(url_for("mvb.dispatch"))
+    trip = MvbTrip(
+        number=next_number("mvb_trip", "RS-", 6), planned_boxes=0, status="searching", created_by_id=current_user.id,
+    )
+    db.session.add(trip)
+    slots = set()
+    for row in chosen:
+        pallet = row["pallet"]
+        stop = _add_stop(trip, pallet.marketplace, pallet.destination)
+        stop.planned_boxes += row["boxes"]
+        trip.planned_boxes += row["boxes"]
+        pallet.planned_trip = trip
+        for box in pallet.boxes:
+            if box.status == "received" and box.trip_id is None and box.line is not None:
+                box.line.planned_trip = trip
+                slots.add(box.line.slot_date)
+    trip.slot_date = next(iter(slots)) if len(slots) == 1 else None
+    if len(slots) > 1:
+        flash("В рейсе паллеты с разными датами слота — проверьте, успеете ли сдать все", "warning")
+    db.session.commit()
+    flash(
+        f"Рейс {trip.number} создан: {len(chosen)} пал., {trip.planned_boxes} кор. · {trip.route_label()} — статус «Поиск авто»",
+        "success",
+    )
+    return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
 
 
 def _get_trip_or_404(trip_id):
@@ -2284,10 +2350,13 @@ def trip_scan(trip_id):
         warnings.append(f"на точку «{stop.label()}» по плану {stop.planned_boxes} кор., погружено {len(stop.boxes)}")
     if trip.slot_date and line.slot_date and line.slot_date != trip.slot_date:
         warnings.append(f"слот заявки {line.slot_date.strftime('%d.%m')}, а рейса {trip.slot_date.strftime('%d.%m')}")
-    if line.planned_trip_id and line.planned_trip_id != trip.id:
+    if pallet is not None and pallet.planned_trip_id and pallet.planned_trip_id != trip.id:
+        warnings.append(f"паллета {pallet.number} запланирована в рейс {pallet.planned_trip.number}")
+    elif line.planned_trip_id and line.planned_trip_id != trip.id:
         warnings.append(f"заявка {order.number} ({line.short_label()}) запланирована в рейс {line.planned_trip.number}")
     warning = ("Внимание: " + "; ".join(warnings)) if warnings else None
-    return jsonify(ok=True, already=False, message=message, count=count, warning=warning, loaded=len(trip.boxes))
+    return jsonify(ok=True, already=False, message=message, count=count, warning=warning, loaded=len(trip.boxes),
+                   pallet=pallet.number if pallet is not None else None)
 
 
 # ---------- ссылка для водителя на СЦ (без входа) ----------
@@ -2334,7 +2403,17 @@ def loading_trip(trip_id):
     if trip.status not in LOADING_STATUSES:
         flash(f"Рейс {trip.number}: {trip.status_label}", "info")
         return redirect(url_for("mvb.loading"))
-    return render_template("mvb/loading_trip.html", trip=trip)
+    # Паллеты к погрузке: запланированные в этот рейс из «К отправке» и уже
+    # погруженные в него.
+    pallets = {p.id: p for p in MvbPallet.query.filter_by(planned_trip_id=trip.id).all()}
+    for box in trip.boxes:
+        if box.pallet is not None:
+            pallets.setdefault(box.pallet.id, box.pallet)
+    rows = []
+    for pallet in sorted(pallets.values(), key=lambda p: p.number):
+        loaded = sum(1 for b in pallet.boxes if b.trip_id == trip.id)
+        rows.append({"pallet": pallet, "boxes": len(pallet.boxes), "loaded": loaded and loaded == len(pallet.boxes)})
+    return render_template("mvb/loading_trip.html", trip=trip, pallet_rows=rows)
 
 
 # Ссылка водителя действует, пока рейс в работе, и еще сутки после
