@@ -61,8 +61,8 @@ SCAN_MODES = {
         "nav": "Приемка",
         "to": "received",
         # Приемка — для самопривоза и вернувшихся с СЦ; короба с забора
-        # приемщик пересчитывает в «Приемке от водителей» (скан забранного
-        # короба тоже примет его).
+        # Все короба (от водителей и самопривоз) встают на склад только
+        # после скана приемщика здесь.
         "from": {"created", "picked_up", "not_delivered"},
         "roles": {"mvb_storekeeper", "mvb_admin"},
     },
@@ -176,9 +176,22 @@ def _badge_counts():
             ).count() if operator else 0
         ),
         "mvb_pickup_count": _pickup_badge_count() if _is_driver() else 0,
-        "mvb_handover_count": MvbBox.query.filter_by(status="picked_up").count() if keeper else 0,
+        "mvb_handover_count": _awaiting_receipt_query().count() if keeper else 0,
         "mvb_unpalletized_count": _unpalletized_query().count() if keeper else 0,
     }
+
+
+def _awaiting_receipt_query():
+    """Короба, которые ждут приемки сканом: привезенные водителем (забраны)
+    и самопривоз по оформленным заявкам. На склад они встают только после
+    скана приемщика."""
+    return MvbBox.query.join(MvbOrder).filter(
+        MvbOrder.status == "confirmed",
+        db.or_(
+            MvbBox.status == "picked_up",
+            db.and_(MvbBox.status == "created", MvbOrder.delivery_method == "self"),
+        ),
+    )
 
 
 def _unpalletized_query():
@@ -880,47 +893,6 @@ def driver_picked(order_id):
     return redirect(url_for("mvb.driver"))
 
 
-@bp.route("/handover", methods=["GET", "POST"])
-def handover():
-    """Приемка от водителей: приемщик пересчитывает привезенные водителем
-    короба заявки и подтверждает количество — короба встают на склад МВБ.
-    Если коробов меньше, принимается пересчитанное, остаток ждет."""
-    if not _is_storekeeper():
-        flash("Доступно кладовщику МВБ", "danger")
-        return redirect(url_for("mvb.index"))
-    if request.method == "POST":
-        order = MvbOrder.query.get_or_404(request.form.get("order_id", type=int))
-        boxes = sorted((b for b in order.boxes if b.status == "picked_up"), key=lambda b: b.seq)
-        count = request.form.get("count", type=int)
-        if not boxes:
-            flash(f"По заявке {order.number} нет коробов от водителя", "info")
-        elif count is None or count < 0:
-            flash("Укажите, сколько коробов пересчитали", "danger")
-        elif count > len(boxes):
-            flash(f"Пересчитано {count}, а водитель забрал {len(boxes)} кор. по заявке {order.number}. "
-                  f"Лишние короба примите через «📷 Приемку» или сообщите оператору", "danger")
-        else:
-            now = datetime.utcnow()
-            for box in boxes[:count]:
-                _move_box(box, "received", now)
-            db.session.commit()
-            if count == len(boxes):
-                flash(f"Принято на склад МВБ: {count} кор. по заявке {order.number}. Соберите их в паллеты — в машину грузим только паллетами", "success")
-            else:
-                flash(f"Заявка {order.number}: принято {count} из {len(boxes)} кор. "
-                      f"Не хватает {len(boxes) - count} кор. — сообщите оператору", "warning")
-        return redirect(url_for("mvb.handover"))
-    boxes = MvbBox.query.filter(MvbBox.status == "picked_up").all()
-    groups = {}
-    for box in boxes:
-        row = groups.setdefault(box.order_id, {"order": box.order, "count": 0, "driver": db.session.get(User, box.picked_up_by_id) if box.picked_up_by_id else None, "last": None})
-        row["count"] += 1
-        if box.picked_up_at and (row["last"] is None or box.picked_up_at > row["last"]):
-            row["last"] = box.picked_up_at
-    rows = sorted(groups.values(), key=lambda r: (r["driver"].display_name() if r["driver"] else "", r["order"].number))
-    return render_template("mvb/handover.html", rows=rows)
-
-
 @bp.route("/driver/orders/<int:order_id>/release", methods=["POST"])
 def driver_release(order_id):
     if not _is_driver():
@@ -943,8 +915,18 @@ def scan(mode):
     current = None
     if mode == "pickup" and request.args.get("order", type=int):
         current = MvbOrder.query.get(request.args.get("order", type=int))
+    expected = []
+    if mode == "receive":
+        groups = {}
+        for box in _awaiting_receipt_query().all():
+            row = groups.setdefault(box.order_id, {"order": box.order, "waiting": 0})
+            row["waiting"] += 1
+        for row in groups.values():
+            row["received"] = sum(1 for b in row["order"].boxes if b.status == "received")
+            row["source"] = "Самопривоз" if row["order"].delivery_method == "self" else "От водителя"
+        expected = sorted(groups.values(), key=lambda r: (r["source"], r["order"].number))
     return render_template(
-        "mvb/scan.html", mode=mode, mode_info=SCAN_MODES[mode], current=current,
+        "mvb/scan.html", mode=mode, mode_info=SCAN_MODES[mode], current=current, expected=expected,
         current_progress=_order_progress(current, "picked_up") if current else None,
     )
 

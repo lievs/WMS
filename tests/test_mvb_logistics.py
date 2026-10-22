@@ -719,15 +719,15 @@ def test_full_chain_seller_to_sc(db, client):
     feed = client.get("/mvb/driver").get_data(as_text=True)
     assert "У меня забрано: <b>5</b>" in feed and "приемщику" in feed
     # приемка — у кладовщика, оператору и водителю она не нужна
-    assert client.get("/mvb/handover").status_code == 302
     assert client.post("/mvb/scan/receive", data={"barcode": first.boxes[0].barcode}).status_code == 403
 
-    # 4. приемщик пересчитывает привезенные короба по заявкам и подтверждает
+    # 4. приемщик сканирует каждый привезенный короб — только тогда он на складе
     _login(client, keeper)
-    page = client.get("/mvb/handover").get_data(as_text=True)
-    assert first.number in page and second.number in page and "Водитель забрал: <b>3</b>" in page
-    client.post("/mvb/handover", data={"order_id": str(first.id), "count": "3"})
-    client.post("/mvb/handover", data={"order_id": str(second.id), "count": "2"})
+    page = client.get("/mvb/scan/receive").get_data(as_text=True)
+    assert "Ждут приемки" in page and first.number in page and second.number in page
+    assert {b.status for b in first.boxes + second.boxes} == {"picked_up"}
+    for box in first.boxes + second.boxes:
+        assert client.post("/mvb/scan/receive", data={"barcode": box.barcode}).get_json()["ok"]
     assert {b.status for b in first.boxes + second.boxes} == {"received"}
     _login(client, operator)
     assert client.post("/mvb/scan/receive", data={"barcode": first.boxes[0].barcode}).status_code == 403
@@ -1278,7 +1278,7 @@ def test_menu_by_role(db, client):
         "seller": (seller, ["Мои заявки"], ["Заявки в работе", "Приемка", "Скан забора", "Настройки"]),
         "driver": (_user("driver", "mvb_driver"), ["Заявки на забор"], ["Скан забора", "Заявки в работе", "Приемка", "Паллеты"]),
         "operator": (_user("operator", "mvb_staff"), ["Заявки в работе", "Клиенты", "Настройки", "Прайс", "Машины для СЦ", "Пользователи", "Рейсы"], ["Приемка", "Скан забора", "Заявки на забор", "Паллеты"]),
-        "keeper": (_user("keeper", "mvb_storekeeper"), ["Приемка от водителей", "Приемка", "Паллеты", "Погрузка"], ["Заявки в работе", "Скан забора", "Настройки", "Клиенты", "Рейсы"]),
+        "keeper": (_user("keeper", "mvb_storekeeper"), ["Приемка", "Паллеты", "Погрузка"], ["Заявки в работе", "Скан забора", "Настройки", "Клиенты", "Рейсы"]),
     }
     for name, (user, visible, hidden) in roles.items():
         _login(client, user)
@@ -1469,29 +1469,30 @@ def test_old_cities_and_destination_prices_migrate(db, client):
     assert MvbPriceTier.price_for("sc", 3, kazan.id) == 250 and MvbPriceTier.price_for("sc", 3, moscow.id) == 180
 
 
-def test_storekeeper_confirms_counted_boxes_from_driver(db, client):
-    """Приемщик пересчитывает короба от водителя: пересчитал меньше — на
-    склад встает пересчитанное, остаток ждет; больше, чем забрал, — отказ."""
-    _login(client, _user("seller", "mvb_client", _mvb_client()))
+def test_driver_boxes_and_self_delivery_reach_warehouse_only_after_scan(db, client):
+    """Приемка только сканом: короба от водителя и самопривоз видны в
+    «Ждут приемки», на склад встают после скана приемщика."""
+    seller = _user("seller", "mvb_client", _mvb_client())
+    _login(client, seller)
     order = _confirmed_order(client, box_count="3")
+    self_order = _confirmed_order(client, box_count="1", delivery_method="self", pickup_address="")
     driver = _user("driver", "mvb_driver")
     _login(client, driver)
     client.post(f"/mvb/driver/orders/{order.id}/take")
-    page = client.get("/mvb/driver").get_data(as_text=True)
-    assert "/mvb/scan/pickup" not in page and f"/mvb/driver/orders/{order.id}/picked" in page
     client.post(f"/mvb/driver/orders/{order.id}/picked", data={"count": "3"})
     assert client.post("/mvb/driver/handover").status_code in (404, 405)
 
     _login(client, _user("keeper", "mvb_storekeeper"))
-    assert 'data-mvb-badge="handover" title="Коробов ждут приемки">3</span>' in client.get("/mvb/pallets").get_data(as_text=True)
-    client.post("/mvb/handover", data={"order_id": str(order.id), "count": "4"})
-    assert {b.status for b in order.boxes} == {"picked_up"}
-    page = client.post("/mvb/handover", data={"order_id": str(order.id), "count": "2"}, follow_redirects=True).get_data(as_text=True)
-    assert "принято 2 из 3" in page and "Водитель забрал: <b>1</b>" in page
-    assert sorted(b.status for b in order.boxes) == ["picked_up", "received", "received"]
-    client.post("/mvb/handover", data={"order_id": str(order.id), "count": "1"})
-    assert {b.status for b in order.boxes} == {"received"}
-    assert "Нет коробов от водителей" in client.get("/mvb/handover").get_data(as_text=True)
+    assert client.get("/mvb/handover").status_code == 404
+    page = client.get("/mvb/scan/receive").get_data(as_text=True)
+    assert 'data-mvb-badge="handover" title="Коробов ждут приемки">4</span>' in page
+    assert "Приемка от водителей" not in page and "От водителя" in page and "Самопривоз" in page
+    client.post("/mvb/scan/receive", data={"barcode": order.boxes[0].barcode})
+    assert sorted(b.status for b in order.boxes) == ["picked_up", "picked_up", "received"]
+    for box in order.boxes[1:] + self_order.boxes:
+        client.post("/mvb/scan/receive", data={"barcode": box.barcode})
+    assert {b.status for b in order.boxes + self_order.boxes} == {"received"}
+    assert "Нет коробов, ожидающих приемки" in client.get("/mvb/scan/receive").get_data(as_text=True)
 
 
 def test_sc_addresses_route_and_driver_sees_only_address_and_count(db, client):
