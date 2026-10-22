@@ -71,10 +71,19 @@
       const resp = await fetch(action, {method: "POST", body, headers: {"X-Requested-With": "mvb-ajax"}, credentials: "same-origin"});
       const type = resp.headers.get("Content-Type") || "";
       if (!type.includes("text/html")) {
-        // Файл (PDF/Excel) или иное — обычная отправка.
-        form.setAttribute("data-no-ajax", "1");
-        if (submitter) submitter.disabled = false;
-        form.requestSubmit ? form.requestSubmit(submitter) : form.submit();
+        // Файл (PDF/Excel) — отдаем его как скачивание; повторно форму не
+        // отправляем, чтобы действие не выполнилось дважды.
+        buttons.forEach((b) => (b.disabled = false));
+        if (/json/.test(type)) { window.location.reload(); return; }
+        const blob = await resp.blob();
+        const disp = resp.headers.get("Content-Disposition") || "";
+        const m = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(disp);
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = m ? decodeURIComponent(m[1] || m[2]) : "file";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
         return;
       }
       const html = await resp.text();

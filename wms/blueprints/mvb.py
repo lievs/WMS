@@ -1437,7 +1437,7 @@ def vehicles():
             vehicle.is_active = request.form.get("is_active") == "1"
         db.session.add(vehicle)
         db.session.commit()
-        flash(f"Транспорт {vehicle.plate} сохранен", "success")
+        flash(f"Машина {vehicle.plate} сохранена", "success")
         return redirect(url_for("mvb.vehicles"))
     return render_template(
         "mvb/vehicles.html",
