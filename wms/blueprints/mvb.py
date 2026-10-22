@@ -1741,6 +1741,11 @@ def pallet_scan(pallet_id):
     code = (request.form.get("barcode") or "").strip()
     box = MvbBox.query.filter(db.func.upper(MvbBox.barcode) == code.upper()).first()
     if box is None:
+        other = MvbPallet.query.filter(db.func.upper(MvbPallet.number) == code.upper()).first()
+        if other is not None:
+            # Отсканирован стикер другой паллеты — переходим к ней.
+            return jsonify(ok=True, already=True, message=f"Открываю паллету {other.number}",
+                           goto=url_for("mvb.pallet_detail", pallet_id=other.id))
         return jsonify(ok=False, message=f"Короб {code} не найден"), 404
     if box.status != "received":
         return jsonify(ok=False, message=f"Короб в статусе «{box.status_label}» — на паллету только принятые на складе"), 409
@@ -1768,7 +1773,8 @@ def pallet_scan(pallet_id):
     db.session.commit()
     message = f"{box.barcode} → {pallet.number}" + (f" (снят с {moved_from})" if moved_from else "")
     return jsonify(ok=True, already=False, message=message, count=len(pallet.boxes), barcode=box.barcode,
-                   reload=assigned)
+                   box_order=box.order.number, box_client=box.order.client.name, box_direction=box.line.label(),
+                   assigned=assigned)
 
 
 MVB_PALLET_PRICE_KEY = "mvb_pallet_price"

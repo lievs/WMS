@@ -2,6 +2,15 @@
 {% block title %}Паллеты{% endblock %}
 {% block content %}
 <h3 class="mb-3">Паллеты</h3>
+<form method="get" class="card p-3 mb-3 border-primary">
+  <h5 class="mb-1">📷 Скан паллеты</h5>
+  <div class="small text-muted mb-2">Отсканируйте стикер паллеты — откроется паллета, сразу сканируйте в нее короба.</div>
+  <div class="input-group input-group-lg" style="max-width:560px">
+    <input name="code" id="palletCode" class="form-control" placeholder="PLT-…" autocomplete="off" required autofocus>
+    <button type="button" class="btn btn-outline-success" data-camera-scan-target="#palletCode" title="Сканировать камерой">📷</button>
+    <button class="btn btn-primary">Открыть</button>
+  </div>
+</form>
 {% if loose %}
 <div class="card p-3 mb-3 border-danger">
   <h5 class="mb-1">Короба без паллеты</h5>
@@ -16,23 +25,13 @@
 </div>
 {% endif %}
 <div class="row g-3 mb-4">
-  <div class="col-md-6">
+  <div class="col-md-8">
     <form method="post" target="_blank" class="card p-3 h-100" onsubmit="setTimeout(() => window.location.reload(), 1500)">
       <h6>🖨 Создать стикеры паллет</h6>
       <div class="small text-muted mb-2">Пустые стикеры без направления. Наклейте на паллету, отсканируйте стикер и затем короба (можно разных направлений).</div>
       <div class="d-flex gap-2">
         <input name="count" type="number" min="1" max="100" value="10" class="form-control" style="max-width:120px" required>
         <button class="btn btn-success">Создать стикеры</button>
-      </div>
-    </form>
-  </div>
-  <div class="col-md-6">
-    <form method="get" class="card p-3 h-100">
-      <h6>📷 Отсканируйте стикер паллеты</h6>
-      <div class="small text-muted mb-2">Откроется паллета — сканируйте в нее короба.</div>
-      <div class="d-flex gap-2">
-        <input name="code" class="form-control" placeholder="PLT-…" autocomplete="off" required autofocus>
-        <button class="btn btn-primary">Открыть</button>
       </div>
     </form>
   </div>

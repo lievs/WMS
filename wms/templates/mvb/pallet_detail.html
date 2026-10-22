@@ -27,7 +27,7 @@
 <div class="table-responsive">
 <table class="table table-sm align-middle">
   <thead><tr><th>Штрихкод</th><th class="d-none d-md-table-cell">Заявка</th><th class="d-none d-sm-table-cell">Клиент</th><th class="d-none d-md-table-cell">Принят</th><th>Где</th><th></th></tr></thead>
-  <tbody>
+  <tbody id="palletBoxes">
   {% for b in boxes %}
     {% set here = b.pallet_id == pallet.id %}
     <tr data-barcode="{{ b.barcode|upper }}" data-code="{{ b.barcode }}"{% if not here and b.status == 'received' %} title="Двойное нажатие — поставить на паллету" style="cursor:pointer"{% endif %} class="{{ 'table-success' if here else ('table-warning' if b.pallet_id else '') }}">
@@ -41,7 +41,7 @@
       {% endif %}</td>
     </tr>
   {% else %}
-    <tr><td colspan="6" class="text-muted">На складе нет коробов этого направления</td></tr>
+    <tr class="empty-row"><td colspan="6" class="text-muted">Пока пусто — сканируйте короба</td></tr>
   {% endfor %}
   </tbody>
 </table>
@@ -56,15 +56,35 @@ document.querySelectorAll("tr[data-code]").forEach((row) => {
 });
 document.addEventListener("mvb:scanned", (e) => {
   const d = e.detail;
+  if (d.goto) { window.location.href = d.goto; return; }
   if (!d.ok || !d.barcode) return;
   const row = document.querySelector(`tr[data-barcode="${CSS.escape(String(d.barcode).toUpperCase())}"]`);
   if (row) {
     row.className = "table-success";
     row.style.cursor = "";
     row.querySelector(".where").textContent = "✓ на паллете";
+  } else {
+    // Короба не было в списке (другое направление или пустая паллета) —
+    // добавляем строку сверху, без перезагрузки: поле скана остается готовым.
+    const tbody = document.getElementById("palletBoxes");
+    const empty = tbody.querySelector("tr.empty-row");
+    if (empty) empty.remove();
+    const tr = document.createElement("tr");
+    tr.className = "table-success";
+    tr.dataset.barcode = String(d.barcode).toUpperCase();
+    const cells = [d.barcode, d.box_order || "", d.box_client || "", "", "✓ на паллете" + (d.box_direction ? " · " + d.box_direction : ""), ""];
+    cells.forEach((text, i) => {
+      const td = document.createElement("td");
+      td.textContent = text;
+      if (i === 0) td.className = "font-monospace text-nowrap";
+      if (i === 1 || i === 3) td.classList.add("d-none", "d-md-table-cell");
+      if (i === 2) td.classList.add("d-none", "d-sm-table-cell");
+      if (i === 4) td.classList.add("where");
+      tr.appendChild(td);
+    });
+    tbody.prepend(tr);
   }
   if (d.count !== undefined) document.getElementById("palletCount").textContent = d.count;
-  if (d.reload) setTimeout(() => window.location.reload(), 900);  // направление задано — показать короба
 });
 </script>
 {% endblock %}

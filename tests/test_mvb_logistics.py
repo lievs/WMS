@@ -2139,11 +2139,14 @@ def test_pallet_stickers_without_direction(db, client):
     assert "Паллета пустая" in client.get(f"/mvb/pallets/{pallets[0].id}").get_data(as_text=True)
     # первый короб задает направление, короб другого направления не встает
     data = client.post(f"/mvb/pallets/{pallets[0].id}/scan", data={"barcode": order.boxes[0].barcode}).get_json()
-    assert data["ok"] and data["reload"]
+    assert data["ok"] and data["assigned"]
     db.session.refresh(pallets[0])
     assert pallets[0].marketplace == "wb" and pallets[0].destination == "Коледино"
     data = client.post(f"/mvb/pallets/{pallets[0].id}/scan", data={"barcode": order.boxes[1].barcode}).get_json()
-    assert data["ok"] and not data["reload"]
+    assert data["ok"] and not data["assigned"]
+    # скан стикера другой паллеты в поле коробов — переход к ней
+    data = client.post(f"/mvb/pallets/{pallets[0].id}/scan", data={"barcode": pallets[1].number}).get_json()
+    assert data["goto"].endswith(f"/mvb/pallets/{pallets[1].id}")
     # короб другого направления тоже встает на паллету
     data = client.post(f"/mvb/pallets/{pallets[0].id}/scan", data={"barcode": other.boxes[0].barcode}).get_json()
     assert data["ok"]
