@@ -439,8 +439,6 @@ def test_pallet_scan_and_load_whole_pallet(db, client):
     pallet = MvbPallet.query.one()
     for box in order.boxes[:2]:
         assert client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode}).get_json()["ok"]
-    # другое направление на паллету не встает
-    assert client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": other.boxes[0].barcode}).status_code == 409
     assert client.get(f"/mvb/pallets/{pallet.id}/label.pdf").mimetype == "application/pdf"
     assert client.get("/mvb/pallets").status_code == 200
     assert client.get(f"/mvb/pallets/{pallet.id}").status_code == 200
@@ -2144,13 +2142,24 @@ def test_pallet_stickers_without_direction(db, client):
     assert pallets[0].marketplace == "wb" and pallets[0].destination == "Коледино"
     data = client.post(f"/mvb/pallets/{pallets[0].id}/scan", data={"barcode": order.boxes[1].barcode}).get_json()
     assert data["ok"] and not data["reload"]
-    resp = client.post(f"/mvb/pallets/{pallets[0].id}/scan", data={"barcode": other.boxes[0].barcode})
-    assert resp.status_code == 409
-    data = client.post(f"/mvb/pallets/{pallets[1].id}/scan", data={"barcode": other.boxes[0].barcode}).get_json()
+    # короб другого направления тоже встает на паллету
+    data = client.post(f"/mvb/pallets/{pallets[0].id}/scan", data={"barcode": other.boxes[0].barcode}).get_json()
     assert data["ok"]
-    db.session.refresh(pallets[1])
-    assert pallets[1].destination == "Электросталь"
+    client.post(f"/mvb/pallets/{pallets[0].id}/scan", data={"barcode": order.boxes[2].barcode})
     assert client.get(f"/mvb/pallets/{pallets[2].id}/label.pdf").status_code == 200
+    # рейс по смешанной паллете: точка на каждое направление, на погрузке
+    # каждый короб встает на свою точку
+    page = client.get("/mvb/dispatch").get_data(as_text=True)
+    assert "+" in page and pallets[0].number in page
+    client.post("/mvb/trips/new", data={"pallet_id": [str(pallets[0].id)]})
+    trip = MvbTrip.query.one()
+    assert sorted((st.destination, st.planned_boxes) for st in trip.stops) == [("Коледино", 3), ("Электросталь", 1)]
+    client.post(f"/mvb/trips/{trip.id}/plan", data={"vehicle_id": str(_vehicle(10).id)})
+    data = client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": pallets[0].number}).get_json()
+    assert data["ok"] and data["loaded"] == 4
+    db.session.refresh(other.boxes[0])
+    assert other.boxes[0].trip_stop.destination == "Электросталь"
+    assert order.boxes[0].trip_stop.destination == "Коледино"
 
 
 def test_dispatch_pallets_to_trip_and_loading_list(db, client):

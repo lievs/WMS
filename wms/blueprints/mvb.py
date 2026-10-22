@@ -1733,8 +1733,8 @@ def pallet_detail(pallet_id):
 
 @bp.route("/pallets/<int:pallet_id>/scan", methods=["POST"])
 def pallet_scan(pallet_id):
-    """Скан короба на паллету: только принятые на складе короба того же
-    направления, еще не погруженные; с другой паллеты короб переносится."""
+    """Скан короба на паллету: принятые на складе, еще не погруженные
+    короба любого направления; с другой паллеты короб переносится."""
     if not _is_staff():
         return jsonify(ok=False, message="Нет доступа"), 403
     pallet = db.session.get(MvbPallet, pallet_id) or abort(404)
@@ -1748,13 +1748,13 @@ def pallet_scan(pallet_id):
         return jsonify(ok=False, message=f"У короба {box.barcode} нет направления"), 409
     assigned = False
     if not pallet.boxes or not pallet.marketplace:
-        # Пустая паллета (новый стикер) получает направление первого короба.
+        # Пустая паллета (новый стикер) подписывается направлением первого
+        # короба; короба других направлений тоже можно класть.
         if box.pallet_id != pallet.id:
             assigned = True
             pallet.marketplace = box.line.marketplace
             pallet.destination = (box.line.destination or "").strip() or None
-    elif not _same_direction(box.line, pallet.marketplace, pallet.destination):
-        return jsonify(ok=False, message=f"Другое направление: {box.line.label()}. Паллета — {pallet.marketplace_label} · {pallet.destination or ''}"), 409
+
     if box.pallet_id == pallet.id:
         return jsonify(ok=True, already=True, message=f"{box.barcode} уже на этой паллете", count=len(pallet.boxes),
                        barcode=box.barcode)
@@ -1767,8 +1767,6 @@ def pallet_scan(pallet_id):
     _recalc_pallet_costs(affected)
     db.session.commit()
     message = f"{box.barcode} → {pallet.number}" + (f" (снят с {moved_from})" if moved_from else "")
-    if assigned:
-        message += f" · направление паллеты: {box.line.label()}"
     return jsonify(ok=True, already=False, message=message, count=len(pallet.boxes), barcode=box.barcode,
                    reload=assigned)
 
@@ -1903,6 +1901,10 @@ def _dispatch_pallets():
             "oldest": box.received_at, "label": box.line.label(),
         })
         row["boxes"] += 1
+        labels = row.setdefault("labels", [])
+        if box.line.label() not in labels:
+            labels.append(box.line.label())  # на паллете могут быть разные направления
+        row["label"] = " + ".join(labels)
         row["clients"].add(box.order.client.name)
         row["orders"].add(box.order.number)
         if box.line.slot_date and (row["slot_date"] is None or box.line.slot_date < row["slot_date"]):
@@ -2213,12 +2215,13 @@ def _trip_from_pallets(pallet_ids):
     slots = set()
     for row in chosen:
         pallet = row["pallet"]
-        stop = _add_stop(trip, pallet.marketplace, pallet.destination)
-        stop.planned_boxes += row["boxes"]
-        trip.planned_boxes += row["boxes"]
         pallet.planned_trip = trip
+        # На паллете могут быть короба разных направлений — точка на каждое.
         for box in pallet.boxes:
             if box.status == "received" and box.trip_id is None and box.line is not None:
+                stop = _add_stop(trip, box.line.marketplace, box.line.destination)
+                stop.planned_boxes += 1
+                trip.planned_boxes += 1
                 box.line.planned_trip = trip
                 slots.add(box.line.slot_date)
     trip.slot_date = next(iter(slots)) if len(slots) == 1 else None
@@ -2528,12 +2531,17 @@ def trip_scan(trip_id):
         pallet = box.pallet
         boxes = [b for b in pallet.boxes if b.status == "received" and b.trip_id is None]
         order, line = box.order, box.line
-    stop = trip.stop_for(line.marketplace, line.destination)
-    if stop is None:
-        return jsonify(
-            ok=False,
-            message=f"Направления «{line.label()}» нет в маршруте — добавьте точку",
-        ), 409
+    stops = {}
+    for b in boxes:
+        b_stop = trip.stop_for(b.line.marketplace, b.line.destination) if b.line is not None else None
+        if b_stop is None:
+            label = b.line.label() if b.line is not None else b.barcode
+            return jsonify(
+                ok=False,
+                message=f"Направления «{label}» нет в маршруте — добавьте точку",
+            ), 409
+        stops[b.id] = b_stop
+    stop = stops[boxes[0].id]
 
     if trip.status != "loading":
         trip.status = "loading"
@@ -2541,12 +2549,13 @@ def trip_scan(trip_id):
         trip.load_started_at = now
     for box in boxes:
         box.trip = trip
-        box.trip_stop = stop
+        box.trip_stop = stops[box.id]
         _move_box(box, "loaded", now)
     db.session.commit()
     count = len(trip.boxes)
     message = (
-        f"Паллета {pallet.number}: погружено {len(boxes)} кор. → {stop.label()}" if pallet is not None
+        f"Паллета {pallet.number}: погружено {len(boxes)} кор. → {', '.join(dict.fromkeys(st.label() for st in stops.values()))}"
+        if pallet is not None
         else f"{boxes[0].barcode} погружен → {stop.label()}"
     )
     warnings = []
