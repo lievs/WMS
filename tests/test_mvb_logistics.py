@@ -1819,7 +1819,9 @@ def test_direction_cannot_be_planned_into_two_trips(db, client):
     client.get("/mvb/dispatch")
     _palletize_loose()
     page = client.get("/mvb/dispatch").get_data(as_text=True)
-    assert "Волгоград" not in page and order.number not in page
+    # паллета видна (она еще на складе), но второй раз в рейс ее не отметить
+    trip = MvbTrip.query.one()
+    assert f"в рейсе {trip.number}" in page and 'class="form-check-input mvb-pal"' not in page
     # рейс отменен — направление снова можно отправить
     trip = MvbTrip.query.one()
     client.post(f"/mvb/trips/{trip.id}/cancel")
@@ -2175,12 +2177,14 @@ def test_dispatch_pallets_to_trip_and_loading_list(db, client):
             client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
     p1, p2 = MvbPallet.query.order_by(MvbPallet.id).all()
     page = client.get("/mvb/dispatch").get_data(as_text=True)
-    assert "Паллеты к отправке: 2" in page and p1.number in page and p2.number in page
+    assert "Паллеты на складе к отправке: 2" in page and p1.number in page and p2.number in page
     client.post("/mvb/trips/new", data={"pallet_id": [str(p1.id)]})
     trip = MvbTrip.query.one()
     assert trip.planned_boxes == 2 and p1.planned_trip_id == trip.id and p2.planned_trip_id is None
+    # паллета в рейсе остается на складе, пока ее не отсканируют в машину
     page = client.get("/mvb/dispatch").get_data(as_text=True)
-    assert "Паллеты к отправке: 1" in page
+    assert "Паллеты на складе к отправке: 2" in page and "ждут погрузки: 1" in page
+    assert f"в рейсе {trip.number}" in page and f'name="pallet_id" value="{p1.id}"' not in page
     # повторно ту же паллету в рейс не взять
     client.post("/mvb/trips/new", data={"pallet_id": [str(p1.id)]})
     assert MvbTrip.query.count() == 1
@@ -2192,6 +2196,8 @@ def test_dispatch_pallets_to_trip_and_loading_list(db, client):
     data = client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": p1.number}).get_json()
     assert data["ok"] and data["pallet"] == p1.number and data["loaded"] == 2
     assert "погружено <span id=\"palLoaded\">1</span> из 1" in client.get(f"/mvb/loading/{trip.id}").get_data(as_text=True)
+    page = client.get("/mvb/dispatch").get_data(as_text=True)
+    assert "Паллеты на складе к отправке: 1" in page and p1.number not in page
     # кладовщик не нажал «Завершить погрузку» — у водителя по ссылке уже
     # есть «Сдан на СЦ», и первая отметка сама отправляет рейс
     assert trip.status == "loading"

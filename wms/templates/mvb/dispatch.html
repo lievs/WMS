@@ -18,7 +18,8 @@
 <form method="post" action="{{ url_for('mvb.trip_new') }}">
 <div class="card p-3 mb-3">
   <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-    <h5 class="mb-0">Паллеты к отправке: {{ pallet_rows|length }}</h5>
+    {% set planned = pallet_rows|selectattr('trip')|list %}
+    <h5 class="mb-0">Паллеты на складе к отправке: {{ pallet_rows|length }}{% if planned %} <span class="text-muted fs-6">(в рейсах, ждут погрузки: {{ planned|length }})</span>{% endif %}</h5>
     <div class="text-muted" id="palSummary">Отмечено: 0 пал., 0 кор.</div>
   </div>
   <div class="table-responsive">
@@ -26,9 +27,10 @@
     <thead><tr><th><input type="checkbox" class="form-check-input" id="palAll" title="Отметить все"></th><th>Паллета</th><th>Направление</th><th>Слот на СЦ</th><th class="text-end">Коробов</th><th>Заявки</th><th>Клиенты</th><th>Ждет с</th></tr></thead>
     <tbody>
     {% for r in pallet_rows %}
-      <tr>
-        <td><input type="checkbox" class="form-check-input mvb-pal" name="pallet_id" value="{{ r.pallet.id }}" data-boxes="{{ r.boxes }}" id="pal{{ r.pallet.id }}"></td>
-        <td><label for="pal{{ r.pallet.id }}"><a href="{{ url_for('mvb.pallet_detail', pallet_id=r.pallet.id) }}">{{ r.pallet.number }}</a></label></td>
+      <tr class="{{ 'table-light text-muted' if r.trip }}">
+        <td>{% if not r.trip %}<input type="checkbox" class="form-check-input mvb-pal" name="pallet_id" value="{{ r.pallet.id }}" data-boxes="{{ r.boxes }}" id="pal{{ r.pallet.id }}">{% endif %}</td>
+        <td><label for="pal{{ r.pallet.id }}"><a href="{{ url_for('mvb.pallet_detail', pallet_id=r.pallet.id) }}">{{ r.pallet.number }}</a></label>
+          {% if r.trip %}<br><a class="badge bg-info text-dark text-decoration-none" href="{{ url_for('mvb.trip_detail', trip_id=r.trip.id) }}" title="Спишется со склада, когда кладовщик отсканирует паллету в машину">в рейсе {{ r.trip.number }} · ждет погрузки</a>{% endif %}</td>
         <td>{{ r.label }}</td>
         <td class="text-nowrap">{{ r.slot_date.strftime('%d.%m.%Y') if r.slot_date else '—' }}</td>
         <td class="text-end fs-5">{{ r.boxes }}</td>
@@ -42,7 +44,8 @@
     </tbody>
   </table>
   </div>
-  {% if pallet_rows %}<div><button class="btn btn-success">🚚 Создать рейс по отмеченным паллетам</button></div>{% endif %}
+  {% if pallet_rows|rejectattr('trip')|list %}<div><button class="btn btn-success">🚚 Создать рейс по отмеченным паллетам</button></div>{% endif %}
+  <div class="small text-muted mt-2">Паллета в рейсе остается на складе, пока кладовщик не отсканирует ее в машину на погрузке.</div>
 </div>
 </form>
 <details class="mb-3">

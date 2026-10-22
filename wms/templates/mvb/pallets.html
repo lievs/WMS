@@ -47,7 +47,7 @@
       <td><a href="{{ url_for('mvb.pallet_detail', pallet_id=p.id) }}">{{ p.number }}</a></td>
       <td>{{ p.marketplace_label }}{% if p.destination %} · {{ p.destination }}{% endif %}</td>
       <td class="text-end">{{ p.boxes|length }}</td>
-      <td>{% if trip_box %}Рейс {{ trip_box.trip.number }}{% else %}На складе{% endif %}</td>
+      <td>{% if trip_box %}Рейс {{ trip_box.trip.number }}{% else %}На складе{% if p.planned_trip and p.planned_trip.status in ('searching', 'assigned', 'arrived', 'loading') %} <span class="badge bg-info text-dark">в рейсе {{ p.planned_trip.number }}, ждет погрузки</span>{% endif %}{% endif %}</td>
       <td>{{ (p.created_at|msk).strftime('%d.%m %H:%M') }}</td>
       <td><a class="btn btn-sm btn-outline-success" target="_blank" href="{{ url_for('mvb.pallet_label_pdf', pallet_id=p.id) }}" title="Этикетка паллеты">🖨</a></td>
     </tr>

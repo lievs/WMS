@@ -1887,19 +1887,26 @@ def _pallet_in_active_trip(pallet):
     return trip is not None and trip.status in ACTIVE_TRIP_STATUSES
 
 
-def _dispatch_pallets():
+def _dispatch_pallets(include_planned=False):
     """«К отправке»: сформированные паллеты на складе (с непогруженными
-    коробами), еще не запланированные в действующий рейс. Сверху ближайший
-    слот, затем самые давние."""
+    коробами). Паллета, добавленная в рейс, остается на складе, пока ее не
+    отсканируют в машину: с include_planned такие паллеты тоже в списке
+    (с рейсом в row["trip"]). Сверху ближайший слот, затем самые давние."""
     rows = {}
     for box in _dispatch_boxes_query().all():
         pallet = box.pallet
-        if _pallet_in_active_trip(pallet) or _line_in_active_trip(box.line):
+        trip = None
+        if _pallet_in_active_trip(pallet):
+            trip = pallet.planned_trip
+        elif _line_in_active_trip(box.line):
+            trip = box.line.planned_trip
+        if trip is not None and not include_planned:
             continue
         row = rows.setdefault(pallet.id, {
             "pallet": pallet, "boxes": 0, "clients": set(), "orders": set(), "slot_date": box.line.slot_date,
-            "oldest": box.received_at, "label": box.line.label(),
+            "oldest": box.received_at, "label": box.line.label(), "trip": None,
         })
+        row["trip"] = row["trip"] or trip
         row["boxes"] += 1
         labels = row.setdefault("labels", [])
         if box.line.label() not in labels:
@@ -2048,7 +2055,7 @@ def dispatch():
     proposal = _pack_orders(items, capacity) if capacity else []
     return render_template(
         "mvb/dispatch.html", rows=rows, capacity=capacity, capacities=capacities, total=total,
-        pallet_rows=_dispatch_pallets(),
+        pallet_rows=_dispatch_pallets(include_planned=True),
         unpalletized=_unpalletized_query().count(),
         total_vehicles=len(proposal) if capacity else None, proposal=proposal,
     )
