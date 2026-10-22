@@ -105,10 +105,24 @@ def _can_scan(mode):
     return current_user.is_admin or current_user.role in SCAN_MODES[mode]["roles"]
 
 
+def _my_clients(approved_only=False):
+    """Юрлица клиента: основное (User.mvb_client) и добавленные в кабинете
+    под тем же входом. approved_only — только те, на которые можно
+    оформлять заявки (подтверждены оператором и активны)."""
+    if not current_user.mvb_client_id:
+        return []
+    items = MvbClient.query.filter(db.or_(
+        MvbClient.id == current_user.mvb_client_id, MvbClient.account_user_id == current_user.id,
+    )).order_by(MvbClient.id).all()
+    if approved_only:
+        items = [c for c in items if c.is_approved() and c.is_active]
+    return items
+
+
 def _visible_orders_query():
     query = MvbOrder.query
     if _is_client():
-        query = query.filter(MvbOrder.client_id == current_user.mvb_client_id)
+        query = query.filter(MvbOrder.client_id.in_([c.id for c in _my_clients()]))
     return query
 
 
@@ -287,6 +301,50 @@ def _client_login_block(user):
     return None
 
 
+def _phone_digits(phone):
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())
+    return digits[-10:]
+
+
+def _phone_registered(phone):
+    """Есть ли уже кабинет клиента с этим телефоном (сравниваем последние
+    10 цифр: +7 и 8 в начале не различаем)."""
+    want = _phone_digits(phone)
+    rows = (
+        db.session.query(MvbClient.phone).join(User, User.mvb_client_id == MvbClient.id)
+        .filter(MvbClient.phone.isnot(None), MvbClient.approval != "rejected").all()
+    )
+    return any(_phone_digits(p) == want for (p,) in rows)
+
+
+@bp.route("/my-companies", methods=["GET", "POST"])
+def my_companies():
+    """Кабинет клиента: его юрлица. Новое юрлицо регистрируется под тем же
+    входом и телефоном и ждет подтверждения оператора."""
+    if not _is_client():
+        return _deny_orders()
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        address = request.form.get("address", "").strip()
+        if not name:
+            flash("Укажите название юрлица", "danger")
+        elif any(c.name.lower() == name.lower() for c in _my_clients()):
+            flash("Такое юрлицо уже есть в списке", "warning")
+        else:
+            main = current_user.mvb_client
+            company = MvbClient(
+                name=name, inn=request.form.get("inn", "").strip() or None,
+                address=address or (main.address if main else None),
+                phone=main.phone if main else None, contact_name=main.contact_name if main else None,
+                approval="pending", account_user_id=current_user.id,
+            )
+            db.session.add(company)
+            db.session.commit()
+            flash(f"Юрлицо «{name}» отправлено на подтверждение оператору МВБ", "success")
+        return redirect(url_for("mvb.my_companies"))
+    return render_template("mvb/my_companies.html", companies=_my_clients())
+
+
 @bp.route("/register", methods=["GET", "POST"])
 def register():
     """Самостоятельная регистрация клиента (название, адрес забора, телефон,
@@ -306,6 +364,11 @@ def register():
         errors.append("Укажите адрес забора")
     if sum(ch.isdigit() for ch in form["phone"]) < 10:
         errors.append("Укажите телефон")
+    elif _phone_registered(form["phone"]):
+        errors.append(
+            "Этот телефон уже зарегистрирован. Войдите в кабинет и добавьте новое юрлицо "
+            "в разделе «Мои юрлица» — все юрлица работают под одним входом."
+        )
     if not form["username"]:
         errors.append("Придумайте логин")
     elif User.query.filter(db.func.lower(User.username) == form["username"].lower()).first():
@@ -510,7 +573,12 @@ def _fill_order_from_form(order):
 def order_new():
     if not _orders_role_ok(read_only=False):
         return _deny_orders()
-    clients = [] if _is_client() else MvbClient.query.filter_by(is_active=True).order_by(MvbClient.name).all()
+    # Клиент с несколькими юрлицами выбирает, от какого заявка.
+    my_clients = _my_clients(approved_only=True) if _is_client() else []
+    if _is_client():
+        clients = my_clients if len(my_clients) > 1 else []
+    else:
+        clients = MvbClient.query.filter_by(is_active=True).order_by(MvbClient.name).all()
     if request.method == "GET":
         client = current_user.mvb_client if _is_client() else None
         return render_template(
@@ -519,7 +587,11 @@ def order_new():
         )
 
     if _is_client():
-        client_id = current_user.mvb_client_id
+        client_id = request.form.get("client_id", type=int) if len(my_clients) > 1 else current_user.mvb_client_id
+        if client_id not in {c.id for c in my_clients}:
+            flash("Выберите юрлицо", "danger")
+            return render_template("mvb/order_form.html", order=None, clients=clients, form=request.form,
+                                   max_directions=MAX_DIRECTIONS)
     else:
         client_id = request.form.get("client_id", type=int)
         if not client_id or not db.session.get(MvbClient, client_id):
@@ -695,6 +767,7 @@ def order_labels_pdf(order_id):
             "barcode": box.barcode, "destination": line.short_label(), "seq": n, "total": total,
             "slot": line.slot_date.strftime("%d.%m.%Y") if line.slot_date else "",
             "sender": order.client.name,
+            "phone": order.client.phone or "",
         })
     pdf = build_mvb_box_labels_pdf(entries)
     return Response(
@@ -1047,7 +1120,10 @@ def registration_action(client_id, action):
     client.approved_by_id = current_user.id
     db.session.commit()
     if action == "approve":
-        flash(f"Клиент «{client.name}» подтвержден — может входить и создавать заявки", "success")
+        if client.account_user_id:
+            flash(f"Юрлицо «{client.name}» подтверждено — клиент может оформлять на него заявки", "success")
+        else:
+            flash(f"Клиент «{client.name}» подтвержден — может входить и создавать заявки", "success")
     else:
         flash(f"Регистрация «{client.name}» отклонена", "warning")
     return redirect(url_for("mvb.admin_clients"))

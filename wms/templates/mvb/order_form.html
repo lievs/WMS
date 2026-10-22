@@ -10,7 +10,7 @@
 <form method="post" class="card p-3" style="max-width:860px">
   {% if clients %}
   <div class="mb-3">
-    <label class="form-label">Клиент</label>
+    <label class="form-label">{{ 'Юрлицо (от кого заявка)' if mvb_is_client else 'Клиент' }}</label>
     <select name="client_id" class="form-select" required>
       <option value="">— выберите —</option>
       {% for c in clients %}<option value="{{ c.id }}" data-address="{{ c.address or '' }}" {{ 'selected' if val('client_id') == c.id|string }}>{{ c.name }}</option>{% endfor %}
@@ -261,9 +261,14 @@
     fillCities(initial ? initial.city : null, initial ? initial.value : null);
   });
   if (clientSelect) {
+    // Адрес забора берем у выбранного юрлица, если его не правили руками.
+    let autoAddress = addressInput.value;
     clientSelect.addEventListener("change", () => {
       const opt = clientSelect.selectedOptions[0];
-      if (opt && opt.dataset.address && !addressInput.value) addressInput.value = opt.dataset.address;
+      if (opt && opt.dataset.address && (!addressInput.value || addressInput.value === autoAddress)) {
+        addressInput.value = opt.dataset.address;
+        autoAddress = opt.dataset.address;
+      }
     });
   }
 </script>

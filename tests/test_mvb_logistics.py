@@ -2169,3 +2169,56 @@ def test_dispatch_pallets_to_trip_and_loading_list(db, client):
     data = client.post(f"/mvb/trips/{trip.id}/scan", data={"barcode": p1.number}).get_json()
     assert data["ok"] and data["pallet"] == p1.number and data["loaded"] == 2
     assert "погружено <span id=\"palLoaded\">1</span> из 1" in client.get(f"/mvb/loading/{trip.id}").get_data(as_text=True)
+
+
+def test_client_legal_entities_under_one_login(db, client):
+    """Несколько юрлиц под одним входом: новое юрлицо из кабинета ждет
+    подтверждения оператора, после — клиент выбирает его в заявке и видит
+    заявки всех своих юрлиц. Повторная регистрация на тот же телефон —
+    с подсказкой добавить юрлицо в кабинете."""
+    main = _mvb_client("ИП Иванов")
+    me = _user("ivanov", "mvb_client", main)
+    other = _mvb_client("ООО Чужое")
+    other.phone = "+79995554433"
+    _user("stranger", "mvb_client", other)
+    db.session.commit()
+
+    _login(client, me)
+    client.post("/mvb/my-companies", data={"name": "ООО Иванов-Трейд", "inn": "0901234567"})
+    extra = MvbClient.query.filter_by(name="ООО Иванов-Трейд").one()
+    assert extra.approval == "pending" and extra.account_user_id == me.id and extra.phone == main.phone
+    html = client.get("/mvb/my-companies").get_data(as_text=True)
+    assert "ООО Иванов-Трейд" in html and "на проверке" in html
+    # пока не подтверждено — выбора нет, на него заявку не оформить
+    assert 'name="client_id"' not in client.get("/mvb/orders/new").get_data(as_text=True)
+    _create_order(client, client_id=str(extra.id))
+    assert MvbOrder.query.one().client_id == main.id
+
+    _login(client, _user("op1", "mvb_admin"))
+    assert "доп. юрлицо клиента" in client.get("/mvb/admin/clients").get_data(as_text=True)
+    client.post(f"/mvb/registrations/{extra.id}/approve")
+    assert db.session.get(MvbClient, extra.id).approval == "approved"
+
+    _login(client, me)
+    html = client.get("/mvb/orders/new").get_data(as_text=True)
+    assert 'name="client_id"' in html and "ООО Иванов-Трейд" in html and "ООО Чужое" not in html
+    _create_order(client, client_id=str(extra.id))
+    assert MvbOrder.query.order_by(MvbOrder.id.desc()).first().client_id == extra.id
+    # чужое юрлицо выбрать нельзя
+    _create_order(client, client_id=str(other.id))
+    assert MvbOrder.query.filter_by(client_id=other.id).count() == 0
+    assert MvbOrder.query.count() == 2
+    # видит заявки обоих своих юрлиц
+    orders_html = client.get("/mvb/orders").get_data(as_text=True)
+    for o in MvbOrder.query.all():
+        assert o.number in orders_html
+
+    # повторная регистрация с тем же телефоном (8 вместо +7) — отказ с подсказкой
+    g.pop("_login_user", None)
+    client.post("/mvb/logout")
+    resp = client.post("/mvb/register", data={
+        "name": "ООО Новое", "address": "Черкесск", "phone": "8 (999) 000-00-00",
+        "username": "ivanov2", "password": "secret12",
+    })
+    assert "Мои юрлица" in resp.get_data(as_text=True)
+    assert User.query.filter_by(username="ivanov2").first() is None

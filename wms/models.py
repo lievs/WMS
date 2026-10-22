@@ -1818,8 +1818,20 @@ class MvbClient(db.Model):
     approved_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
+    # Дополнительное юрлицо клиента: заведено из кабинета под тем же
+    # входом (телефоном). Основное юрлицо — User.mvb_client.
+    account_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), index=True)
+
     approved_by = db.relationship("User", foreign_keys=[approved_by_id])
+    account_user = db.relationship("User", foreign_keys=[account_user_id])
     users = db.relationship("User", foreign_keys="User.mvb_client_id", viewonly=True, order_by="User.id")
+
+    def logins(self):
+        """Логины кабинетов, из которых работают с этим юрлицом."""
+        names = [u.username for u in self.users]
+        if self.account_user is not None and self.account_user.username not in names:
+            names.append(self.account_user.username)
+        return names
 
     def is_approved(self):
         return (self.approval or "approved") == "approved"
