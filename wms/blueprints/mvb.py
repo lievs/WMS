@@ -1617,21 +1617,18 @@ def drivers():
 def pallets():
     if not _require_staff():
         return redirect(url_for("mvb.index"))
-    if request.method == "POST" and request.form.get("action") == "create_n":
-        return _create_pallets_for_group(request.form.get("group", ""))
     if request.method == "POST":
-        marketplace = request.form.get("marketplace", "")
-        if marketplace not in MVB_MARKETPLACES:
-            flash("Выберите маркетплейс", "danger")
+        return _create_pallet_stickers()
+    code = request.args.get("code", "").strip()
+    if code:
+        # Скан стикера паллеты — открываем ее, чтобы сканировать короба.
+        pallet = MvbPallet.query.filter(db.func.upper(MvbPallet.number) == code.upper()).first()
+        if pallet is None:
+            box = _find_box(code)
+            pallet = box.pallet if box is not None else None
+        if pallet is None:
+            flash(f"Паллета {code} не найдена", "danger")
             return redirect(url_for("mvb.pallets"))
-        pallet = MvbPallet(
-            number=next_number("mvb_pallet", "PLT-", 6),
-            marketplace=marketplace,
-            destination=request.form.get("destination", "").strip() or None,
-            created_by_id=current_user.id,
-        )
-        db.session.add(pallet)
-        db.session.commit()
         return redirect(url_for("mvb.pallet_detail", pallet_id=pallet.id))
     items = MvbPallet.query.order_by(MvbPallet.created_at.desc()).limit(200).all()
     # Короба на складе без паллеты по направлениям — их надо собрать в
@@ -1639,6 +1636,34 @@ def pallets():
     per_pallet = int(_pallet_setting(MVB_PALLET_MAX_KEY, MVB_PALLET_MAX_DEFAULT) or 1)
     loose = _loose_rows(per_pallet)
     return render_template("mvb/pallets.html", pallets=items, loose=loose, per_pallet=per_pallet)
+
+
+MVB_PALLET_STICKERS_MAX = 100
+
+
+def _create_pallet_stickers():
+    """«Создать стикеры паллет»: N пустых паллет без направления и PDF их
+    стикеров. Направление паллета получает от первого отсканированного
+    на нее короба."""
+    try:
+        count = int(request.form.get("count") or 0)
+    except ValueError:
+        count = 0
+    if not 1 <= count <= MVB_PALLET_STICKERS_MAX:
+        flash(f"Укажите количество стикеров от 1 до {MVB_PALLET_STICKERS_MAX}", "danger")
+        return redirect(url_for("mvb.pallets"))
+    created = []
+    for _ in range(count):
+        pallet = MvbPallet(number=next_number("mvb_pallet", "PLT-", 6), marketplace="", created_by_id=current_user.id)
+        db.session.add(pallet)
+        created.append(pallet)
+    db.session.commit()
+    pdf = build_labels_batch_pdf(
+        [(p.number, p.number, "Паллета МВБ") for p in created], title_font_size=12, max_img_h_ratio=0.6,
+    )
+    name = created[0].number + (f"-{created[-1].number}" if len(created) > 1 else "")
+    return Response(pdf, mimetype="application/pdf",
+                    headers={"Content-Disposition": content_disposition(f"{name}.pdf", "inline")})
 
 
 def _open_pallets():
@@ -1686,35 +1711,6 @@ def _loose_groups():
     return groups
 
 
-def _create_pallets_for_group(key):
-    """«Создать N паллет»: на группу (направление + слот) создается столько
-    пустых паллет, сколько не хватает по максимуму коробов на паллете.
-    Короба на паллету добавляет кладовщик сканом."""
-    per_pallet = int(_pallet_setting(MVB_PALLET_MAX_KEY, MVB_PALLET_MAX_DEFAULT) or 1)
-    row = next((r for r in _loose_rows(per_pallet) if r["key"] == key), None)
-    if row is None:
-        flash("Коробов без паллеты по этому направлению уже нет", "info")
-        return redirect(url_for("mvb.pallets"))
-    if row["pallets"] <= 0:
-        flash(f"{row['label']}: паллеты уже созданы — отсканируйте на них короба", "info")
-        return redirect(url_for("mvb.pallets"))
-    line = row["line"]
-    created = []
-    for _ in range(row["pallets"]):
-        pallet = MvbPallet(
-            number=next_number("mvb_pallet", "PLT-", 6), marketplace=line.marketplace,
-            destination=(line.destination or "").strip() or None, created_by_id=current_user.id,
-        )
-        db.session.add(pallet)
-        created.append(pallet)
-    db.session.commit()
-    flash(
-        f"{line.label()}: создано паллет — {len(created)} ({', '.join(p.number for p in created)}). "
-        "Распечатайте этикетки и отсканируйте короба на паллеты", "success",
-    )
-    return redirect(url_for("mvb.pallets"))
-
-
 @bp.route("/pallets/<int:pallet_id>")
 def pallet_detail(pallet_id):
     if not _require_staff():
@@ -1722,10 +1718,13 @@ def pallet_detail(pallet_id):
     pallet = db.session.get(MvbPallet, pallet_id) or abort(404)
     # Все короба этого направления на складе (еще не погруженные) — те, что
     # уже на паллете, подсвечиваются.
-    ready = [
-        b for b in _ready_boxes_query().all()
-        if b.line is not None and _same_direction(b.line, pallet.marketplace, pallet.destination)
-    ]
+    if pallet.marketplace:
+        ready = [
+            b for b in _ready_boxes_query().all()
+            if b.line is not None and _same_direction(b.line, pallet.marketplace, pallet.destination)
+        ]
+    else:
+        ready = []  # пустой стикер: направление задаст первый короб
     ids = {b.id for b in ready}
     boxes = ready + [b for b in pallet.boxes if b.id not in ids]
     boxes.sort(key=lambda b: (b.order.number, b.seq))
@@ -1745,8 +1744,17 @@ def pallet_scan(pallet_id):
         return jsonify(ok=False, message=f"Короб {code} не найден"), 404
     if box.status != "received":
         return jsonify(ok=False, message=f"Короб в статусе «{box.status_label}» — на паллету только принятые на складе"), 409
-    if not _same_direction(box.line, pallet.marketplace, pallet.destination):
-        return jsonify(ok=False, message=f"Другое направление: {box.line.label()}"), 409
+    if box.line is None:
+        return jsonify(ok=False, message=f"У короба {box.barcode} нет направления"), 409
+    assigned = False
+    if not pallet.boxes or not pallet.marketplace:
+        # Пустая паллета (новый стикер) получает направление первого короба.
+        if box.pallet_id != pallet.id:
+            assigned = True
+            pallet.marketplace = box.line.marketplace
+            pallet.destination = (box.line.destination or "").strip() or None
+    elif not _same_direction(box.line, pallet.marketplace, pallet.destination):
+        return jsonify(ok=False, message=f"Другое направление: {box.line.label()}. Паллета — {pallet.marketplace_label} · {pallet.destination or ''}"), 409
     if box.pallet_id == pallet.id:
         return jsonify(ok=True, already=True, message=f"{box.barcode} уже на этой паллете", count=len(pallet.boxes),
                        barcode=box.barcode)
@@ -1759,7 +1767,10 @@ def pallet_scan(pallet_id):
     _recalc_pallet_costs(affected)
     db.session.commit()
     message = f"{box.barcode} → {pallet.number}" + (f" (снят с {moved_from})" if moved_from else "")
-    return jsonify(ok=True, already=False, message=message, count=len(pallet.boxes), barcode=box.barcode)
+    if assigned:
+        message += f" · направление паллеты: {box.line.label()}"
+    return jsonify(ok=True, already=False, message=message, count=len(pallet.boxes), barcode=box.barcode,
+                   reload=assigned)
 
 
 MVB_PALLET_PRICE_KEY = "mvb_pallet_price"
@@ -1851,7 +1862,10 @@ def pallet_label_pdf(pallet_id):
     if not _require_staff():
         return redirect(url_for("mvb.index"))
     pallet = db.session.get(MvbPallet, pallet_id) or abort(404)
-    subtitle = f"{pallet.marketplace_label} · {pallet.destination or ''} · {len(pallet.boxes)} кор."
+    subtitle = (
+        f"{pallet.marketplace_label} · {pallet.destination or ''} · {len(pallet.boxes)} кор."
+        if pallet.marketplace else "Паллета МВБ"
+    )
     pdf = build_labels_batch_pdf([(pallet.number, pallet.number, subtitle)], title_font_size=12, max_img_h_ratio=0.6)
     return Response(
         pdf, mimetype="application/pdf",

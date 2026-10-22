@@ -435,7 +435,7 @@ def test_pallet_scan_and_load_whole_pallet(db, client):
     order = _received_order(client, client_user, staff)
     other = _received_order(client, client_user, staff, marketplace="ozon", box_count="1")
 
-    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    client.post("/mvb/pallets", data={"count": "1"})
     pallet = MvbPallet.query.one()
     for box in order.boxes[:2]:
         assert client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode}).get_json()["ok"]
@@ -1399,7 +1399,7 @@ def test_fulfillment_as_destination_for_orders_pallets_and_trips(db, client):
     staff = _user("staff1", "mvb_admin")
     order = _received_order(client, client_user, staff, marketplace="ff", destination="Север", box_count="2")
     assert order.lines[0].short_label() == "ФФ Север"
-    client.post("/mvb/pallets", data={"marketplace": "ff", "destination": "Север"})
+    client.post("/mvb/pallets", data={"count": "1"})
     pallet = MvbPallet.query.one()
     for box in order.boxes:
         assert client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode}).get_json()["ok"]
@@ -1533,7 +1533,7 @@ def test_sc_addresses_route_and_driver_sees_only_address_and_count(db, client):
     b = _received_order(client, _user("c2", "mvb_client", _mvb_client("ИП Б")), staff, box_count="1")
     driver = _user("driver", "mvb_driver")
     trip = _trip(client, driver=driver)
-    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    client.post("/mvb/pallets", data={"count": "1"})
     pallet = MvbPallet.query.order_by(MvbPallet.id.desc()).first()
     for box in a.boxes + b.boxes:
         client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
@@ -1561,7 +1561,7 @@ def test_pallet_page_lists_direction_boxes_and_highlights_scanned(db, client):
     other = _received_order(client, User.query.filter_by(username="c1").one(), staff,
                             marketplace="ozon", destination="Хоругвино", box_count="1")
     _login(client, staff)
-    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    client.post("/mvb/pallets", data={"count": "1"})
     pallet = MvbPallet.query.one()
     data = client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": order.boxes[0].barcode}).get_json()
     assert data["barcode"] == order.boxes[0].barcode
@@ -1580,7 +1580,7 @@ def test_operator_assigns_car_and_storekeeper_loads_by_plate(db, client):
     погрузку», сканирует паллету, «Завершить погрузку»."""
     admin = _user("staff1", "mvb_admin")
     order = _received_order(client, _user("c1", "mvb_client", _mvb_client()), admin, box_count="2")
-    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    client.post("/mvb/pallets", data={"count": "1"})
     pallet = MvbPallet.query.one()
     for box in order.boxes:
         client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
@@ -1623,7 +1623,7 @@ def test_admin_deletes_orders_trips_and_pallets(db, client):
     admin = _user("boss1", "mvb_admin")
     order = _received_order(client, client_user, admin)
     second = _received_order(client, client_user, admin, box_count="2")
-    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    client.post("/mvb/pallets", data={"count": "1"})
     pallet = MvbPallet.query.one()
     for box in second.boxes:
         client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
@@ -1723,7 +1723,7 @@ def test_pallet_cost_from_threshold_and_pallet_limit(db, client):
     assert 'name="pallet_max" type="number" min="1" class="form-control w-auto" value="20"' in page
     client.post("/mvb/prices", data={"action": "pallet_price", "pallet_price": "500", "pallet_min": "3", "pallet_max": "4"})
     for _ in range(3):
-        client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+        client.post("/mvb/pallets", data={"count": "1"})
     p1, p2, p3 = MvbPallet.query.order_by(MvbPallet.id).all()
     for box in a.boxes:
         client.post(f"/mvb/pallets/{p1.id}/scan", data={"barcode": box.barcode})
@@ -1951,7 +1951,7 @@ def test_loading_only_by_pallets(db, client):
     assert response.status_code == 409 and "не на паллете" in response.get_json()["message"]
     assert loose.trip_id is None and loose.status == "received"
 
-    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    client.post("/mvb/pallets", data={"count": "1"})
     pallet = MvbPallet.query.order_by(MvbPallet.id.desc()).first()
     for box in order.boxes[:2]:
         client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
@@ -2038,7 +2038,7 @@ def test_received_boxes_without_pallet_are_flagged_for_palletizing(db, client):
     page = client.get("/mvb/pallets").get_data(as_text=True)
     assert 'data-mvb-badge="unpalletized" title="Короба на складе без паллеты">2</span>' in page
     assert "Короба без паллеты" in page and "<b>2</b> кор." in page
-    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    client.post("/mvb/pallets", data={"count": "1"})
     pallet = MvbPallet.query.one()
     for box in order.boxes:
         client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
@@ -2076,7 +2076,7 @@ def test_dispatch_shows_only_palletized_boxes_and_admin_removes_row(db, client):
     page = client.get("/mvb/dispatch").get_data(as_text=True)
     assert "Нет коробов, ожидающих отправки" in page and "<b>2</b> кор. без паллеты" in page
 
-    client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+    client.post("/mvb/pallets", data={"count": "1"})
     pallet = MvbPallet.query.one()
     for box in order.boxes:
         client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})
@@ -2116,39 +2116,41 @@ def test_orders_filter_by_delivery_type(db, client):
     assert "mvb-ajax.js" in page
 
 
-def test_create_n_pallets_for_direction(db, client):
-    """«Паллеты»: по направлению видно, сколько паллет нужно, и кнопка
-    «Создать N паллет» раскладывает короба по паллетам."""
+def test_pallet_stickers_without_direction(db, client):
+    """«Создать стикеры паллет»: N пустых паллет и PDF стикеров; направление
+    паллета получает от первого отсканированного короба."""
     keeper = _user("keeper", "mvb_admin")
     _login(client, keeper)
-    client.post("/mvb/prices", data={"action": "pallet", "pallet_price": "500", "pallet_min": "10", "pallet_max": "3"})
-    from wms.blueprints.mvb import _pallet_setting, MVB_PALLET_MAX_KEY
-    if _pallet_setting(MVB_PALLET_MAX_KEY, 20) != 3:
-        from wms.models import AppSetting
-        db.session.merge(AppSetting(key=MVB_PALLET_MAX_KEY, value="3"))
-        db.session.commit()
-    order = _received_order(client, _user("c1", "mvb_client", _mvb_client()), keeper, box_count="7")
+    order = _received_order(client, _user("c1", "mvb_client", _mvb_client()), keeper, box_count="3")
+    other = _received_order(client, _user("c2", "mvb_client", _mvb_client("ИП Б")), keeper,
+                            box_count="1", destination="Электросталь")
     page = client.get("/mvb/pallets").get_data(as_text=True)
-    assert "Нужно еще паллет: <b>3</b>" in page and "Создать 3 паллет" in page
-    assert "Новая паллета на это направление" not in page
-    group = page.split('name="group" value="')[1].split('"')[0]
-    client.post("/mvb/pallets", data={"action": "create_n", "group": group})
-    # паллеты создаются пустыми — короба кладовщик добавляет сканом
+    assert "нужно паллет" in page and "Создать стикеры" in page
+    assert "Новая паллета" not in page and "create_n" not in page
+    resp = client.post("/mvb/pallets", data={"count": "3"})
+    assert resp.mimetype == "application/pdf"
     pallets = MvbPallet.query.order_by(MvbPallet.id).all()
-    assert len(pallets) == 3 and all(not p.boxes for p in pallets)
-    assert not any(b.pallet_id for b in order.boxes)
-    page = client.get("/mvb/pallets").get_data(as_text=True)
-    assert "Ждут скана" in page and "Нужно еще паллет" not in page and "Создать 3 паллет" not in page
-    # повторное нажатие лишних паллет не создает
-    client.post("/mvb/pallets", data={"action": "create_n", "group": group})
+    assert len(pallets) == 3 and all(p.marketplace == "" and not p.boxes for p in pallets)
+    client.post("/mvb/pallets", data={"count": "0"})
     assert MvbPallet.query.count() == 3
-    for box in order.boxes[:3]:
-        client.post(f"/mvb/pallets/{pallets[0].id}/scan", data={"barcode": box.barcode})
+    # скан стикера открывает паллету
+    resp = client.get(f"/mvb/pallets?code={pallets[0].number.lower()}")
+    assert resp.status_code == 302 and resp.headers["Location"].endswith(f"/mvb/pallets/{pallets[0].id}")
+    assert "Паллета пустая" in client.get(f"/mvb/pallets/{pallets[0].id}").get_data(as_text=True)
+    # первый короб задает направление, короб другого направления не встает
+    data = client.post(f"/mvb/pallets/{pallets[0].id}/scan", data={"barcode": order.boxes[0].barcode}).get_json()
+    assert data["ok"] and data["reload"]
     db.session.refresh(pallets[0])
-    assert len(pallets[0].boxes) == 3
-    # «К отправке» — только паллеты с коробами
-    page = client.get("/mvb/dispatch").get_data(as_text=True)
-    assert pallets[0].number in page and pallets[1].number not in page
+    assert pallets[0].marketplace == "wb" and pallets[0].destination == "Коледино"
+    data = client.post(f"/mvb/pallets/{pallets[0].id}/scan", data={"barcode": order.boxes[1].barcode}).get_json()
+    assert data["ok"] and not data["reload"]
+    resp = client.post(f"/mvb/pallets/{pallets[0].id}/scan", data={"barcode": other.boxes[0].barcode})
+    assert resp.status_code == 409
+    data = client.post(f"/mvb/pallets/{pallets[1].id}/scan", data={"barcode": other.boxes[0].barcode}).get_json()
+    assert data["ok"]
+    db.session.refresh(pallets[1])
+    assert pallets[1].destination == "Электросталь"
+    assert client.get(f"/mvb/pallets/{pallets[2].id}/label.pdf").status_code == 200
 
 
 def test_dispatch_pallets_to_trip_and_loading_list(db, client):
@@ -2158,7 +2160,7 @@ def test_dispatch_pallets_to_trip_and_loading_list(db, client):
     order = _received_order(client, _user("c1", "mvb_client", _mvb_client()), admin, box_count="2")
     other = _received_order(client, _user("c2", "mvb_client", _mvb_client("ИП Б")), admin, box_count="1")
     for o in (order, other):
-        client.post("/mvb/pallets", data={"marketplace": "wb", "destination": "Коледино"})
+        client.post("/mvb/pallets", data={"count": "1"})
         pallet = MvbPallet.query.order_by(MvbPallet.id.desc()).first()
         for box in o.boxes:
             client.post(f"/mvb/pallets/{pallet.id}/scan", data={"barcode": box.barcode})

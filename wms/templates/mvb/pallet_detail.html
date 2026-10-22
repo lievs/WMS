@@ -13,7 +13,11 @@
     {% endif %}
   </div>
 </div>
+{% if not pallet.marketplace or not pallet.boxes %}
+<div class="alert alert-info">Паллета пустая. Отсканируйте первый короб — паллета получит его направление (маркетплейс и СЦ). Дальше подходят только короба этого направления.</div>
+{% else %}
 <p class="text-muted">Сканируйте короба, которые ставите на эту паллету, или дважды нажмите на короб в списке ниже. Подходят только принятые на складе короба этого направления.</p>
+{% endif %}
 {% set scan_url = url_for('mvb.pallet_scan', pallet_id=pallet.id) %}
 {% include "mvb/_scan_widget.html" %}
 {% set on_pallet = boxes|selectattr('pallet_id', 'equalto', pallet.id)|list|length %}
@@ -60,6 +64,7 @@ document.addEventListener("mvb:scanned", (e) => {
     row.querySelector(".where").textContent = "✓ на паллете";
   }
   if (d.count !== undefined) document.getElementById("palletCount").textContent = d.count;
+  if (d.reload) setTimeout(() => window.location.reload(), 900);  // направление задано — показать короба
 });
 </script>
 {% endblock %}

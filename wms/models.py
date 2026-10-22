@@ -2131,6 +2131,8 @@ class MvbPallet(db.Model):
 
     @property
     def marketplace_label(self):
+        if not self.marketplace:
+            return "Без направления"
         return MVB_MARKETPLACES.get(self.marketplace, self.marketplace)
 
 
