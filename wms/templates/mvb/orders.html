@@ -64,6 +64,13 @@
   </div>
 </div>
 {% endif %}
+{% if method_counts %}
+<ul class="nav nav-tabs mb-3">
+  {% for m, label in [('pickup', 'Забор ТК'), ('self', 'Самопривоз')] %}
+  <li class="nav-item"><a class="nav-link {{ 'active' if method == m }}" href="{{ url_for('mvb.orders', method=m, status=status if status != 'need_driver' or m == 'pickup' else '', client_id=client_id or None) }}">{{ label }} <span class="badge bg-secondary">{{ method_counts[m] }}</span></a></li>
+  {% endfor %}
+</ul>
+{% endif %}
 <form class="row g-2 mb-3" method="get">
   <div class="col-auto">
     <select name="status" class="form-select" onchange="this.form.submit()">
@@ -74,6 +81,7 @@
       {% if not mvb_is_client %}<option value="need_driver" {{ 'selected' if status == 'need_driver' }}>Забор без водителя</option>{% endif %}
     </select>
   </div>
+  {% if method %}<input type="hidden" name="method" value="{{ method }}">{% endif %}
   {% if clients %}
   <div class="col-auto">
     <select name="client_id" class="form-select" onchange="this.form.submit()">
@@ -95,7 +103,7 @@
       {% if not mvb_is_client %}<div class="fw-semibold">{{ o.client.name }}</div>{% endif %}
       <div>{{ o.directions_label }}</div>
       <div class="small text-muted">
-        {{ o.box_count }} кор.{% if o.slot_date %} · слот {{ o.slot_date.strftime('%d.%m.%Y') }}{% endif %} · {{ o.delivery_label }}{% if o.planned_date %} {{ o.planned_date.strftime('%d.%m') }}{% endif %}
+        {{ o.box_count }} кор.{% if o.slot_date %} · слот {{ o.slot_date.strftime('%d.%m.%Y') }}{% endif %} · {{ o.delivery_label }}{% if o.delivery_method == 'self' and o.dropoff_city %} ({{ o.dropoff_city }}){% endif %}{% if o.planned_date %} {{ o.planned_date.strftime('%d.%m') }}{% endif %}
       </div>
       <div class="d-flex justify-content-between small mt-1">
         <span>{% if o.status == 'confirmed' and o.lines|selectattr('pass_trip')|map(attribute='pass_trip')|selectattr('pass_ready')|list %}🚚 Данные водителя для пропуска есть{% endif %}</span>
@@ -103,13 +111,13 @@
       </div>
     </a>
     {% if drivers and o.status == 'confirmed' and o.delivery_method == 'pickup' %}
-    <form method="post" action="{{ url_for('mvb.order_assign_driver', order_id=o.id) }}" class="d-flex gap-1 px-3 pb-3">
+    <form method="post" action="{{ url_for('mvb.order_assign_driver', order_id=o.id) }}" class="d-flex gap-1 px-3 pb-3 js-assign">
       <input type="hidden" name="back" value="orders"><input type="hidden" name="status" value="{{ status }}">
       <select name="driver_id" class="form-select form-select-sm {{ 'border-warning' if not o.driver_id }}">
         <option value="">— водитель не назначен —</option>
         {% for d in drivers %}<option value="{{ d.id }}" {{ 'selected' if o.driver_id == d.id }}>{{ d.display_name() }}</option>{% endfor %}
       </select>
-      <button class="btn btn-sm btn-outline-success">OK</button>
+      <button class="btn btn-sm btn-outline-success js-assign-ok">OK</button>
     </form>
     {% endif %}
   </div>
@@ -130,7 +138,7 @@
       {% if not mvb_is_client %}<td>{{ o.client.name }}</td>{% endif %}
       <td>{{ o.directions_label }}</td>
       <td class="text-nowrap">{{ o.slot_date.strftime('%d.%m.%Y') if o.slot_date else '—' }}</td>
-      <td>{{ o.delivery_label }}</td>
+      <td>{{ o.delivery_label }}{% if o.delivery_method == 'self' and o.dropoff_city %} · {{ o.dropoff_city }}{% endif %}</td>
       <td>{{ o.planned_date.strftime('%d.%m.%Y') if o.planned_date else '—' }}{% if o.time_from %} {{ o.time_from }}{% if o.time_to %}–{{ o.time_to }}{% endif %}{% endif %}</td>
       <td class="text-end">{{ o.box_count }}</td>
       <td class="text-end">{{ '%.2f'|format(o.total_cost) if o.total_cost is not none else '—' }}</td>
@@ -138,13 +146,13 @@
       {% if drivers %}
       <td>
         {% if o.status == 'confirmed' and o.delivery_method == 'pickup' %}
-        <form method="post" action="{{ url_for('mvb.order_assign_driver', order_id=o.id) }}" class="d-flex gap-1">
+        <form method="post" action="{{ url_for('mvb.order_assign_driver', order_id=o.id) }}" class="d-flex gap-1 js-assign">
           <input type="hidden" name="back" value="orders"><input type="hidden" name="status" value="{{ status }}">
           <select name="driver_id" class="form-select form-select-sm {{ 'border-warning' if not o.driver_id }}" style="min-width:140px">
             <option value="">— не назначен —</option>
             {% for d in drivers %}<option value="{{ d.id }}" {{ 'selected' if o.driver_id == d.id }}>{{ d.display_name() }}</option>{% endfor %}
           </select>
-          <button class="btn btn-sm btn-outline-success">OK</button>
+          <button class="btn btn-sm btn-outline-success js-assign-ok">OK</button>
         </form>
         {% else %}<span class="text-muted">—</span>{% endif %}
       </td>
@@ -160,6 +168,26 @@
 {% endblock %}
 {% block scripts %}
 <script>
+// Водитель назначается сразу при выборе в списке — без перезагрузки страницы.
+document.querySelectorAll("form.js-assign").forEach((form) => {
+  const select = form.querySelector("select[name=driver_id]");
+  const ok = form.querySelector(".js-assign-ok");
+  if (ok) ok.classList.add("d-none");
+  select.addEventListener("change", async () => {
+    select.disabled = true;
+    try {
+      const resp = await fetch(form.action, {method: "POST", body: new URLSearchParams({driver_id: select.value}), headers: {"X-Requested-With": "fetch"}});
+      const data = await resp.json();
+      select.classList.toggle("border-warning", !data.assigned);
+      select.classList.add(data.ok ? "border-success" : "border-danger");
+      select.title = data.message || "";
+    } catch (e) {
+      select.classList.add("border-danger");
+      select.title = "Нет связи с сервером — водитель не назначен";
+    }
+    select.disabled = false;
+  });
+});
   const wmsBoxes = [...document.querySelectorAll("input[name=doc_id]")];
   const wmsWarn = document.querySelector(".wms-warn");
   wmsBoxes.forEach(b => b.addEventListener("change", () => {

@@ -16,6 +16,12 @@
     {% elif order.status == 'confirmed' %}
       <a class="btn btn-success" target="_blank" href="{{ url_for('mvb.order_labels_pdf', order_id=order.id) }}">🖨 Этикетки на все короба</a>
     {% endif %}
+    {% set not_received = order.boxes|selectattr('status', 'in', ['created', 'picked_up'])|list|length %}
+    {% if mvb_is_operator and order.status == 'confirmed' and not_received %}
+      <form method="post" action="{{ url_for('mvb.order_receive_all', order_id=order.id) }}" onsubmit="return confirm('Принять на склад МВБ все непринятые короба заявки ({{ not_received }} кор.)?')">
+        <button class="btn btn-outline-success">📥 Принять все короба на склад ({{ not_received }})</button>
+      </form>
+    {% endif %}
     {% if can_edit and order.status != 'cancelled' and counts.created == order.boxes|length %}
       <form method="post" action="{{ url_for('mvb.order_cancel', order_id=order.id) }}" onsubmit="return confirm('Отменить заявку?')">
         <button class="btn btn-outline-danger">Отменить</button>
@@ -72,6 +78,7 @@
       <div><b>Способ:</b> {{ order.delivery_label }}</div>
       {% if order.pickup_address %}<div><b>Адрес забора:</b> {{ order.pickup_address }}</div>{% endif %}
       {% if order.pickup_zone and order.delivery_method == 'pickup' %}<div><b>Зона забора:</b> {{ order.pickup_zone.name }}</div>{% endif %}
+      {% if order.delivery_method == 'self' and order.dropoff_city %}<div><b>Город сдачи:</b> {{ order.dropoff_city }}</div>{% endif %}
       <div><b>Дата забора / сдачи:</b> {{ order.planned_date.strftime('%d.%m.%Y') if order.planned_date else '—' }}{% if order.time_from %} {{ order.time_from }}{% if order.time_to %}–{{ order.time_to }}{% endif %}{% endif %}</div>
       <div><b>Коробов всего:</b> {{ order.box_count }}{% if order.lines|length > 1 %} · направлений {{ order.lines|length }}{% endif %}</div>
       {% if order.status == 'confirmed' and not order.client.is_internal and (mvb_is_operator or mvb_is_client) %}

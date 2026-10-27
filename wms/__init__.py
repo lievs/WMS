@@ -1,3 +1,4 @@
+import contextlib
 import os
 import secrets
 
@@ -14,6 +15,26 @@ from .utils.timezone import to_moscow
 
 
 _sqlite_functions_registered = False
+
+
+@contextlib.contextmanager
+def _startup_lock(app):
+    """На сервере gunicorn запускает несколько процессов, и каждый при старте
+    обновляет схему базы и заносит справочники. Без блокировки они делают это
+    одновременно: второй процесс падает (повторная колонка, дубль города), и
+    сервер не поднимается (502). Файловая блокировка пускает их по очереди."""
+    try:
+        import fcntl
+    except ImportError:  # Windows (сборка .exe) — там один процесс
+        yield
+        return
+    os.makedirs(app.instance_path, exist_ok=True)
+    with open(os.path.join(app.instance_path, ".startup.lock"), "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _ensure_columns():
@@ -194,6 +215,47 @@ def _ensure_columns():
                     print("[schema] users.management_dashboard_allowed заполнен для существующих пользователей")
             except Exception as exc:  # noqa: BLE001
                 print(f"[schema] Не удалось добавить {table.name}.{column.name}: {exc}")
+
+
+def _cleanup_zero_receiving_lines():
+    """Однократная чистка старых данных: в приемках по накладной, уже
+    ушедших на разбраковку/завершенных, остались строки с нулем (товар не
+    привезли). В 1С такой строки нет, поэтому сверка показывала расхождение.
+    Теперь такие строки удаляются при переходе на разбраковку (см.
+    receiving._remove_zero_lines); здесь добиваем то, что накопилось раньше.
+    Повторный запуск ничего не меняет."""
+    import json
+
+    from .models import ReceivingDocument, ReceivingLine
+
+    docs = (
+        ReceivingDocument.query.filter(
+            ReceivingDocument.invoice_file_name.isnot(None),
+            ReceivingDocument.status.in_(("sorting", "completed")),
+        ).all()
+    )
+    cleaned = 0
+    for doc in docs:
+        zero_lines = [
+            line for line in doc.lines.all()
+            if (line.qty or 0) <= 0 and not line.box_id and (line.defect_qty or 0) <= 0
+        ]
+        if not zero_lines:
+            continue
+        removed = list(doc.removed_zero_items())
+        for line in zero_lines:
+            if line.expected_qty is not None:
+                removed.append({
+                    "barcode": line.nomenclature.barcode,
+                    "name": line.nomenclature.name,
+                    "expected_qty": line.expected_qty,
+                })
+            db.session.delete(line)
+            cleaned += 1
+        doc.removed_zero_lines = json.dumps(removed, ensure_ascii=False)
+    if cleaned:
+        db.session.commit()
+        print(f"[schema] удалено строк с нулевым количеством в приемках по накладной: {cleaned}")
 
 
 def _ensure_indexes():
@@ -487,6 +549,30 @@ def _bootstrap_admin():
     print("=" * 60)
 
 
+# Эндпоинты вне приемки/перемещений, доступные роли "фулфилмент" (см. чат:
+# видят свой склад, печатают стикеры своих коробов, видят общую номенклатуру,
+# при приемке подтягивается вся номенклатура). Только чтение и печать; кто
+# какие именно короба может открыть — проверяется в самих view по складу
+# пользователя.
+FULFILLMENT_EXTRA_ENDPOINTS = frozenset(
+    {
+        # подсказки/сканирование при приемке и перемещении
+        "api.search_nomenclature",
+        "api.nomenclature_by_barcode",
+        "api.box_by_number",
+        # общая номенклатура (остаток — только своего склада)
+        "nomenclature.list_nomenclature",
+        # короба своего склада и печать их стикеров
+        "boxes.list_boxes",
+        "boxes.detail",
+        "labels.box_label",
+        "labels.box_label_pdf",
+        "labels.boxes_label_batch_pdf",
+        "labels.box_items_labels",
+    }
+)
+
+
 def create_app(config_class=Config):
     os.makedirs(INSTANCE_DIR, exist_ok=True)
 
@@ -556,13 +642,14 @@ def create_app(config_class=Config):
     app.register_blueprint(management_bp, url_prefix="/management")
     app.register_blueprint(mvb_bp, url_prefix="/mvb")
 
-    with app.app_context():
+    with app.app_context(), _startup_lock(app):
         from . import models  # noqa: F401
         from .utils.categorize import bootstrap_categories
 
         db.create_all()
         _ensure_columns()
         _ensure_indexes()
+        _cleanup_zero_receiving_lines()
         _ensure_mvb_lines()
         _ensure_mvb_destinations()
         if not app.config.get("TESTING"):
@@ -584,9 +671,6 @@ def create_app(config_class=Config):
             GOOGLE_SHEETS_PUBLIC_ENDPOINTS as PRODUCTION_ORDERS_PUBLIC_ENDPOINTS,
         )
         from .blueprints.mvb import MVB_PUBLIC_ENDPOINTS
-        from .blueprints.api import FULFILLMENT_ALLOWED_ENDPOINTS as FULFILLMENT_API_ENDPOINTS
-        from .blueprints.boxes import FULFILLMENT_ALLOWED_ENDPOINTS as FULFILLMENT_BOX_ENDPOINTS
-        from .blueprints.labels import FULFILLMENT_ALLOWED_ENDPOINTS as FULFILLMENT_LABEL_ENDPOINTS
         from .models import User
 
         if request.endpoint is None:
@@ -664,28 +748,19 @@ def create_app(config_class=Config):
             and not request.endpoint.startswith("onboarding.")
         ):
             return redirect(url_for("movement.transport_list"))
-        # Роль "фулфилмент" — доступ к приемке и перемещениям своего склада
-        # (видимость внутри самих разделов дополнительно сужается по
-        # warehouse_id, см. receiving._visible_receiving_query/
-        # movement._visible_movement_query), общей номенклатуре на чтение
-        # (см. chat: "видели номенклатуру общую", и FULFILLMENT_SECTIONS в
-        # auth.py), поиску номенклатуры по /api/ (нужен автокомплиту при
-        # приемке — "при приемке подтягивалась вся номенклатура") и печати
-        # этикеток своих коробов. Точный список для api/boxes/labels — в
-        # соответствующем blueprint'е (FULFILLMENT_ALLOWED_ENDPOINTS),
-        # принадлежность складу короба проверяется внутри них самих.
-        # Остальные маршруты api/boxes/labels (поиск ячеек/коробов по всем
-        # складам, правка содержимого короба в обход приемки и т.п.) этим
-        # не открываются. Ничего больше в WMS.
+        # Роль "фулфилмент" — приемка и перемещения своего склада (видимость
+        # внутри самих разделов дополнительно сужается по warehouse_id, см.
+        # receiving._visible_receiving_query/movement._visible_movement_query),
+        # плюс точечный список FULFILLMENT_EXTRA_ENDPOINTS: подсказки
+        # номенклатуры при приемке, общая номенклатура (только просмотр),
+        # короба своего склада и печать их стикеров (см. чат). Остальное
+        # закрыто.
         if (
             current_user.is_fulfillment_only()
             and not request.endpoint.startswith("receiving.")
             and not request.endpoint.startswith("movement.")
-            and not request.endpoint.startswith("nomenclature.")
             and not request.endpoint.startswith("onboarding.")
-            and request.endpoint not in FULFILLMENT_API_ENDPOINTS
-            and request.endpoint not in FULFILLMENT_BOX_ENDPOINTS
-            and request.endpoint not in FULFILLMENT_LABEL_ENDPOINTS
+            and request.endpoint not in FULFILLMENT_EXTRA_ENDPOINTS
         ):
             return redirect(url_for("receiving.list_documents"))
         # Точечное ограничение разделов (см. User.allowed_sections) — тоже

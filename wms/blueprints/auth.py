@@ -4,17 +4,9 @@ from flask import Blueprint, flash, redirect, render_template, request, session,
 from flask_login import current_user, login_required, login_user, logout_user
 
 from ..extensions import db
-from ..models import MVB_ROLES, SECTIONS, User, Warehouse
+from ..models import FULFILLMENT_SECTIONS, MVB_ROLES, SECTIONS, User, Warehouse
 
 bp = Blueprint("auth", __name__)
-
-# Разделы роли "Фулфилмент" (см. User.is_fulfillment_only): приемка и
-# перемещения — только своего склада (сужается отдельно по warehouse_id,
-# см. receiving/movement), номенклатура — общий каталог на чтение (нужен
-# при приемке, чтобы видеть/искать позиции, которых нет на складе
-# фулфилмента физически, см. чат: "видели номенклатуру общую"). Редактировать
-# каталог фулфилмент не должен — см. nomenclature_edit_allowed=False ниже.
-FULFILLMENT_SECTIONS = "receiving,movement,nomenclature"
 
 
 @bp.route("/login", methods=["GET", "POST"])
@@ -120,14 +112,11 @@ def create_user():
         shift_minutes=shift_minutes,
         role=role,
         warehouse_id=warehouse_id,
-        # Фулфилмент видит только приемку, перемещения своего склада и
-        # общую номенклатуру на чтение (см. FULFILLMENT_SECTIONS) —
+        # Фулфилмент: приемка и перемещения своего склада плюс просмотр общей
+        # номенклатуры (см. User.is_fulfillment_only и FULFILLMENT_SECTIONS) —
         # остальные разделы закрыты этим же точечным механизмом, что и у
         # обычных пользователей с allowed_sections.
-        allowed_sections=FULFILLMENT_SECTIONS if role == "fulfillment" else None,
-        # Партнер видит общий каталог номенклатуры, но не должен его менять
-        # (создавать/править позиции, импортировать) — см. чат.
-        nomenclature_edit_allowed=role != "fulfillment",
+        allowed_sections=",".join(FULFILLMENT_SECTIONS) if role == "fulfillment" else None,
     )
     user.set_password(temp_password)
     db.session.add(user)
@@ -214,8 +203,7 @@ def update_role(user_id):
 
     user.role = role
     if role == "fulfillment":
-        user.allowed_sections = FULFILLMENT_SECTIONS
-        user.nomenclature_edit_allowed = False
+        user.allowed_sections = ",".join(FULFILLMENT_SECTIONS)
     db.session.commit()
     flash(f"Роль для «{user.username}» обновлена", "success")
     return redirect(url_for("auth.users"))

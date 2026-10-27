@@ -10,7 +10,7 @@
 <form method="post" class="card p-3" style="max-width:860px">
   {% if clients %}
   <div class="mb-3">
-    <label class="form-label">Клиент</label>
+    <label class="form-label">{{ 'Юрлицо (от кого заявка)' if mvb_is_client else 'Клиент' }}</label>
     <select name="client_id" class="form-select" required>
       <option value="">— выберите —</option>
       {% for c in clients %}<option value="{{ c.id }}" data-address="{{ c.address or '' }}" {{ 'selected' if val('client_id') == c.id|string }}>{{ c.name }}</option>{% endfor %}
@@ -85,7 +85,14 @@
         {% for code, label in MVB_DELIVERY_METHODS.items() %}<option value="{{ code }}" {{ 'selected' if val('delivery_method', 'pickup') == code }}>{{ label }}</option>{% endfor %}
       </select>
     </div>
-    <div class="col-12">
+    <div class="col-sm-6 js-self">
+      <label class="form-label">Город сдачи *</label>
+      <select name="dropoff_city" class="form-select">
+        <option value="">— выберите —</option>
+        {% for c in MVB_DROPOFF_CITIES %}<option value="{{ c }}" {{ 'selected' if val('dropoff_city') == c }}>{{ c }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-12 js-pickup">
       <label class="form-label">Адрес забора</label>
       <input name="pickup_address" class="form-control" value="{{ val('pickup_address', default_address or '') }}">
       <div class="form-text">Обязателен для забора транспортной компанией.</div>
@@ -101,7 +108,7 @@
     {% endif %}
     <div class="col-12"></div>
     <div class="col-sm-4">
-      <label class="form-label">Дата забора / сдачи</label>
+      <label class="form-label"><span class="js-pickup-label">Дата забора</span><span class="js-self-label">Дата сдачи товара *</span></label>
       <input name="planned_date" type="date" class="form-control" value="{{ val('planned_date') }}">
     </div>
     <div class="col-12">
@@ -140,6 +147,15 @@
   }
   // Зона забора нужна только для забора.
   const methodSelect = document.querySelector("select[name=delivery_method]");
+  // Самопривоз: город и дата сдачи обязательны, адреса забора нет.
+  const selfSync = () => {
+    const self = methodSelect.value === "self";
+    document.querySelectorAll(".js-self, .js-self-label").forEach((el) => el.classList.toggle("d-none", !self));
+    document.querySelectorAll(".js-pickup, .js-pickup-label").forEach((el) => el.classList.toggle("d-none", self));
+    document.querySelector("select[name=dropoff_city]").required = self;
+    document.querySelector("input[name=planned_date]").required = self;
+  };
+  methodSelect.addEventListener("change", selfSync); selfSync();
   const zoneBox = document.querySelector(".js-zone");
   if (zoneBox) {
     const zoneSync = () => {
@@ -245,9 +261,14 @@
     fillCities(initial ? initial.city : null, initial ? initial.value : null);
   });
   if (clientSelect) {
+    // Адрес забора берем у выбранного юрлица, если его не правили руками.
+    let autoAddress = addressInput.value;
     clientSelect.addEventListener("change", () => {
       const opt = clientSelect.selectedOptions[0];
-      if (opt && opt.dataset.address && !addressInput.value) addressInput.value = opt.dataset.address;
+      if (opt && opt.dataset.address && (!addressInput.value || addressInput.value === autoAddress)) {
+        addressInput.value = opt.dataset.address;
+        autoAddress = opt.dataset.address;
+      }
     });
   }
 </script>

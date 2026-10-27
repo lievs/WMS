@@ -72,6 +72,13 @@ SECTIONS = [
 ]
 SECTION_CODES = {code for code, _ in SECTIONS}
 
+# Разделы роли "фулфилмент" (см. User.is_fulfillment_only): приемка и
+# перемещения своего склада плюс просмотр общей номенклатуры (см. чат: они
+# должны видеть общую номенклатуру, а остаток — только своего склада).
+# Короба и печать стикеров — не раздел верхнего меню, поэтому в этот
+# список не входят (доступ к ним — wms.FULFILLMENT_EXTRA_ENDPOINTS).
+FULFILLMENT_SECTIONS = ("receiving", "movement", "nomenclature")
+
 # Физические склады, участвующие в остатках/приемке (в отличие от складов-
 # городов маркетплейсов, см. Warehouse.marketplace) — общий список для
 # nomenclature._stock_warehouses() и receiving._receiving_warehouses(),
@@ -161,6 +168,8 @@ class User(UserMixin, db.Model):
     # Она записывается в cookie при авторизации; увеличение значения делает
     # все ранее выданные cookie пользователя недействительными.
     session_version = db.Column(db.Integer, nullable=False, default=0)
+    # МВБ: пользователь нажал «Забыли пароль?» — оператор задает новый пароль.
+    password_reset_requested_at = db.Column(db.DateTime)
 
     # Клиент МВБ Логистики, от имени которого работает пользователь с ролью
     # "mvb_client" (видит только заявки и короба своего клиента).
@@ -207,6 +216,10 @@ class User(UserMixin, db.Model):
         # случай, если колонка у какой-то строки все же осталась NULL
         # (ALTER TABLE ADD COLUMN не проставляет DEFAULT задним числом),
         # трактуем это как "не запрещено", а не как "запрещено".
+        if self.is_fulfillment_only():
+            # Фулфилмент только смотрит общую номенклатуру, править ее не
+            # может (даже если флаг nomenclature_edit_allowed по умолчанию True).
+            return False
         return self.is_admin or self.nomenclature_edit_allowed is not False
 
     def can_manage_warehouse_mapping(self):
@@ -228,6 +241,15 @@ class User(UserMixin, db.Model):
             self.movement_receive_allowed is None and self.movement_complete_allowed is True
         )
 
+    def is_main_admin(self):
+        """Именно пользователь «Администратор» (встроенная учетная запись,
+        логин admin), а не любой с правами администратора — для действий,
+        которые владелец оставил только за ним (например, массовая смена
+        склада назначения в перемещениях)."""
+        if not self.is_admin:
+            return False
+        return self.username == "admin" or (self.full_name or "").strip().lower() == "администратор"
+
     def can_view_management_dashboard(self):
         return self.is_admin or self.management_dashboard_allowed is True
 
@@ -237,6 +259,11 @@ class User(UserMixin, db.Model):
         разделы верхнего меню."""
         if self.is_admin or section not in SECTION_CODES:
             return True
+        if self.is_fulfillment_only():
+            # Набор разделов фулфилмента фиксирован ролью, а не
+            # allowed_sections: так он обновляется и у уже заведенных
+            # пользователей без миграции данных.
+            return section in FULFILLMENT_SECTIONS
         if not self.allowed_sections:
             return True
         return section in self.allowed_sections.split(",")
@@ -812,6 +839,13 @@ class ReceivingDocument(db.Model):
     # (в отличие от accounting_entered_at выше и recount_synced_to_1c_at) —
     # только чтобы видеть в списке приемок, что документ уже сверили с 1С.
     checked_in_1c_at = db.Column(db.DateTime, nullable=True)
+    # Позиции накладной, которые совсем не привезли (на пересчете выставлен
+    # ноль): при переходе на разбраковку такие строки удаляются из документа
+    # (см. receiving.send_to_sorting), чтобы не мозолили глаза при сверке
+    # расхождений. Что именно убрали — JSON-список
+    # [{"barcode", "name", "expected_qty"}]: показывается на странице приемки
+    # (в 1С такие строки не выгружаются и в сверку не попадают).
+    removed_zero_lines = db.Column(db.Text, nullable=True)
 
     warehouse = db.relationship("Warehouse")
     created_by = db.relationship("User")
@@ -822,6 +856,14 @@ class ReceivingDocument(db.Model):
 
     def total_qty(self):
         return sum(line.qty for line in self.lines)
+
+    def removed_zero_items(self):
+        import json
+
+        try:
+            return json.loads(self.removed_zero_lines or "[]")
+        except ValueError:
+            return []
 
     def is_from_invoice_import(self):
         """True — number это реальный номер накладной 1С (см.
@@ -1004,6 +1046,12 @@ class MovementDocument(db.Model):
     # теперь всегда). NULL/True — старые приемки: недовоз тогда списывался из
     # коробов, излишек шел в неразмещенный остаток склада назначения.
     receipt_changed_boxes = db.Column(db.Boolean, nullable=True)
+    # Приёмка подтверждена по загруженному акту приёмки маркетплейса (см.
+    # movement.receive_act): короба приведены к принятому количеству, а не
+    # принятые вовсе — сняты с перемещения и возвращены на склад-отправитель
+    # (их номера, через запятую, — receipt_returned_boxes).
+    receipt_from_act = db.Column(db.Boolean, nullable=True)
+    receipt_returned_boxes = db.Column(db.Text, nullable=True)
     # "Дата поставки" — дата слота, забронированного на маркетплейсе для
     # приемки этого перемещения (см. чат), вносится вручную. Используется
     # при печати стикеров отправления (см. utils.shipping_label_pdf) вместо
@@ -1186,6 +1234,37 @@ class MovementLine(db.Model):
     to_cell = db.relationship("Cell", foreign_keys=[to_cell_id])
 
 
+class MovementCargoPlace(db.Model):
+    """Запомненное сопоставление «грузоместо Ozon (ГМ) → наш короб → состав»
+    для перемещения. Заполняется при выгрузке «Состав грузовых мест» и
+    нужно при загрузке акта приёмки Ozon: в акте фигурируют ГМ-штрихкоды, а
+    не наши номера коробов. items_json — снимок состава короба на момент
+    выгрузки: [{"barcode": ..., "qty": ...}]."""
+
+    __tablename__ = "movement_cargo_places"
+    __table_args__ = (
+        db.UniqueConstraint("document_id", "cargo_barcode", name="uq_cargo_place_doc_barcode"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    document_id = db.Column(db.Integer, db.ForeignKey("movement_documents.id"), nullable=False, index=True)
+    box_id = db.Column(db.Integer, db.ForeignKey("boxes.id"), nullable=False)
+    box_number = db.Column(db.String(64), nullable=False)
+    cargo_barcode = db.Column(db.String(128), nullable=False)
+    items_json = db.Column(db.Text, nullable=False, default="[]")
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    box = db.relationship("Box")
+
+    def items(self):
+        import json
+
+        try:
+            return json.loads(self.items_json or "[]")
+        except ValueError:
+            return []
+
+
 class ProductionRecord(db.Model):
     """Одна собранная сотрудником единица товара на производстве.
 
@@ -1212,6 +1291,50 @@ class ProductionRecord(db.Model):
 
     def __repr__(self):
         return f"<ProductionRecord {self.id}>"
+
+
+class WorkEvent(db.Model):
+    """Журнал выработки сотрудников для дашборда «Выработка сотрудников».
+
+    kind="pack" — товар помещён в короб (упаковка): qty — сколько единиц,
+    box_id — в какой короб. kind="pick" — короб собран на отгрузку (добавлен
+    в перемещение): qty — сколько единиц было в коробе в этот момент,
+    ref_kind/ref_id — документ перемещения (чтобы убрать событие, если короб
+    потом вынули из списка). work_date — рабочий день по московскому
+    времени. Пишется с момента появления журнала: за более ранние даты
+    данных нет (кто упаковывал — раньше нигде не сохранялось)."""
+
+    __tablename__ = "work_events"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    work_date = db.Column(db.Date, nullable=False, index=True)
+    kind = db.Column(db.String(10), nullable=False)  # pack | pick
+    box_id = db.Column(db.Integer, nullable=True)
+    nomenclature_id = db.Column(db.Integer, nullable=True)
+    qty = db.Column(db.Float, nullable=False, default=0)
+    ref_kind = db.Column(db.String(20), nullable=True)
+    ref_id = db.Column(db.Integer, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    user = db.relationship("User")
+
+
+class WorkPlan(db.Model):
+    """План выработки сотрудника на день. plan_date пустая — план по
+    умолчанию (на любой день), заполненная — на конкретную дату (перекрывает
+    план по умолчанию). qty_plan — единиц товара, boxes_plan — коробов."""
+
+    __tablename__ = "work_plans"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    kind = db.Column(db.String(10), nullable=False)  # pack | pick
+    plan_date = db.Column(db.Date, nullable=True)
+    qty_plan = db.Column(db.Float, nullable=True)
+    boxes_plan = db.Column(db.Integer, nullable=True)
+
+    user = db.relationship("User")
 
 
 class InventoryDocument(db.Model):
@@ -1671,6 +1794,8 @@ MVB_MARKETPLACES = {
     "wb": "Wildberries", "ozon": "Ozon", "lamoda": "Lamoda", "yandex": "Яндекс Маркет", "ff": "Фулфилмент",
 }
 MVB_DELIVERY_METHODS = {"pickup": "Забор транспортной компанией", "self": "Самопривоз"}
+# Куда клиент сам привозит короба при самопривозе (пункты приема МВБ).
+MVB_DROPOFF_CITIES = ("Черкесск", "Учкекен", "Пятигорск")
 MVB_ORDER_STATUSES = {"draft": "Черновик", "confirmed": "Оформлена", "cancelled": "Отменена"}
 # Порядок важен: короб движется только вперед по этому списку.
 MVB_BOX_STATUSES = [
@@ -1710,8 +1835,20 @@ class MvbClient(db.Model):
     approved_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
+    # Дополнительное юрлицо клиента: заведено из кабинета под тем же
+    # входом (телефоном). Основное юрлицо — User.mvb_client.
+    account_user_id = db.Column(db.Integer, db.ForeignKey("users.id", use_alter=True, name="fk_mvb_clients_account_user"), index=True)
+
     approved_by = db.relationship("User", foreign_keys=[approved_by_id])
+    account_user = db.relationship("User", foreign_keys=[account_user_id])
     users = db.relationship("User", foreign_keys="User.mvb_client_id", viewonly=True, order_by="User.id")
+
+    def logins(self):
+        """Логины кабинетов, из которых работают с этим юрлицом."""
+        names = [u.username for u in self.users]
+        if self.account_user is not None and self.account_user.username not in names:
+            names.append(self.account_user.username)
+        return names
 
     def is_approved(self):
         return (self.approval or "approved") == "approved"
@@ -1760,6 +1897,7 @@ class MvbOrder(db.Model):
     pickup_cost = db.Column(db.Float)
     # Зона забора (Черкесск / регионы / ...) — фиксированная цена забора.
     pickup_zone_id = db.Column(db.Integer, db.ForeignKey("mvb_pickup_zones.id"))
+    dropoff_city = db.Column(db.String(100))  # город сдачи при самопривозе
     sc_cost = db.Column(db.Float)
     # Палетирование: цена паллеты делится между заявками по доле их коробов
     # на паллете (пересчитывается при сборе паллет).
@@ -1969,6 +2107,10 @@ class MvbVehicle(db.Model):
     carrier = db.Column(db.String(200))
     capacity_boxes = db.Column(db.Integer, nullable=False, default=0)
     driver_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    # Водитель наемной машины для СЦ (без учетной записи): ФИО и телефон
+    # подставляются в рейс при выборе машины.
+    driver_name = db.Column(db.String(200))
+    driver_phone = db.Column(db.String(50))
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
@@ -1995,11 +2137,17 @@ class MvbPallet(db.Model):
     destination = db.Column(db.String(200))
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    # Рейс, в который паллета запланирована из «К отправке» (на погрузке
+    # кладовщик видит список паллет своего авто).
+    planned_trip_id = db.Column(db.Integer, db.ForeignKey("mvb_trips.id"), index=True)
 
     boxes = db.relationship("MvbBox", back_populates="pallet", order_by="MvbBox.id")
+    planned_trip = db.relationship("MvbTrip", foreign_keys=[planned_trip_id])
 
     @property
     def marketplace_label(self):
+        if not self.marketplace:
+            return "Без направления"
         return MVB_MARKETPLACES.get(self.marketplace, self.marketplace)
 
 

@@ -172,7 +172,7 @@ def _fit_text(c, text, font, size, max_width, min_size=6):
 def build_mvb_box_labels_pdf(entries) -> bytes:
     """Этикетки коробов МВБ Логистика 58x40мм. entries — список словарей:
     barcode, destination («WB · Коледино»), slot («07.10.2026»), seq, total,
-    sender. Сверху крупно куда, затем слот и номер короба, штрихкод,
+    sender, phone (телефон клиента). Сверху крупно куда, затем слот и номер короба, штрихкод,
     внизу отправитель."""
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=(LABEL_WIDTH, LABEL_HEIGHT))
@@ -193,11 +193,19 @@ def build_mvb_box_labels_pdf(entries) -> bytes:
         c.setFont(FONT_BOLD, 10)
         c.drawRightString(LABEL_WIDTH - pad, top, f"{e['seq']} / {e['total']} кор.")
 
-        # Отправитель — нижняя строка.
+        # Отправитель — нижняя строка, телефон клиента справа на той же
+        # строке: место под штрихкод не уменьшается.
         bottom = pad
-        sender, size = _fit_text(c, f"От: {e['sender']}", FONT_REGULAR, 7.5, width)
+        phone = (e.get("phone") or "").strip()
+        sender_width = width
+        if phone:
+            c.setFont(FONT_BOLD, 7.5)
+            c.drawRightString(LABEL_WIDTH - pad, bottom, phone)
+            sender_width = width - c.stringWidth(phone, FONT_BOLD, 7.5) - 1.5 * mm
+        sender, size = _fit_text(c, f"От: {e['sender']}", FONT_REGULAR, 7.5, sender_width)
         c.setFont(FONT_REGULAR, size)
         c.drawString(pad, bottom, sender)
+        size = max(size, 7.5) if phone else size
 
         # Штрихкод (с цифрами под ним) — все место между ними.
         png_bytes = generate_barcode_png_bytes(e["barcode"])

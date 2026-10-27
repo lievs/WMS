@@ -60,12 +60,26 @@
 {% if current_user.is_admin and google_sync.configured %}
 <div class="alert {{ 'alert-danger' if google_sync.last_error else 'alert-info' }} py-2">
   <b>Google Таблица:</b> данные обновляются только вручную — кнопкой в таблице или кнопкой выше.
+  {% if google_sync.running %}<br><b>⏳ Синхронизация выполняется в фоне…</b> страница обновится сама.{% endif %}
+  {% if google_sync.last_result and not google_sync.running %}<br>Результат последней синхронизации: {{ google_sync.last_result }}{% endif %}
   {% if google_sync.last_sync_at %}Последнее успешное обновление: {{ google_sync.last_sync_at }}.{% endif %}
   {% if google_sync.last_error %}<br>Ошибка: {{ google_sync.last_error }}{% endif %}
   {% if google_sync.sheet_names %}
   <br><span class="small text-muted">Листы с «Распределение», найденные в таблице при последней синхронизации: {{ google_sync.sheet_names }}</span>
   {% endif %}
 </div>
+{% if google_sync.running %}
+<script>
+  (function poll() {
+    setTimeout(function () {
+      fetch("{{ url_for('shipment_plan.sync_google_status') }}", {headers: {"Accept": "application/json"}})
+        .then(function (r) { return r.json(); })
+        .then(function (d) { if (d.running) poll(); else location.reload(); })
+        .catch(function () { poll(); });
+    }, 4000);
+  })();
+</script>
+{% endif %}
 {% if google_sync.missing_marketplaces %}
 <div class="alert alert-danger py-2">
   ⚠ На последней синхронизации НЕ найден подходящий лист «Распределение» для: <b>{{ google_sync.missing_marketplaces }}</b> —

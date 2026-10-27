@@ -227,21 +227,16 @@ def list_warehouses():
     warehouses = Warehouse.query.order_by(Warehouse.code).all()
     for wh in warehouses:
         wh.in_current_plan = wh.marketplace is None or wh.id in active_city_warehouse_ids
-    # Сопоставление с 1С (см. блок "Сопоставление складов с 1С" ниже) нужно
-    # не только складам-городам маркетплейсов, но и собственным физическим
-    # складам (marketplace пуст) — например, когда перемещение идет между
-    # основным складом и складом фулфилмент-партнера (см. чат: "для
-    # перемещений между собственными складами нужно чтобы в сопоставлении
-    # тоже были собственные склады"). Раньше список фильтровался только на
-    # склады-города, и собственные склады сопоставить было негде —
-    # integration_1c._to_warehouse_name_for_1c() для них либо подставлял
-    # общий запасной склад, либо (для двух захардкоженных имен) писал
-    # название WMS как есть, игнорируя это поле. Показываем все склады —
-    # бэкенд (update_fulfillment_1c_name) и так уже работает с любым.
+    # Сопоставление с 1С — и для складов-городов маркетплейсов, и для
+    # собственных складов (см. чат: для перемещений между собственными
+    # складами в 1С должен подтягиваться нужный склад). Собственные — первыми.
+    fulfillment_warehouses = [wh for wh in warehouses if wh.marketplace is not None]
+    own_mapping_warehouses = [wh for wh in warehouses if wh.marketplace is None and wh.is_active]
     return render_template(
         "warehouses/list.html",
         warehouses=warehouses,
-        mapping_warehouses=warehouses,
+        fulfillment_warehouses=fulfillment_warehouses,
+        own_mapping_warehouses=own_mapping_warehouses,
     )
 
 
@@ -346,6 +341,8 @@ def update_fulfillment_1c_name(warehouse_id):
     db.session.commit()
     if wh.fulfillment_1c_name:
         flash(f"Склад 1С для «{wh.name}» обновлен: «{wh.fulfillment_1c_name}»", "success")
+    elif wh.marketplace is None:
+        flash(f"Склад 1С для «{wh.name}» очищен — в 1С уйдет название склада из WMS", "success")
     else:
         flash(f"Склад 1С для «{wh.name}» очищен — будет использован общий запасной склад", "success")
     return redirect(url_for("warehouses.list_warehouses"))

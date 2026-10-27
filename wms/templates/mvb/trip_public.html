@@ -31,8 +31,8 @@
   <form method="post" action="{{ url_for('mvb.trip_public_arrive', token=token) }}" class="mb-3">
     <button class="btn btn-outline-success btn-lg w-100">Я на погрузке</button>
   </form>
-  {% elif trip.status in ('arrived', 'loading') %}
-  <div class="alert alert-info">Идет погрузка. После отправки здесь появятся кнопки «Сдан на СЦ» по точкам.</div>
+  {% elif trip.status in ('arrived', 'loading') and not trip.boxes %}
+  <div class="alert alert-info">Идет погрузка. Как только паллеты погрузят, здесь появятся кнопки «Сдан на СЦ» по точкам.</div>
   {% elif trip.status == 'delivered' %}
   <div class="alert alert-success">Рейс завершен, спасибо!</div>
   {% endif %}

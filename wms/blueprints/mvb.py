@@ -24,7 +24,7 @@ from flask_login import current_user, login_user, logout_user
 from ..extensions import db
 from ..models import (
     MVB_BOX_STATUS_LABELS, MVB_BOX_STATUS_ORDER, MVB_BOX_STATUSES, MVB_DELIVERY_METHODS,
-    MVB_MARKETPLACES, MVB_ROLES, MvbCity, MvbDestination, MvbOrderLine, MVB_TRIP_STATUSES, MvbBox, MvbBoxEvent, MvbClient, MvbOrder,
+    MVB_DROPOFF_CITIES, MVB_MARKETPLACES, MVB_ROLES, MvbCity, MvbDestination, MvbOrderLine, MVB_TRIP_STATUSES, MvbBox, MvbBoxEvent, MvbClient, MvbOrder,
     AppSetting, MVB_PRICE_KINDS, MvbPallet, MvbPickupZone, MvbPriceTier, MvbTrip, MvbTripStop, MvbVehicle, User,
 )
 from ..utils.http import content_disposition
@@ -37,7 +37,7 @@ bp = Blueprint("mvb", __name__)
 # Эндпоинты, доступные без входа (проверяется в require_login приложения).
 # Ссылка для наемного водителя на СЦ (без учетной записи) — по токену рейса.
 MVB_PUBLIC_ENDPOINTS = {
-    "mvb.login", "mvb.register", "mvb.trip_public", "mvb.trip_public_arrive", "mvb.trip_public_stop",
+    "mvb.login", "mvb.register", "mvb.forgot_password", "mvb.trip_public", "mvb.trip_public_arrive", "mvb.trip_public_stop",
 }
 
 MAX_BOXES_PER_ORDER = 500
@@ -52,16 +52,17 @@ SCAN_MODES = {
         "nav": "Скан забора",
         "to": "picked_up",
         "from": {"created"},
-        # Забор у клиента сканирует водитель (в меню — только у него).
-        "roles": {"mvb_driver", "mvb_admin"},
+        # Водитель короба не сканирует — сверяет количество и жмет «Забрал»
+        # (driver_picked). Скан забора оставлен только администратору МВБ.
+        "roles": {"mvb_admin"},
     },
     "receive": {
         "title": "Приемка на складе МВБ",
         "nav": "Приемка",
         "to": "received",
         # Приемка — для самопривоза и вернувшихся с СЦ; короба с забора
-        # водитель сдает кнопкой «Короба сданы в МВБ» (скан забранного
-        # короба тоже примет его, если водитель забыл нажать).
+        # Все короба (от водителей и самопривоз) встают на склад только
+        # после скана приемщика здесь.
         "from": {"created", "picked_up", "not_delivered"},
         "roles": {"mvb_storekeeper", "mvb_admin"},
     },
@@ -104,10 +105,24 @@ def _can_scan(mode):
     return current_user.is_admin or current_user.role in SCAN_MODES[mode]["roles"]
 
 
+def _my_clients(approved_only=False):
+    """Юрлица клиента: основное (User.mvb_client) и добавленные в кабинете
+    под тем же входом. approved_only — только те, на которые можно
+    оформлять заявки (подтверждены оператором и активны)."""
+    if not current_user.mvb_client_id:
+        return []
+    items = MvbClient.query.filter(db.or_(
+        MvbClient.id == current_user.mvb_client_id, MvbClient.account_user_id == current_user.id,
+    )).order_by(MvbClient.id).all()
+    if approved_only:
+        items = [c for c in items if c.is_approved() and c.is_active]
+    return items
+
+
 def _visible_orders_query():
     query = MvbOrder.query
     if _is_client():
-        query = query.filter(MvbOrder.client_id == current_user.mvb_client_id)
+        query = query.filter(MvbOrder.client_id.in_([c.id for c in _my_clients()]))
     return query
 
 
@@ -148,12 +163,85 @@ def _restrict_to_mvb_users():
     return None
 
 
+def _pickup_badge_count():
+    """Значок у «Заявок на забор»: сколько заявок ждут забора в ленте
+    водителя (назначенные ему и свободные; в рейсе на СЦ — только свои)."""
+    query = MvbOrder.query.filter(
+        MvbOrder.status == "confirmed", MvbOrder.delivery_method == "pickup",
+        MvbOrder.boxes.any(MvbBox.status == "created"),
+    )
+    if current_user.role == "mvb_driver" and not current_user.is_admin:
+        if _driver_active_trips():
+            query = query.filter(MvbOrder.driver_id == current_user.id)
+        else:
+            query = query.filter(db.or_(MvbOrder.driver_id.is_(None), MvbOrder.driver_id == current_user.id))
+    return query.count()
+
+
+def _badge_counts():
+    """Числа для значков меню (по роли текущего пользователя)."""
+    operator, keeper = _is_operator(), _is_storekeeper()
+    return {
+        "mvb_pending_clients": MvbClient.query.filter_by(approval="pending").count() if operator else 0,
+        "mvb_need_driver_count": (
+            MvbOrder.query.filter(
+                MvbOrder.status == "confirmed", MvbOrder.delivery_method == "pickup", MvbOrder.driver_id.is_(None),
+                MvbOrder.boxes.any(MvbBox.status == "created"),
+            ).count() if operator else 0
+        ),
+        "mvb_pickup_count": _pickup_badge_count() if _is_driver() else 0,
+        "mvb_handover_count": _awaiting_receipt_query().count() if keeper else 0,
+        "mvb_unpalletized_count": _unpalletized_query().count() if keeper else 0,
+        "mvb_pwreset_count": _pwreset_query().count() if operator else 0,
+    }
+
+
+def _pwreset_query():
+    """Пользователи МВБ, которые просят восстановить пароль."""
+    return User.query.filter(
+        User.password_reset_requested_at.isnot(None), User.role.in_(list(MVB_ROLES)),
+    ).order_by(User.password_reset_requested_at)
+
+
+def _awaiting_receipt_query():
+    """Короба, которые ждут приемки сканом: привезенные водителем (забраны)
+    и самопривоз по оформленным заявкам. На склад они встают только после
+    скана приемщика."""
+    return MvbBox.query.join(MvbOrder).filter(
+        MvbOrder.status == "confirmed",
+        db.or_(
+            MvbBox.status == "picked_up",
+            db.and_(MvbBox.status == "created", MvbOrder.delivery_method == "self"),
+        ),
+    )
+
+
+def _unpalletized_query():
+    """Принятые на складе короба без паллеты: их надо собрать в паллеты —
+    в машину грузим только паллетами."""
+    return MvbBox.query.filter(MvbBox.status == "received", MvbBox.trip_id.is_(None), MvbBox.pallet_id.is_(None))
+
+
+@bp.route("/badges")
+def badges():
+    if not current_user.is_authenticated:
+        return jsonify({}), 401
+    counts = _badge_counts()
+    return jsonify(
+        clients=counts["mvb_pending_clients"], need_driver=counts["mvb_need_driver_count"],
+        pickup=counts["mvb_pickup_count"], handover=counts["mvb_handover_count"],
+        unpalletized=counts["mvb_unpalletized_count"], pwreset=counts["mvb_pwreset_count"],
+    )
+
+
 @bp.context_processor
 def _inject():
     return {
+        "mvb_trip_can_deliver": _trip_can_deliver,
         "MVB_BOX_STATUSES": MVB_BOX_STATUSES,
         "MVB_BOX_STATUS_LABELS": MVB_BOX_STATUS_LABELS,
         "MVB_MARKETPLACES": MVB_MARKETPLACES,
+        "MVB_DROPOFF_CITIES": MVB_DROPOFF_CITIES,
         "MVB_DELIVERY_METHODS": MVB_DELIVERY_METHODS,
         "MVB_ROLES": MVB_ROLES,
         "SCAN_MODES": SCAN_MODES,
@@ -164,10 +252,10 @@ def _inject():
         "mvb_is_storekeeper": current_user.is_authenticated and _is_storekeeper(),
         "mvb_is_driver": current_user.is_authenticated and _is_driver(),
         "mvb_can_manage": current_user.is_authenticated and current_user.can_manage_mvb(),
-        "mvb_pending_clients": (
-            MvbClient.query.filter_by(approval="pending").count()
-            if current_user.is_authenticated and _is_operator() else 0
-        ),
+        **(_badge_counts() if current_user.is_authenticated else {
+            "mvb_pending_clients": 0, "mvb_need_driver_count": 0, "mvb_pickup_count": 0,
+            "mvb_handover_count": 0, "mvb_unpalletized_count": 0, "mvb_pwreset_count": 0,
+        }),
         "MVB_TRIP_STATUSES": MVB_TRIP_STATUSES,
         "mvb_destinations": MvbDestination.active() if current_user.is_authenticated else [],
         "mvb_pickup_zones": MvbPickupZone.active() if current_user.is_authenticated else [],
@@ -222,6 +310,50 @@ def _client_login_block(user):
     return None
 
 
+def _phone_digits(phone):
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())
+    return digits[-10:]
+
+
+def _phone_registered(phone):
+    """Есть ли уже кабинет клиента с этим телефоном (сравниваем последние
+    10 цифр: +7 и 8 в начале не различаем)."""
+    want = _phone_digits(phone)
+    rows = (
+        db.session.query(MvbClient.phone).join(User, User.mvb_client_id == MvbClient.id)
+        .filter(MvbClient.phone.isnot(None), MvbClient.approval != "rejected").all()
+    )
+    return any(_phone_digits(p) == want for (p,) in rows)
+
+
+@bp.route("/my-companies", methods=["GET", "POST"])
+def my_companies():
+    """Кабинет клиента: его юрлица. Новое юрлицо регистрируется под тем же
+    входом и телефоном и ждет подтверждения оператора."""
+    if not _is_client():
+        return _deny_orders()
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        address = request.form.get("address", "").strip()
+        if not name:
+            flash("Укажите название юрлица", "danger")
+        elif any(c.name.lower() == name.lower() for c in _my_clients()):
+            flash("Такое юрлицо уже есть в списке", "warning")
+        else:
+            main = current_user.mvb_client
+            company = MvbClient(
+                name=name, inn=request.form.get("inn", "").strip() or None,
+                address=address or (main.address if main else None),
+                phone=main.phone if main else None, contact_name=main.contact_name if main else None,
+                approval="pending", account_user_id=current_user.id,
+            )
+            db.session.add(company)
+            db.session.commit()
+            flash(f"Юрлицо «{name}» отправлено на подтверждение оператору МВБ", "success")
+        return redirect(url_for("mvb.my_companies"))
+    return render_template("mvb/my_companies.html", companies=_my_clients())
+
+
 @bp.route("/register", methods=["GET", "POST"])
 def register():
     """Самостоятельная регистрация клиента (название, адрес забора, телефон,
@@ -241,6 +373,11 @@ def register():
         errors.append("Укажите адрес забора")
     if sum(ch.isdigit() for ch in form["phone"]) < 10:
         errors.append("Укажите телефон")
+    elif _phone_registered(form["phone"]):
+        errors.append(
+            "Этот телефон уже зарегистрирован. Войдите в кабинет и добавьте новое юрлицо "
+            "в разделе «Мои юрлица» — все юрлица работают под одним входом."
+        )
     if not form["username"]:
         errors.append("Придумайте логин")
     elif User.query.filter(db.func.lower(User.username) == form["username"].lower()).first():
@@ -259,6 +396,63 @@ def register():
     db.session.commit()
     flash("Заявка на регистрацию отправлена. Оператор МВБ проверит данные и подтвердит — после этого войдите со своим логином.", "success")
     return redirect(url_for("mvb.login"))
+
+
+@bp.route("/forgot", methods=["GET", "POST"])
+def forgot_password():
+    """«Забыли пароль?»: по логину или телефону создается запрос, оператор
+    видит его в «Пользователях», задает новый пароль и сообщает его.
+    Ответ всегда одинаковый — по нему нельзя узнать, есть ли такой логин."""
+    if request.method == "GET":
+        return render_template("mvb/forgot.html")
+    value = request.form.get("login", "").strip()
+    users = []
+    if value:
+        user = User.query.filter(db.func.lower(User.username) == value.lower()).first()
+        if user is not None:
+            users = [user]
+        elif sum(ch.isdigit() for ch in value) >= 10:
+            want = _phone_digits(value)
+            users = [
+                u for u in User.query.filter(User.role == "mvb_client", User.mvb_client_id.isnot(None)).all()
+                if u.mvb_client and _phone_digits(u.mvb_client.phone) == want
+            ]
+    for user in users:
+        if user.role in MVB_ROLES and user.is_active_user and not user.password_reset_requested_at:
+            user.password_reset_requested_at = datetime.utcnow()
+    db.session.commit()
+    if not value:
+        flash("Укажите логин или телефон", "danger")
+        return render_template("mvb/forgot.html")
+    flash(
+        "Запрос отправлен оператору МВБ. Если такой пользователь есть, оператор задаст новый пароль "
+        "и сообщит его вам (по телефону из регистрации).", "success",
+    )
+    return redirect(url_for("mvb.login"))
+
+
+@bp.route("/password", methods=["GET", "POST"])
+def change_password():
+    """Смена своего пароля (любой пользователь МВБ). Остальные входы с
+    этим логином завершаются."""
+    if request.method == "POST":
+        current = request.form.get("current_password", "")
+        new = request.form.get("new_password", "")
+        if not current_user.check_password(current):
+            flash("Текущий пароль указан неверно", "danger")
+        elif len(new) < 6:
+            flash("Новый пароль — не короче 6 символов", "danger")
+        elif new != request.form.get("new_password2", ""):
+            flash("Новые пароли не совпадают", "danger")
+        else:
+            current_user.set_password(new)
+            current_user.session_version = (current_user.session_version or 0) + 1
+            current_user.password_reset_requested_at = None
+            db.session.commit()
+            session["session_version"] = current_user.session_version
+            flash("Пароль изменен", "success")
+            return redirect(url_for("mvb.index"))
+    return render_template("mvb/password.html")
 
 
 @bp.route("/logout", methods=["POST"])
@@ -291,6 +485,16 @@ def orders():
     client_id = request.args.get("client_id", type=int)
     if client_id and not _is_client():
         query = query.filter(MvbOrder.client_id == client_id)
+    # Тип забора — вкладки «Забор ТК» и «Самопривоз» (у сотрудников; по
+    # умолчанию «Забор ТК»), клиент видит все свои заявки.
+    method = request.args.get("method", "")
+    if not _is_client() and method not in MVB_DELIVERY_METHODS:
+        method = "pickup"
+    method_counts = {
+        m: query.filter(MvbOrder.delivery_method == m).count() for m in MVB_DELIVERY_METHODS
+    } if not _is_client() else {}
+    if method in MVB_DELIVERY_METHODS:
+        query = query.filter(MvbOrder.delivery_method == method)
     need_driver_filter = (
         MvbOrder.status == "confirmed", MvbOrder.delivery_method == "pickup", MvbOrder.driver_id.is_(None),
         MvbOrder.boxes.any(MvbBox.status == "created"),
@@ -305,7 +509,8 @@ def orders():
     # страница/пункт меню убраны.
     wms_rows = _wms_candidate_rows() if _is_operator() else []
     return render_template(
-        "mvb/orders.html", orders=items, clients=clients, status=status, client_id=client_id,
+        "mvb/orders.html", orders=items, clients=clients, status=status, client_id=client_id, method=method,
+        method_counts=method_counts,
         need_driver=need_driver, drivers=_active_drivers() if _is_staff() else [],
         wms_rows=wms_rows,
     )
@@ -402,6 +607,14 @@ def _fill_order_from_form(order):
     pickup_address = request.form.get("pickup_address", "").strip()
     if delivery_method == "pickup" and not pickup_address:
         return "Для забора укажите адрес"
+    dropoff_city = None
+    if delivery_method == "self":
+        dropoff_city = request.form.get("dropoff_city", "").strip()
+        if dropoff_city not in MVB_DROPOFF_CITIES:
+            return "Для самопривоза выберите город сдачи"
+        if planned_date is None:
+            return "Для самопривоза укажите дату сдачи товара"
+        pickup_address = ""
     zone = None
     if delivery_method == "pickup" and MvbPickupZone.active():
         zone = db.session.get(MvbPickupZone, request.form.get("pickup_zone_id", type=int) or 0)
@@ -414,6 +627,7 @@ def _fill_order_from_form(order):
     order.delivery_method = delivery_method
     order.pickup_address = pickup_address or None
     order.pickup_zone = zone
+    order.dropoff_city = dropoff_city
     order.planned_date = planned_date
     order.time_from = _parse_time(request.form.get("time_from"))
     order.time_to = _parse_time(request.form.get("time_to"))
@@ -425,7 +639,12 @@ def _fill_order_from_form(order):
 def order_new():
     if not _orders_role_ok(read_only=False):
         return _deny_orders()
-    clients = [] if _is_client() else MvbClient.query.filter_by(is_active=True).order_by(MvbClient.name).all()
+    # Клиент с несколькими юрлицами выбирает, от какого заявка.
+    my_clients = _my_clients(approved_only=True) if _is_client() else []
+    if _is_client():
+        clients = my_clients if len(my_clients) > 1 else []
+    else:
+        clients = MvbClient.query.filter_by(is_active=True).order_by(MvbClient.name).all()
     if request.method == "GET":
         client = current_user.mvb_client if _is_client() else None
         return render_template(
@@ -434,7 +653,11 @@ def order_new():
         )
 
     if _is_client():
-        client_id = current_user.mvb_client_id
+        client_id = request.form.get("client_id", type=int) if len(my_clients) > 1 else current_user.mvb_client_id
+        if client_id not in {c.id for c in my_clients}:
+            flash("Выберите юрлицо", "danger")
+            return render_template("mvb/order_form.html", order=None, clients=clients, form=request.form,
+                                   max_directions=MAX_DIRECTIONS)
     else:
         client_id = request.form.get("client_id", type=int)
         if not client_id or not db.session.get(MvbClient, client_id):
@@ -610,6 +833,7 @@ def order_labels_pdf(order_id):
             "barcode": box.barcode, "destination": line.short_label(), "seq": n, "total": total,
             "slot": line.slot_date.strftime("%d.%m.%Y") if line.slot_date else "",
             "sender": order.client.name,
+            "phone": order.client.phone or "",
         })
     pdf = build_mvb_box_labels_pdf(entries)
     return Response(
@@ -671,6 +895,18 @@ def driver():
         allowed = (current_user.id,) if trips else (None, current_user.id)
         candidates = [o for o in candidates if o.driver_id in allowed]
     free = (vehicle.capacity_boxes - load) if vehicle and vehicle.capacity_boxes else None
+    # Фильтр по типу забора (зона: Черкесск, Регионы, ...); «none» — без зоны.
+    zone_filter = request.args.get("zone", "")
+    zone_counts = {}
+    for order in candidates:
+        if any(b.status == "created" for b in order.boxes):
+            key = str(order.pickup_zone_id) if order.pickup_zone_id else "none"
+            zone_counts[key] = zone_counts.get(key, 0) + 1
+    if zone_filter:
+        candidates = [
+            o for o in candidates
+            if (str(o.pickup_zone_id) if o.pickup_zone_id else "none") == zone_filter
+        ]
     now = datetime.utcnow()
     rows = []
     for order in candidates:
@@ -688,6 +924,8 @@ def driver():
     rows.sort(key=lambda r: (not r["mine"], not r["is_new"], r["order"].planned_date or date.max))
     return render_template(
         "mvb/driver.html", rows=rows, trips=trips, on_trip=bool(trips), vehicle=vehicle, load=load, free=free,
+        zone_filter=zone_filter, zone_counts=zone_counts,
+        zones=MvbPickupZone.query.order_by(MvbPickupZone.price, MvbPickupZone.name).all(),
         max_order_id=max((r["order"].id for r in rows), default=0),
     )
 
@@ -755,22 +993,42 @@ def driver_pickup_done(order_id):
     return redirect(url_for("mvb.driver"))
 
 
-@bp.route("/driver/handover", methods=["POST"])
-def driver_handover():
-    """«Короба сданы в МВБ»: водитель привез забранные короба на склад —
-    все они переходят в «На складе МВБ» без поштучной приемки."""
+@bp.route("/driver/orders/<int:order_id>/picked", methods=["POST"])
+def driver_picked(order_id):
+    """Водитель без скана сверяет количество коробов у клиента и жмет
+    «Забрал»: указанное число коробов заявки переходит в «Забран». Если
+    в машину влезло меньше, остаток возвращается в ленту забора."""
     if not _is_driver():
         abort(403)
-    boxes = MvbBox.query.filter(MvbBox.status == "picked_up", MvbBox.picked_up_by_id == current_user.id).all()
-    if not boxes:
-        flash("У вас нет забранных коробов", "warning")
+    order = MvbOrder.query.get_or_404(order_id)
+    if order.status != "confirmed" or order.delivery_method != "pickup":
+        abort(400)
+    if order.driver_id not in (None, current_user.id):
+        flash(f"Заявку {order.number} забирает другой водитель", "warning")
+        return redirect(url_for("mvb.driver"))
+    left = sorted((b for b in order.boxes if b.status == "created"), key=lambda b: b.seq)
+    count = request.form.get("count", type=int)
+    if count is None or count <= 0:
+        flash("Укажите, сколько коробов забрали", "danger")
+        return redirect(url_for("mvb.driver"))
+    if count > len(left):
+        flash(f"В заявке {order.number} к забору {len(left)} кор., а указано {count}. Сверьте количество с оператором", "danger")
         return redirect(url_for("mvb.driver"))
     now = datetime.utcnow()
-    for box in boxes:
-        _move_box(box, "received", now)
+    for box in left[:count]:
+        _move_box(box, "picked_up", now)
+        box.picked_up_by_id = current_user.id
+    if count < len(left):
+        order.driver_id = None
+        flash(
+            f"Забрано {count} из {len(left)} кор. у {order.client.name}. "
+            f"Остаток {len(left) - count} кор. вернулся в заявки на забор.", "warning",
+        )
+    else:
+        order.driver_id = current_user.id
+        order.pickup_done_at = order.pickup_done_at or now
+        flash(f"Забрано у {order.client.name}: {count} кор. Сдайте их приемщику на складе МВБ", "success")
     db.session.commit()
-    orders = sorted({box.order.number for box in boxes})
-    flash(f"Сдано на склад МВБ: {len(boxes)} кор. ({', '.join(orders)})", "success")
     return redirect(url_for("mvb.driver"))
 
 
@@ -796,8 +1054,18 @@ def scan(mode):
     current = None
     if mode == "pickup" and request.args.get("order", type=int):
         current = MvbOrder.query.get(request.args.get("order", type=int))
+    expected = []
+    if mode == "receive":
+        groups = {}
+        for box in _awaiting_receipt_query().all():
+            row = groups.setdefault(box.order_id, {"order": box.order, "waiting": 0})
+            row["waiting"] += 1
+        for row in groups.values():
+            row["received"] = sum(1 for b in row["order"].boxes if b.status == "received")
+            row["source"] = "Самопривоз" if row["order"].delivery_method == "self" else "От водителя"
+        expected = sorted(groups.values(), key=lambda r: (r["source"], r["order"].number))
     return render_template(
-        "mvb/scan.html", mode=mode, mode_info=SCAN_MODES[mode], current=current,
+        "mvb/scan.html", mode=mode, mode_info=SCAN_MODES[mode], current=current, expected=expected,
         current_progress=_order_progress(current, "picked_up") if current else None,
     )
 
@@ -918,7 +1186,10 @@ def registration_action(client_id, action):
     client.approved_by_id = current_user.id
     db.session.commit()
     if action == "approve":
-        flash(f"Клиент «{client.name}» подтвержден — может входить и создавать заявки", "success")
+        if client.account_user_id:
+            flash(f"Юрлицо «{client.name}» подтверждено — клиент может оформлять на него заявки", "success")
+        else:
+            flash(f"Клиент «{client.name}» подтвержден — может входить и создавать заявки", "success")
     else:
         flash(f"Регистрация «{client.name}» отклонена", "warning")
     return redirect(url_for("mvb.admin_clients"))
@@ -992,6 +1263,7 @@ def admin_users():
     clients = MvbClient.query.filter_by(is_active=True).order_by(MvbClient.name).all()
     return render_template(
         "mvb/admin_users.html", users=users, clients=clients, roles=_assignable_roles(),
+        reset_requests=_pwreset_query().all(),
         test_accounts=session.pop("mvb_test_accounts", None),
     )
 
@@ -1086,8 +1358,9 @@ def admin_user_password(user_id):
         return redirect(url_for("mvb.admin_users"))
     user.set_password(password)
     user.session_version = (user.session_version or 0) + 1
+    user.password_reset_requested_at = None
     db.session.commit()
-    flash(f"Пароль для «{user.username}» изменен", "success")
+    flash(f"Пароль для «{user.username}» изменен — сообщите его пользователю", "success")
     return redirect(url_for("mvb.admin_users"))
 
 
@@ -1150,6 +1423,32 @@ def _same_direction(line, marketplace, destination):
 # ---------- назначение водителя ----------
 
 
+@bp.route("/orders/<int:order_id>/receive-all", methods=["POST"])
+def order_receive_all(order_id):
+    """Оператор принимает на склад МВБ все еще не принятые короба заявки
+    (созданные и забранные) — если водитель забыл их отсканировать."""
+    if not _require_operator():
+        return redirect(url_for("mvb.order_detail", order_id=order_id))
+    order = MvbOrder.query.get_or_404(order_id)
+    if order.status != "confirmed":
+        abort(400)
+    boxes = [b for b in order.boxes if b.status in ("created", "picked_up")]
+    if not boxes:
+        flash("Все короба заявки уже приняты на склад", "info")
+        return redirect(url_for("mvb.order_detail", order_id=order.id))
+    now = datetime.utcnow()
+    for box in boxes:
+        if box.status == "created" and order.delivery_method == "pickup":
+            box.picked_up_at = box.picked_up_at or now
+            box.picked_up_by_id = box.picked_up_by_id or order.driver_id
+        _move_box(box, "received", now)
+    if order.delivery_method == "pickup":
+        order.pickup_done_at = order.pickup_done_at or now
+    db.session.commit()
+    flash(f"Принято на склад МВБ: {len(boxes)} кор. по заявке {order.number}", "success")
+    return redirect(url_for("mvb.order_detail", order_id=order.id))
+
+
 @bp.route("/orders/<int:order_id>/driver", methods=["POST"])
 def order_assign_driver(order_id):
     if not _require_operator():
@@ -1161,11 +1460,15 @@ def order_assign_driver(order_id):
         if driver is None or driver.role != "mvb_driver":
             abort(400)
         order.driver_id = driver.id
-        flash(f"На забор назначен водитель {driver.display_name()}", "success")
+        message = f"На забор {order.number} назначен водитель {driver.display_name()}"
     else:
         order.driver_id = None
-        flash("Водитель снят с заявки", "success")
+        message = f"Водитель снят с заявки {order.number}"
     db.session.commit()
+    if request.headers.get("X-Requested-With") == "fetch":
+        # Назначение из списка без перезагрузки страницы.
+        return jsonify(ok=True, message=message, assigned=bool(order.driver_id))
+    flash(message, "success")
     if request.form.get("back") == "orders":
         return redirect(url_for("mvb.orders", status=request.form.get("status", "")))
     return redirect(url_for("mvb.order_detail", order_id=order.id))
@@ -1188,10 +1491,14 @@ def vehicles():
             capacity = int(request.form.get("capacity_boxes") or 0)
         except ValueError:
             capacity = -1
-        if not plate or capacity < 0:
-            flash("Укажите госномер и вместимость (число коробов)", "danger")
+        driver_phone = request.form.get("driver_phone", "").strip()
+        driver_name = request.form.get("driver_name", "").strip()
+        if not plate or capacity < 0 or not driver_phone or not driver_name:
+            flash("Укажите госномер, вместимость (число коробов), ФИО и телефон водителя", "danger")
             return redirect(url_for("mvb.vehicles"))
         vehicle.plate = plate
+        vehicle.driver_name = driver_name
+        vehicle.driver_phone = driver_phone
         vehicle.model = request.form.get("model", "").strip() or None
         vehicle.carrier = request.form.get("carrier", "").strip() or None
         vehicle.capacity_boxes = capacity
@@ -1199,7 +1506,7 @@ def vehicles():
             vehicle.is_active = request.form.get("is_active") == "1"
         db.session.add(vehicle)
         db.session.commit()
-        flash(f"Транспорт {vehicle.plate} сохранен", "success")
+        flash(f"Машина {vehicle.plate} сохранена", "success")
         return redirect(url_for("mvb.vehicles"))
     return render_template(
         "mvb/vehicles.html",
@@ -1311,21 +1618,97 @@ def pallets():
     if not _require_staff():
         return redirect(url_for("mvb.index"))
     if request.method == "POST":
-        marketplace = request.form.get("marketplace", "")
-        if marketplace not in MVB_MARKETPLACES:
-            flash("Выберите маркетплейс", "danger")
+        return _create_pallet_stickers()
+    code = request.args.get("code", "").strip()
+    if code:
+        # Скан стикера паллеты — открываем ее, чтобы сканировать короба.
+        pallet = MvbPallet.query.filter(db.func.upper(MvbPallet.number) == code.upper()).first()
+        if pallet is None:
+            box = _find_box(code)
+            pallet = box.pallet if box is not None else None
+        if pallet is None:
+            flash(f"Паллета {code} не найдена", "danger")
             return redirect(url_for("mvb.pallets"))
-        pallet = MvbPallet(
-            number=next_number("mvb_pallet", "PLT-", 6),
-            marketplace=marketplace,
-            destination=request.form.get("destination", "").strip() or None,
-            created_by_id=current_user.id,
-        )
-        db.session.add(pallet)
-        db.session.commit()
         return redirect(url_for("mvb.pallet_detail", pallet_id=pallet.id))
     items = MvbPallet.query.order_by(MvbPallet.created_at.desc()).limit(200).all()
-    return render_template("mvb/pallets.html", pallets=items)
+    # Короба на складе без паллеты по направлениям — их надо собрать в
+    # паллеты: в машину грузим только паллетами.
+    per_pallet = int(_pallet_setting(MVB_PALLET_MAX_KEY, MVB_PALLET_MAX_DEFAULT) or 1)
+    loose = _loose_rows(per_pallet)
+    return render_template("mvb/pallets.html", pallets=items, loose=loose, per_pallet=per_pallet)
+
+
+MVB_PALLET_STICKERS_MAX = 100
+
+
+def _create_pallet_stickers():
+    """«Создать стикеры паллет»: N пустых паллет без направления и PDF их
+    стикеров. Направление паллета получает от первого отсканированного
+    на нее короба."""
+    try:
+        count = int(request.form.get("count") or 0)
+    except ValueError:
+        count = 0
+    if not 1 <= count <= MVB_PALLET_STICKERS_MAX:
+        flash(f"Укажите количество стикеров от 1 до {MVB_PALLET_STICKERS_MAX}", "danger")
+        return redirect(url_for("mvb.pallets"))
+    created = []
+    for _ in range(count):
+        pallet = MvbPallet(number=next_number("mvb_pallet", "PLT-", 6), marketplace="", created_by_id=current_user.id)
+        db.session.add(pallet)
+        created.append(pallet)
+    db.session.commit()
+    pdf = build_labels_batch_pdf(
+        [(p.number, p.number, "Паллета МВБ") for p in created], title_font_size=12, max_img_h_ratio=0.6,
+    )
+    name = created[0].number + (f"-{created[-1].number}" if len(created) > 1 else "")
+    return Response(pdf, mimetype="application/pdf",
+                    headers={"Content-Disposition": content_disposition(f"{name}.pdf", "inline")})
+
+
+def _open_pallets():
+    """Паллеты на складе, куда еще можно добавлять короба: ни один их короб
+    не погружен (пустые — тоже)."""
+    return [
+        p for p in MvbPallet.query.order_by(MvbPallet.id).all()
+        if not any(b.status in ("loaded", "shipped", "delivered") or b.trip_id for b in p.boxes)
+    ]
+
+
+def _loose_rows(per_pallet):
+    """Строки «Короба без паллеты»: сколько коробов, какие паллеты этого
+    направления уже созданы и ждут скана, и сколько паллет еще создать."""
+    rows = []
+    for key, boxes in _loose_groups().items():
+        line = boxes[0].line
+        rows.append({"key": key, "line": line, "label": line.label(), "slot_date": line.slot_date, "count": len(boxes)})
+    rows.sort(key=lambda r: (_slot_sort(r["slot_date"]), r["label"]))
+    free = {p.id: max(0, per_pallet - len(p.boxes)) for p in _open_pallets()}
+    open_pallets = [p for p in _open_pallets()]
+    for r in rows:
+        mine = [p for p in open_pallets if free[p.id] > 0 and _same_direction(r["line"], p.marketplace, p.destination)]
+        left = r["count"]
+        used = []
+        for p in mine:
+            if left <= 0:
+                break
+            take = min(left, free[p.id])
+            free[p.id] -= take
+            left -= take
+            used.append(p)
+        r["open_pallets"] = used
+        r["pallets"] = -(-left // per_pallet)
+    return rows
+
+
+def _loose_groups():
+    """Короба без паллеты по группам отгрузки (направление + дата слота)."""
+    groups = {}
+    for box in _unpalletized_query().order_by(MvbBox.order_id, MvbBox.id).all():
+        if box.line is None:
+            continue
+        groups.setdefault(_group_key(box.line), []).append(box)
+    return groups
 
 
 @bp.route("/pallets/<int:pallet_id>")
@@ -1335,10 +1718,13 @@ def pallet_detail(pallet_id):
     pallet = db.session.get(MvbPallet, pallet_id) or abort(404)
     # Все короба этого направления на складе (еще не погруженные) — те, что
     # уже на паллете, подсвечиваются.
-    ready = [
-        b for b in _ready_boxes_query().all()
-        if b.line is not None and _same_direction(b.line, pallet.marketplace, pallet.destination)
-    ]
+    if pallet.marketplace:
+        ready = [
+            b for b in _ready_boxes_query().all()
+            if b.line is not None and _same_direction(b.line, pallet.marketplace, pallet.destination)
+        ]
+    else:
+        ready = []  # пустой стикер: направление задаст первый короб
     ids = {b.id for b in ready}
     boxes = ready + [b for b in pallet.boxes if b.id not in ids]
     boxes.sort(key=lambda b: (b.order.number, b.seq))
@@ -1347,19 +1733,33 @@ def pallet_detail(pallet_id):
 
 @bp.route("/pallets/<int:pallet_id>/scan", methods=["POST"])
 def pallet_scan(pallet_id):
-    """Скан короба на паллету: только принятые на складе короба того же
-    направления, еще не погруженные; с другой паллеты короб переносится."""
+    """Скан короба на паллету: принятые на складе, еще не погруженные
+    короба любого направления; с другой паллеты короб переносится."""
     if not _is_staff():
         return jsonify(ok=False, message="Нет доступа"), 403
     pallet = db.session.get(MvbPallet, pallet_id) or abort(404)
     code = (request.form.get("barcode") or "").strip()
     box = MvbBox.query.filter(db.func.upper(MvbBox.barcode) == code.upper()).first()
     if box is None:
+        other = MvbPallet.query.filter(db.func.upper(MvbPallet.number) == code.upper()).first()
+        if other is not None:
+            # Отсканирован стикер другой паллеты — переходим к ней.
+            return jsonify(ok=True, already=True, message=f"Открываю паллету {other.number}",
+                           goto=url_for("mvb.pallet_detail", pallet_id=other.id))
         return jsonify(ok=False, message=f"Короб {code} не найден"), 404
     if box.status != "received":
         return jsonify(ok=False, message=f"Короб в статусе «{box.status_label}» — на паллету только принятые на складе"), 409
-    if not _same_direction(box.line, pallet.marketplace, pallet.destination):
-        return jsonify(ok=False, message=f"Другое направление: {box.line.label()}"), 409
+    if box.line is None:
+        return jsonify(ok=False, message=f"У короба {box.barcode} нет направления"), 409
+    assigned = False
+    if not pallet.boxes or not pallet.marketplace:
+        # Пустая паллета (новый стикер) подписывается направлением первого
+        # короба; короба других направлений тоже можно класть.
+        if box.pallet_id != pallet.id:
+            assigned = True
+            pallet.marketplace = box.line.marketplace
+            pallet.destination = (box.line.destination or "").strip() or None
+
     if box.pallet_id == pallet.id:
         return jsonify(ok=True, already=True, message=f"{box.barcode} уже на этой паллете", count=len(pallet.boxes),
                        barcode=box.barcode)
@@ -1372,7 +1772,9 @@ def pallet_scan(pallet_id):
     _recalc_pallet_costs(affected)
     db.session.commit()
     message = f"{box.barcode} → {pallet.number}" + (f" (снят с {moved_from})" if moved_from else "")
-    return jsonify(ok=True, already=False, message=message, count=len(pallet.boxes), barcode=box.barcode)
+    return jsonify(ok=True, already=False, message=message, count=len(pallet.boxes), barcode=box.barcode,
+                   box_order=box.order.number, box_client=box.order.client.name, box_direction=box.line.label(),
+                   assigned=assigned)
 
 
 MVB_PALLET_PRICE_KEY = "mvb_pallet_price"
@@ -1464,7 +1866,10 @@ def pallet_label_pdf(pallet_id):
     if not _require_staff():
         return redirect(url_for("mvb.index"))
     pallet = db.session.get(MvbPallet, pallet_id) or abort(404)
-    subtitle = f"{pallet.marketplace_label} · {pallet.destination or ''} · {len(pallet.boxes)} кор."
+    subtitle = (
+        f"{pallet.marketplace_label} · {pallet.destination or ''} · {len(pallet.boxes)} кор."
+        if pallet.marketplace else "Паллета МВБ"
+    )
     pdf = build_labels_batch_pdf([(pallet.number, pallet.number, subtitle)], title_font_size=12, max_img_h_ratio=0.6)
     return Response(
         pdf, mimetype="application/pdf",
@@ -1481,6 +1886,51 @@ def _ready_boxes_query():
         .filter(MvbBox.status == "received", MvbBox.trip_id.is_(None))
         .order_by(MvbBox.received_at, MvbBox.id)
     )
+
+
+def _pallet_in_active_trip(pallet):
+    trip = pallet.planned_trip
+    return trip is not None and trip.status in ACTIVE_TRIP_STATUSES
+
+
+def _dispatch_pallets(include_planned=False):
+    """«К отправке»: сформированные паллеты на складе (с непогруженными
+    коробами). Паллета, добавленная в рейс, остается на складе, пока ее не
+    отсканируют в машину: с include_planned такие паллеты тоже в списке
+    (с рейсом в row["trip"]). Сверху ближайший слот, затем самые давние."""
+    rows = {}
+    for box in _dispatch_boxes_query().all():
+        pallet = box.pallet
+        trip = None
+        if _pallet_in_active_trip(pallet):
+            trip = pallet.planned_trip
+        elif _line_in_active_trip(box.line):
+            trip = box.line.planned_trip
+        if trip is not None and not include_planned:
+            continue
+        row = rows.setdefault(pallet.id, {
+            "pallet": pallet, "boxes": 0, "clients": set(), "orders": set(), "slot_date": box.line.slot_date,
+            "oldest": box.received_at, "label": box.line.label(), "trip": None,
+        })
+        row["trip"] = row["trip"] or trip
+        row["boxes"] += 1
+        labels = row.setdefault("labels", [])
+        if box.line.label() not in labels:
+            labels.append(box.line.label())  # на паллете могут быть разные направления
+        row["label"] = " + ".join(labels)
+        row["clients"].add(box.order.client.name)
+        row["orders"].add(box.order.number)
+        if box.line.slot_date and (row["slot_date"] is None or box.line.slot_date < row["slot_date"]):
+            row["slot_date"] = box.line.slot_date
+        if box.received_at and (row["oldest"] is None or box.received_at < row["oldest"]):
+            row["oldest"] = box.received_at
+    return sorted(rows.values(), key=lambda r: (_slot_sort(r["slot_date"]), r["oldest"] or datetime.min, r["pallet"].id))
+
+
+def _dispatch_boxes_query():
+    """К отправке — только короба на сформированных паллетах (в машину
+    грузим только паллетами); короба без паллеты ждут палетирования."""
+    return _ready_boxes_query().filter(MvbBox.pallet_id.isnot(None))
 
 
 ACTIVE_TRIP_STATUSES = ("searching", "assigned", "arrived", "loading")
@@ -1516,7 +1966,7 @@ def _ready_groups():
     """Принятые и еще не погруженные короба по направлениям и датам слота;
     сверху ближайшие слоты, внутри — самые давние (FIFO)."""
     groups = {}
-    for box in _ready_boxes_query().all():
+    for box in _dispatch_boxes_query().all():
         line = box.line
         if _line_in_active_trip(line):
             continue
@@ -1539,7 +1989,7 @@ def _ready_order_items(selected=None):
     заявки едет целиком, поэтому компонуем рейсы ими. Порядок: ближайший
     слот, затем FIFO."""
     items = {}
-    for box in _ready_boxes_query().all():
+    for box in _dispatch_boxes_query().all():
         line = box.line
         if _line_in_active_trip(line):
             continue
@@ -1611,8 +2061,39 @@ def dispatch():
     proposal = _pack_orders(items, capacity) if capacity else []
     return render_template(
         "mvb/dispatch.html", rows=rows, capacity=capacity, capacities=capacities, total=total,
+        pallet_rows=_dispatch_pallets(include_planned=True),
+        unpalletized=_unpalletized_query().count(),
         total_vehicles=len(proposal) if capacity else None, proposal=proposal,
     )
+
+
+@bp.route("/dispatch/remove", methods=["POST"])
+def dispatch_remove():
+    """Администратор убирает строку из «К отправке»: короба этого
+    направления и слота снимаются с паллет и остаются на складе (их снова
+    видно в «Паллеты → Короба без паллеты»). Опустевшие паллеты удаляются."""
+    if not _require_manage():
+        return redirect(url_for("mvb.dispatch"))
+    key = request.form.get("key", "")
+    boxes = [
+        b for b in _dispatch_boxes_query().all()
+        if b.line is not None and _group_key(b.line) == key and not _line_in_active_trip(b.line)
+    ]
+    if not boxes:
+        flash("Строка уже убрана", "info")
+        return redirect(url_for("mvb.dispatch"))
+    pallets = {b.pallet for b in boxes if b.pallet is not None}
+    orders = {b.order for b in boxes}
+    for box in boxes:
+        box.pallet = None
+    db.session.flush()
+    for pallet in pallets:
+        if not pallet.boxes:
+            db.session.delete(pallet)
+    _recalc_pallet_costs(orders)
+    db.session.commit()
+    flash(f"Убрано из «К отправке»: {len(boxes)} кор. Короба на складе без паллеты", "success")
+    return redirect(url_for("mvb.dispatch"))
 
 
 @bp.route("/trips")
@@ -1653,6 +2134,8 @@ def trip_new():
     запоминаются как запланированные в него (planned_trip)."""
     if not _require_operator():
         return redirect(url_for("mvb.index"))
+    if request.form.getlist("pallet_id"):
+        return _trip_from_pallets(request.form.getlist("pallet_id", type=int))
     selected = set(request.form.getlist("dir"))
     groups = [g for g in _ready_groups() if g["key"] in selected or g["direction"] in selected]
     # Направление, для которого коробов уже нет (успели погрузить), все
@@ -1671,7 +2154,7 @@ def trip_new():
     capacity = request.form.get("capacity", type=int) or 0
     created = []
     if not _ready_order_items(selected) and any(
-        _line_in_active_trip(box.line) and _selected_match(selected, box.line) for box in _ready_boxes_query().all()
+        _line_in_active_trip(box.line) and _selected_match(selected, box.line) for box in _dispatch_boxes_query().all()
     ):
         # Повторное нажатие / второй рейс на те же заявки — не дублируем.
         flash("Эти направления уже в рейсе — второй рейс не создан", "warning")
@@ -1729,6 +2212,42 @@ def trip_new():
     return redirect(url_for("mvb.trips", status="searching"))
 
 
+def _trip_from_pallets(pallet_ids):
+    """«Создать рейс» по отмеченным в «К отправке» паллетам: точки маршрута —
+    направления паллет, паллеты и их заявки запоминаются в рейсе (кладовщик
+    на погрузке видит этот список паллет). Статус — «Поиск авто»."""
+    rows = {r["pallet"].id: r for r in _dispatch_pallets()}
+    chosen = [rows[pid] for pid in pallet_ids if pid in rows]
+    if not chosen:
+        flash("Эти паллеты уже в рейсе или погружены — рейс не создан", "warning")
+        return redirect(url_for("mvb.dispatch"))
+    trip = MvbTrip(
+        number=next_number("mvb_trip", "RS-", 6), planned_boxes=0, status="searching", created_by_id=current_user.id,
+    )
+    db.session.add(trip)
+    slots = set()
+    for row in chosen:
+        pallet = row["pallet"]
+        pallet.planned_trip = trip
+        # На паллете могут быть короба разных направлений — точка на каждое.
+        for box in pallet.boxes:
+            if box.status == "received" and box.trip_id is None and box.line is not None:
+                stop = _add_stop(trip, box.line.marketplace, box.line.destination)
+                stop.planned_boxes += 1
+                trip.planned_boxes += 1
+                box.line.planned_trip = trip
+                slots.add(box.line.slot_date)
+    trip.slot_date = next(iter(slots)) if len(slots) == 1 else None
+    if len(slots) > 1:
+        flash("В рейсе паллеты с разными датами слота — проверьте, успеете ли сдать все", "warning")
+    db.session.commit()
+    flash(
+        f"Рейс {trip.number} создан: {len(chosen)} пал., {trip.planned_boxes} кор. · {trip.route_label()} — статус «Поиск авто»",
+        "success",
+    )
+    return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
+
+
 def _get_trip_or_404(trip_id):
     trip = db.session.get(MvbTrip, trip_id)
     if trip is None:
@@ -1754,7 +2273,8 @@ def trip_detail(trip_id):
     return render_template(
         "mvb/trip_detail.html", trip=trip, ready=ready,
         driver_link=url_for("mvb.trip_public", token=trip.access_token, _external=True) if _is_operator() else None,
-        vehicles=MvbVehicle.query.filter_by(is_active=True).order_by(MvbVehicle.plate).all() if _is_operator() else [],
+        vehicles=MvbVehicle.query.filter(MvbVehicle.driver_id.is_(None), MvbVehicle.is_active.is_(True))
+        .order_by(MvbVehicle.plate).all() if _is_operator() else [],
         drivers=_active_drivers() if _is_operator() else [],
     )
 
@@ -1776,16 +2296,43 @@ def trip_add_stop(trip_id):
     return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
 
 
+def _depart_trip(trip, now):
+    """Рейс уходит в путь: погруженные короба — «В пути на СЦ», точки без
+    коробов убираются из маршрута."""
+    trip.status = "departed"
+    trip.load_finished_at = trip.load_finished_at or now
+    trip.departed_at = now
+    for stop in list(trip.stops):
+        if not stop.boxes:
+            trip.stops.remove(stop)
+            db.session.delete(stop)
+    for box in trip.boxes:
+        if box.status == "loaded":
+            _move_box(box, "shipped", now)
+    _sync_wms_shipped({box.order for box in trip.boxes}, now)
+
+
+def _trip_can_deliver(trip):
+    """Можно отмечать «Сдан на СЦ»: рейс в пути или погрузка идет и в
+    машине уже есть короба (кладовщик забыл «Завершить погрузку» — первая
+    отметка водителя сама отправит рейс)."""
+    return trip.status == "departed" or (trip.status in ("arrived", "loading") and bool(trip.boxes))
+
+
 def _apply_stop_result(trip, stop, action, comment):
     """Итог на точке: «Сдано на СЦ» (deliver) или «Не сдано» с причиной
     (reject — короба возвращаются на склад МВБ). Возвращает (категория,
     сообщение) для flash."""
-    if trip.status != "departed" or stop.result:
+    if not _trip_can_deliver(trip) or stop.result:
         return "warning", "Эта точка уже отмечена или рейс еще не в пути"
     comment = (comment or "").strip()
     if action == "reject" and not comment:
         return "danger", "Укажите причину, почему не сдано"
     now = datetime.utcnow()
+    if trip.status != "departed":
+        if not stop.boxes:
+            return "warning", "На эту точку в машине нет коробов"
+        _depart_trip(trip, now)
     stop.result = "delivered" if action == "deliver" else "rejected"
     stop.delivered_at = now
     stop.delivered_by_id = current_user.id if current_user.is_authenticated else None
@@ -1851,6 +2398,8 @@ def trip_plan(trip_id):
         abort(400)
     vehicle_id = request.form.get("vehicle_id", type=int)
     vehicle = db.session.get(MvbVehicle, vehicle_id) if vehicle_id else None
+    # Машина выбирается из «Машин для СЦ»; ее госномер, модель и вместимость
+    # подставляются в рейс, если оператор не вписал свои.
     driver_id = request.form.get("driver_id", type=int)
     trip.vehicle = vehicle
     driver = db.session.get(User, driver_id) if driver_id else (vehicle.driver if vehicle else None)
@@ -1862,11 +2411,11 @@ def trip_plan(trip_id):
     trip.planned_load_end_at = _local_to_utc(request.form.get("planned_load_end_at"))
     trip.comment = request.form.get("comment", "").strip() or None
     # Наемный водитель (обычно случайный) — без учетной записи.
-    trip.driver_name = request.form.get("driver_name", "").strip() or None
-    trip.driver_phone = request.form.get("driver_phone", "").strip() or None
-    trip.car_plate = request.form.get("car_plate", "").strip().upper() or None
-    trip.car_model = request.form.get("car_model", "").strip() or None
-    trip.capacity_boxes = request.form.get("capacity_boxes", type=int) or None
+    trip.driver_name = request.form.get("driver_name", "").strip() or (vehicle.driver_name if vehicle else None)
+    trip.driver_phone = request.form.get("driver_phone", "").strip() or (vehicle.driver_phone if vehicle else None)
+    trip.car_plate = request.form.get("car_plate", "").strip().upper() or (vehicle.plate.upper() if vehicle else None)
+    trip.car_model = request.form.get("car_model", "").strip() or (vehicle.model if vehicle else None)
+    trip.capacity_boxes = request.form.get("capacity_boxes", type=int) or (vehicle.capacity_boxes if vehicle else None) or None
     if not trip.access_token:
         trip.access_token = secrets.token_urlsafe(16)
     if trip.has_transport() and trip.status == "searching":
@@ -1929,16 +2478,7 @@ def trip_action(trip_id, action):
             if request.form.get("back") == "loading":
                 return redirect(url_for("mvb.loading_trip", trip_id=trip.id))
             return redirect(url_for("mvb.trip_detail", trip_id=trip.id))
-        trip.status = "departed"
-        trip.load_finished_at = now
-        trip.departed_at = now
-        for stop in list(trip.stops):
-            if not stop.boxes:
-                db.session.delete(stop)
-        for box in trip.boxes:
-            if box.status == "loaded":
-                _move_box(box, "shipped", now)
-        _sync_wms_shipped({box.order for box in trip.boxes}, now)
+        _depart_trip(trip, now)
     elif action == "cancel" and trip.status in TRIP_EDITABLE_STATUSES:
         if not _is_operator():
             abort(403)
@@ -1968,8 +2508,9 @@ def trip_action(trip_id, action):
 
 @bp.route("/trips/<int:trip_id>/scan", methods=["POST"])
 def trip_scan(trip_id):
-    """Погрузка сканом (кладовщик): короб или паллета целиком; короб
-    попадает на точку маршрута своего направления. Первый скан сам отмечает
+    """Погрузка сканом (кладовщик): только паллетами — скан паллеты или
+    любого ее короба грузит паллету целиком; короб без паллеты не грузится.
+    Короба попадают на точку маршрута своего направления. Первый скан сам отмечает
     начало погрузки. Сверх вместимости авто — предупреждение."""
     if not _is_staff():
         return jsonify(ok=False, message="Нет доступа"), 403
@@ -1993,14 +2534,27 @@ def trip_scan(trip_id):
             return jsonify(ok=True, already=True, message=f"{box.barcode} уже в этом рейсе", count=len(trip.boxes))
         if box.status != "received" or box.trip_id is not None:
             return jsonify(ok=False, message=f"Короб в статусе «{box.status_label}»"), 409
-        boxes = [box]
+        if box.pallet is None:
+            # Без паллеты короба в машину не грузим.
+            return jsonify(
+                ok=False,
+                message=f"{box.barcode} не на паллете — сначала поставьте короб на паллету, грузим только паллеты",
+            ), 409
+        # Скан короба с паллеты грузит всю его паллету.
+        pallet = box.pallet
+        boxes = [b for b in pallet.boxes if b.status == "received" and b.trip_id is None]
         order, line = box.order, box.line
-    stop = trip.stop_for(line.marketplace, line.destination)
-    if stop is None:
-        return jsonify(
-            ok=False,
-            message=f"Направления «{line.label()}» нет в маршруте — добавьте точку",
-        ), 409
+    stops = {}
+    for b in boxes:
+        b_stop = trip.stop_for(b.line.marketplace, b.line.destination) if b.line is not None else None
+        if b_stop is None:
+            label = b.line.label() if b.line is not None else b.barcode
+            return jsonify(
+                ok=False,
+                message=f"Направления «{label}» нет в маршруте — добавьте точку",
+            ), 409
+        stops[b.id] = b_stop
+    stop = stops[boxes[0].id]
 
     if trip.status != "loading":
         trip.status = "loading"
@@ -2008,12 +2562,13 @@ def trip_scan(trip_id):
         trip.load_started_at = now
     for box in boxes:
         box.trip = trip
-        box.trip_stop = stop
+        box.trip_stop = stops[box.id]
         _move_box(box, "loaded", now)
     db.session.commit()
     count = len(trip.boxes)
     message = (
-        f"Паллета {pallet.number}: погружено {len(boxes)} кор. → {stop.label()}" if pallet is not None
+        f"Паллета {pallet.number}: погружено {len(boxes)} кор. → {', '.join(dict.fromkeys(st.label() for st in stops.values()))}"
+        if pallet is not None
         else f"{boxes[0].barcode} погружен → {stop.label()}"
     )
     warnings = []
@@ -2024,10 +2579,13 @@ def trip_scan(trip_id):
         warnings.append(f"на точку «{stop.label()}» по плану {stop.planned_boxes} кор., погружено {len(stop.boxes)}")
     if trip.slot_date and line.slot_date and line.slot_date != trip.slot_date:
         warnings.append(f"слот заявки {line.slot_date.strftime('%d.%m')}, а рейса {trip.slot_date.strftime('%d.%m')}")
-    if line.planned_trip_id and line.planned_trip_id != trip.id:
+    if pallet is not None and pallet.planned_trip_id and pallet.planned_trip_id != trip.id:
+        warnings.append(f"паллета {pallet.number} запланирована в рейс {pallet.planned_trip.number}")
+    elif line.planned_trip_id and line.planned_trip_id != trip.id:
         warnings.append(f"заявка {order.number} ({line.short_label()}) запланирована в рейс {line.planned_trip.number}")
     warning = ("Внимание: " + "; ".join(warnings)) if warnings else None
-    return jsonify(ok=True, already=False, message=message, count=count, warning=warning, loaded=len(trip.boxes))
+    return jsonify(ok=True, already=False, message=message, count=count, warning=warning, loaded=len(trip.boxes),
+                   pallet=pallet.number if pallet is not None else None)
 
 
 # ---------- ссылка для водителя на СЦ (без входа) ----------
@@ -2074,7 +2632,17 @@ def loading_trip(trip_id):
     if trip.status not in LOADING_STATUSES:
         flash(f"Рейс {trip.number}: {trip.status_label}", "info")
         return redirect(url_for("mvb.loading"))
-    return render_template("mvb/loading_trip.html", trip=trip)
+    # Паллеты к погрузке: запланированные в этот рейс из «К отправке» и уже
+    # погруженные в него.
+    pallets = {p.id: p for p in MvbPallet.query.filter_by(planned_trip_id=trip.id).all()}
+    for box in trip.boxes:
+        if box.pallet is not None:
+            pallets.setdefault(box.pallet.id, box.pallet)
+    rows = []
+    for pallet in sorted(pallets.values(), key=lambda p: p.number):
+        loaded = sum(1 for b in pallet.boxes if b.trip_id == trip.id)
+        rows.append({"pallet": pallet, "boxes": len(pallet.boxes), "loaded": loaded and loaded == len(pallet.boxes)})
+    return render_template("mvb/loading_trip.html", trip=trip, pallet_rows=rows)
 
 
 # Ссылка водителя действует, пока рейс в работе, и еще сутки после

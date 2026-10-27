@@ -397,7 +397,12 @@ def list_nomenclature():
     # (Основной, Склад №2 (Шоссейная 167)) — считаем только для позиций
     # текущей страницы, чтобы не тянуть остаток по всему каталогу на
     # каждую загрузку страницы.
-    stock_warehouses = _stock_warehouses()
+    if current_user.is_fulfillment_only():
+        # Номенклатура общая, а остаток фулфилмент видит только своего
+        # склада (см. чат) — чужие склады в колонки не попадают.
+        stock_warehouses = [current_user.warehouse] if current_user.warehouse else []
+    else:
+        stock_warehouses = _stock_warehouses()
     item_ids = [item.id for item in pagination.items]
     stock_by_item_warehouse = (
         _stock_by_item_and_warehouse(item_ids, [wh.id for wh in stock_warehouses])

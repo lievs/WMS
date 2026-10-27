@@ -24,17 +24,7 @@ def _warehouse(code, name="Основной"):
 
 
 def _fulfillment(username, warehouse, suffix=""):
-    # nomenclature_edit_allowed=False — как и выставляет
-    # auth.create_user/update_role для этой роли (см. FULFILLMENT_SECTIONS);
-    # конструируем модель напрямую, а не через маршрут, поэтому значение
-    # нужно проставить здесь тоже.
-    user = User(
-        username=username,
-        is_admin=False,
-        role="fulfillment",
-        warehouse_id=warehouse.id,
-        nomenclature_edit_allowed=False,
-    )
+    user = User(username=username, is_admin=False, role="fulfillment", warehouse_id=warehouse.id)
     user.set_password("password123")
     db.session.add(user)
     db.session.commit()
@@ -71,9 +61,6 @@ def test_create_user_fulfillment_sets_allowed_sections(client_logged_in, db):
     assert created.role == "fulfillment"
     assert created.warehouse_id == wh.id
     assert created.allowed_sections == "receiving,movement,nomenclature"
-    # Видит общий каталог, но не должен его редактировать (см. чат:
-    # "видели номенклатуру общую" — не "правили").
-    assert created.nomenclature_edit_allowed is False
 
 
 def test_update_role_to_fulfillment_requires_warehouse(client_logged_in, db):
@@ -95,7 +82,6 @@ def test_update_role_to_fulfillment_requires_warehouse(client_logged_in, db):
     updated = User.query.get(target.id)
     assert updated.role == "fulfillment"
     assert updated.allowed_sections == "receiving,movement,nomenclature"
-    assert updated.nomenclature_edit_allowed is False
 
 
 def test_fulfillment_sees_only_own_warehouse_sections_in_menu(db, client):
@@ -107,11 +93,8 @@ def test_fulfillment_sees_only_own_warehouse_sections_in_menu(db, client):
     nav = html.split("</nav>")[0]
     assert "Приемка" in nav
     assert "Перемещение" in nav
-    # Номенклатура (общий каталог, только на чтение) и Короба (печать
-    # своих этикеток) — см. чат: "видели номенклатуру общую", "печатать
-    # стикеры для своих коробов".
-    assert "Номенклатура" in nav
-    assert "Короба" in nav
+    assert "Номенклатура" in nav  # общая номенклатура — только просмотр
+    assert "Мой склад (короба)" in nav
     assert "Размещение" not in nav
     assert "Инвентаризация" not in nav
     assert "Отчеты" not in nav
@@ -122,48 +105,10 @@ def test_fulfillment_blocked_from_other_sections_by_direct_url(db, client):
     user = _fulfillment("ff-direct", wh)
     _login(client, user)
 
-    for path in ("/placement/", "/inventory/", "/warehouses/", "/reports/"):
+    for path in ("/placement/", "/inventory/", "/warehouses/", "/reports/", "/nomenclature/locate", "/boxes/export.xlsx", "/boxes/bulk-create"):
         resp = client.get(path)
         assert resp.status_code == 302
         assert resp.headers["Location"].endswith("/")
-
-
-def test_fulfillment_sees_shared_nomenclature_catalog(db, client):
-    """Видит общий каталог номенклатуры (не только своего склада — товары
-    сквозные для всех складов), но не может его редактировать."""
-    wh = _warehouse("WH-FF-NOM", "ЦЕХ Марат")
-    item = Nomenclature(sku="FF-NOM-1", barcode="7779990010", name="Товар каталога", unit="шт")
-    db.session.add(item)
-    db.session.commit()
-    user = _fulfillment("ff-nom", wh)
-    _login(client, user)
-
-    resp = client.get("/nomenclature/")
-    assert resp.status_code == 200
-    assert "Товар каталога" in resp.get_data(as_text=True)
-
-    # Серверная проверка — не только скрытая кнопка в шаблоне
-    # (см. nomenclature._require_edit).
-    resp = client.post(
-        f"/nomenclature/{item.id}/category", data={"category_id": ""}, follow_redirects=True
-    )
-    assert "вам не разрешено" in resp.get_data(as_text=True)
-
-
-def test_fulfillment_can_search_nomenclature_via_api(db, client):
-    """Автокомплит добавления строки в приемку (см. app.js) ходит сюда —
-    без доступа строка не нашла бы товар вообще (чат: "при приемке
-    подтягивалась вся номенклатура")."""
-    wh = _warehouse("WH-FF-API", "ЦЕХ Марат")
-    item = Nomenclature(sku="FF-API-1", barcode="7779990011", name="Товар для поиска", unit="шт")
-    db.session.add(item)
-    db.session.commit()
-    user = _fulfillment("ff-api", wh)
-    _login(client, user)
-
-    resp = client.get("/api/nomenclature/search?q=поиска")
-    assert resp.status_code == 200
-    assert any(row["id"] == item.id for row in resp.get_json())
 
 
 def test_fulfillment_sees_receiving_of_own_warehouse_from_any_author(db, client):
@@ -270,51 +215,3 @@ def test_stock_report_shows_tsekh_marat_as_third_warehouse(db, client_logged_in)
 
     html = client_logged_in.get("/nomenclature/").get_data(as_text=True)
     assert "ЦЕХ Марат" in html
-
-
-def test_fulfillment_can_print_own_box_label_but_not_others(db, client):
-    """"Печатать стикеры для своих коробов" (см. чат) — доступ только к
-    этикеткам коробов своего склада, чужой склад — 404."""
-    wh = _warehouse("WH-FF-BOX", "ЦЕХ Марат")
-    other_wh = _warehouse("WH-FF-BOX-OTHER", "Основной склад")
-    own_box = Box(box_number="BOX-FF-OWN", warehouse_id=wh.id, status="open")
-    foreign_box = Box(box_number="BOX-FF-FOREIGN", warehouse_id=other_wh.id, status="open")
-    db.session.add_all([own_box, foreign_box])
-    db.session.commit()
-    user = _fulfillment("ff-box", wh)
-    _login(client, user)
-
-    assert client.get(f"/boxes/{own_box.id}").status_code == 200
-    assert client.get(f"/labels/box/{own_box.id}").status_code == 200
-    assert client.get(f"/labels/box/{own_box.id}.pdf").status_code == 200
-
-    assert client.get(f"/boxes/{foreign_box.id}").status_code == 404
-    assert client.get(f"/labels/box/{foreign_box.id}").status_code == 404
-    assert client.get(f"/labels/box/{foreign_box.id}.pdf").status_code == 404
-    assert client.get(f"/labels/boxes/batch.pdf?ids={foreign_box.id}").status_code == 404
-
-
-def test_fulfillment_box_list_forced_to_own_warehouse(db, client):
-    wh = _warehouse("WH-FF-LIST", "ЦЕХ Марат")
-    other_wh = _warehouse("WH-FF-LIST-OTHER", "Основной склад")
-    own_box = Box(box_number="BOX-FF-LIST-OWN", warehouse_id=wh.id, status="open")
-    foreign_box = Box(box_number="BOX-FF-LIST-FOREIGN", warehouse_id=other_wh.id, status="open")
-    db.session.add_all([own_box, foreign_box])
-    db.session.commit()
-    user = _fulfillment("ff-list", wh)
-    _login(client, user)
-
-    # Даже если подставить чужой склад в адрес вручную — список все равно
-    # фильтруется своим складом (см. boxes.list_boxes).
-    html = client.get(f"/boxes/?warehouse_id={other_wh.id}").get_data(as_text=True)
-    assert "BOX-FF-LIST-OWN" in html
-    assert "BOX-FF-LIST-FOREIGN" not in html
-
-
-def test_fulfillment_cannot_bulk_create_or_export_boxes(db, client):
-    wh = _warehouse("WH-FF-NOEXP", "ЦЕХ Марат")
-    user = _fulfillment("ff-noexp", wh)
-    _login(client, user)
-
-    assert client.get("/boxes/export.xlsx").status_code == 302
-    assert client.get("/boxes/bulk-create").status_code == 302
